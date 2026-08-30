@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760" role="img" aria-labelledby="title desc">
+  <title id="title">3つのpluginが所有するもの</title>
+  <desc id="desc">agent-roles、agent-fleet-core、agent-fleet-herdrの所有境界と、YAML、各SQLite、live Herdrの関係を示す構成図</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#344054"/>
+    </marker>
+    <style>
+      .title { font: 700 28px -apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif; fill:#172033 }
+      .heading { font: 700 22px -apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif; fill:#172033 }
+      .body { font: 500 17px -apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif; fill:#344054 }
+      .small { font: 500 15px -apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif; fill:#5c6c82 }
+      .tag { font: 700 15px ui-monospace,SFMono-Regular,Menlo,monospace; fill:#172033 }
+      .arrow { stroke:#344054; stroke-width:2.5; fill:none; marker-end:url(#arrow) }
+      .contract { stroke:#245f9e; stroke-width:3; stroke-dasharray:10 8; fill:none; marker-end:url(#arrow) }
+    </style>
+  </defs>
+  <rect width="1280" height="760" fill="#f7f9fc"/>
+  <text x="64" y="60" class="title">役割・司令・現場を別のpluginが所有する</text>
+  <text x="64" y="90" class="small">読む方向: 左から右　｜　実線: 入出力　｜　破線: CLI / JSON契約</text>
+
+  <rect x="60" y="135" width="330" height="300" rx="20" fill="#f4ebff" stroke="#9e77ed" stroke-width="3"/>
+  <text x="88" y="177" class="heading">職務表</text>
+  <text x="88" y="211" class="tag">agent-roles</text>
+  <rect x="88" y="240" width="274" height="142" rx="12" fill="#ffffff" stroke="#d6bbfb" stroke-width="2"/>
+  <text x="110" y="275" class="body">Role Catalog YAML</text>
+  <text x="110" y="310" class="small">manager / worker / advisor</text>
+  <text x="110" y="338" class="small">reviewer / researcher</text>
+  <text x="110" y="367" class="small">責務・禁止・関係</text>
+  <text x="88" y="414" class="small">paneもtaskも知らない</text>
+
+  <rect x="475" y="135" width="330" height="500" rx="20" fill="#eaf2fb" stroke="#3974b8" stroke-width="3"/>
+  <text x="503" y="177" class="heading">司令室と台帳</text>
+  <text x="503" y="211" class="tag">agent-fleet-core</text>
+  <rect x="503" y="240" width="274" height="112" rx="12" fill="#ffffff" stroke="#9fc3e7" stroke-width="2"/>
+  <text x="525" y="275" class="body">Fleet YAML</text>
+  <text x="525" y="307" class="small">member / task / manager</text>
+  <text x="525" y="334" class="small">desired state</text>
+  <path d="M640 352 L640 386" class="arrow"/>
+  <rect x="503" y="390" width="274" height="148" rx="12" fill="#ffffff" stroke="#9fc3e7" stroke-width="2"/>
+  <text x="525" y="425" class="body">Core SQLite</text>
+  <text x="525" y="458" class="small">fleet / member / task</text>
+  <text x="525" y="486" class="small">event / outbox</text>
+  <text x="525" y="519" class="small">pane IDは保存しない</text>
+  <text x="503" y="587" class="small">Herdr操作権限を持たない</text>
+  <text x="503" y="612" class="small">manager agentとCoreは別物</text>
+
+  <rect x="890" y="135" width="330" height="500" rx="20" fill="#eaf8f0" stroke="#2f8f62" stroke-width="3"/>
+  <text x="918" y="177" class="heading">作業現場の案内係</text>
+  <text x="918" y="211" class="tag">agent-fleet-herdr</text>
+  <rect x="918" y="240" width="274" height="148" rx="12" fill="#ffffff" stroke="#9bd7b9" stroke-width="2"/>
+  <text x="940" y="275" class="body">Adapter SQLite</text>
+  <text x="940" y="308" class="small">RuntimeBinding</text>
+  <text x="940" y="336" class="small">ViewPlacement</text>
+  <text x="940" y="369" class="small">ここだけpane IDを持つ</text>
+  <path d="M1055 388 L1055 422" class="arrow"/>
+  <rect x="918" y="426" width="274" height="112" rx="12" fill="#ffffff" stroke="#9bd7b9" stroke-width="2"/>
+  <text x="940" y="461" class="body">live Herdr</text>
+  <text x="940" y="494" class="small">workspace / tab / pane</text>
+  <text x="940" y="522" class="small">agent start / prompt</text>
+  <text x="918" y="587" class="small">Herdr操作はdry-runが既定</text>
+  <text x="918" y="612" class="small">実行には明示的な--execute</text>
+
+  <path d="M390 292 L475 292" class="arrow"/>
+  <text x="405" y="274" class="small">role_ref</text>
+  <path d="M805 322 L890 322" class="contract"/>
+  <text x="847" y="301" text-anchor="middle" class="small">CLI / JSON</text>
+
+  <rect x="60" y="675" width="1160" height="52" rx="12" fill="#172033"/>
+  <text x="640" y="708" text-anchor="middle" style="font:700 18px -apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sans-serif;fill:#ffffff">
+    Coreは「誰が何をするか」、Herdr adapterは「どのpaneで動くか」を担当する
+  </text>
+</svg>
