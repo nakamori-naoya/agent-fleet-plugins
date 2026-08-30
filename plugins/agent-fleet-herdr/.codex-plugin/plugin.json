@@ -1,0 +1,18 @@
+{
+  "name": "agent-fleet-herdr",
+  "version": "0.1.0",
+  "description": "Agent FleetのRuntime/View操作をHerdr 0.8へ変換するadapter",
+  "author": {
+    "name": "NaoyaNakamori"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agent Fleet Herdr",
+    "shortDescription": "Agent fleetをHerdr paneへ配置・bindする",
+    "longDescription": "Fleet Coreの公開JSON契約をHerdr 0.8のworkspace、tab、pane、agent操作へ変換し、RuntimeBindingとViewPlacementをadapter側へ保持する。",
+    "developerName": "NaoyaNakamori",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": "agent-fleet-herdrを使い、dry-runでHerdr上のagent fleet編成計画を確認してください。"
+  }
+}

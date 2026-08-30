@@ -1,0 +1,13 @@
+version: 1
+herdr:
+  binary: herdr
+  compatible_minor: "0.8"
+  prompt_timeout_ms: 30000
+execution:
+  default: dry-run
+  retry_unknown_timeout: false
+view:
+  profile: command-deck
+  manager_ratio: 0.32
+state:
+  database: ${XDG_STATE_HOME}/agent-fleet/herdr.sqlite3

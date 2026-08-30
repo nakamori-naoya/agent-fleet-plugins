@@ -1,0 +1,34 @@
+version: 1
+workspace:
+  use_worktree: false
+  require_clean_start: true
+  base_branch: main
+  branch_prefix: agent/
+  worktree_root: ""
+git:
+  remote: origin
+permissions:
+  commit: true
+  push: true
+  pull_request: true
+  merge: true
+gates:
+  before_commit: false
+  before_push: false
+  before_pull_request: false
+  before_merge: false
+verification:
+  commands: ["bash scripts/validate.sh"]
+pull_request:
+  draft: true
+merge:
+  method: squash
+  delete_branch: false
+  delete_worktree: false
+  readiness:
+    min_approvals: 0
+    require_checks_passed: true
+    require_no_unresolved_threads: true
+instructions:
+  execution:
+    directive: MVPの境界を保ち、全検証成功後だけcommit・push・PR作成を行う

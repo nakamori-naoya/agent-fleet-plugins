@@ -1,0 +1,92 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://agent-fleet.local/schema/envelopes.schema.yml
+title: Agent Fleet command and event envelopes
+oneOf:
+  - $ref: "#/$defs/commandEnvelope"
+  - $ref: "#/$defs/eventEnvelope"
+$defs:
+  nonEmptyString:
+    type: string
+    minLength: 1
+  metadata:
+    type: object
+    additionalProperties: false
+    required: [id, fleet_id, timestamp]
+    properties:
+      id:
+        $ref: "#/$defs/nonEmptyString"
+      fleet_id:
+        $ref: "#/$defs/nonEmptyString"
+      timestamp:
+        type: string
+        format: date-time
+      correlation_id:
+        $ref: "#/$defs/nonEmptyString"
+      causation_id:
+        $ref: "#/$defs/nonEmptyString"
+  target:
+    type: object
+    additionalProperties: false
+    required: [type]
+    properties:
+      type:
+        enum: [fleet, member, task, runtime, view]
+      ref:
+        $ref: "#/$defs/nonEmptyString"
+  source:
+    type: object
+    additionalProperties: false
+    required: [type]
+    properties:
+      type:
+        enum: [fleet, member, task, runtime, view, provider, system]
+      ref:
+        $ref: "#/$defs/nonEmptyString"
+  commandEnvelope:
+    description: A requested action. It contains intent, not execution state.
+    type: object
+    additionalProperties: false
+    required: [apiVersion, kind, metadata, spec]
+    properties:
+      apiVersion:
+        const: fleet.harness/v1
+      kind:
+        const: Command
+      metadata:
+        $ref: "#/$defs/metadata"
+      spec:
+        type: object
+        additionalProperties: false
+        required: [source, target, type, payload]
+        properties:
+          source:
+            $ref: "#/$defs/source"
+          target:
+            $ref: "#/$defs/target"
+          type:
+            $ref: "#/$defs/nonEmptyString"
+          payload:
+            type: object
+  eventEnvelope:
+    description: A fact that occurred. Consumers must not interpret it as a command.
+    type: object
+    additionalProperties: false
+    required: [apiVersion, kind, metadata, spec]
+    properties:
+      apiVersion:
+        const: fleet.harness/v1
+      kind:
+        const: Event
+      metadata:
+        $ref: "#/$defs/metadata"
+      spec:
+        type: object
+        additionalProperties: false
+        required: [source, type, payload]
+        properties:
+          source:
+            $ref: "#/$defs/source"
+          type:
+            $ref: "#/$defs/nonEmptyString"
+          payload:
+            type: object

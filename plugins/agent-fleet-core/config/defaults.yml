@@ -1,0 +1,11 @@
+version: 1
+state:
+  database: ${XDG_STATE_HOME}/agent-fleet/core.sqlite3
+commands:
+  allowed: [fleet.provision, task.assign, message.send, task.report, fleet.reconcile]
+delivery:
+  retry_unknown_timeout: false
+scope:
+  daemon: false
+  multi_host: false
+  fleet_gateway: false

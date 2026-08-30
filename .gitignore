@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.sqlite3
+
+# Repository-root allowlist
+/*
+!/.agents/
+!/.claude-plugin/
+!/.harness-plugins/
+!/plugins/
+!/scripts/
+!/AGENTS.md
+!/README.md
+!/.gitignore

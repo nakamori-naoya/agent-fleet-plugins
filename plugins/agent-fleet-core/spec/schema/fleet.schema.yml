@@ -1,0 +1,109 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://agent-fleet.local/schema/fleet.schema.yml
+title: Agent Fleet specification
+type: object
+additionalProperties: false
+required: [apiVersion, kind, metadata, spec]
+properties:
+  apiVersion:
+    const: fleet.harness/v1
+  kind:
+    const: Fleet
+  metadata:
+    type: object
+    additionalProperties: false
+    required: [id]
+    properties:
+      id:
+        $ref: "#/$defs/nonEmptyString"
+  spec:
+    type: object
+    additionalProperties: false
+    required: [objective, members, tasks, collaboration, runtime, view]
+    properties:
+      objective:
+        $ref: "#/$defs/nonEmptyString"
+      members:
+        type: array
+        minItems: 1
+        items:
+          $ref: "#/$defs/agentInstance"
+      tasks:
+        type: array
+        items:
+          $ref: "#/$defs/taskAssignment"
+      collaboration:
+        $ref: "#/$defs/collaboration"
+      runtime:
+        $ref: "#/$defs/runtimeBinding"
+      view:
+        $ref: "#/$defs/viewPlacement"
+$defs:
+  nonEmptyString:
+    type: string
+    minLength: 1
+  agentInstance:
+    description: A fleet member instance; it is not a reusable RoleDefinition.
+    type: object
+    additionalProperties: false
+    required: [agent_ref, role_ref]
+    properties:
+      agent_ref:
+        $ref: "#/$defs/nonEmptyString"
+      role_ref:
+        type: string
+        pattern: ^(manager|advisor|worker|reviewer|researcher)@[1-9][0-9]*$
+      model:
+        $ref: "#/$defs/nonEmptyString"
+  taskAssignment:
+    description: A declarative assignment; it is not task execution state.
+    type: object
+    additionalProperties: false
+    required: [id, assignee, depends_on, instructions]
+    properties:
+      id:
+        $ref: "#/$defs/nonEmptyString"
+      assignee:
+        $ref: "#/$defs/nonEmptyString"
+      depends_on:
+        type: array
+        uniqueItems: true
+        items:
+          $ref: "#/$defs/nonEmptyString"
+      instructions:
+        $ref: "#/$defs/nonEmptyString"
+  collaboration:
+    type: object
+    additionalProperties: false
+    required: [manager, reporting]
+    properties:
+      manager:
+        description: Exactly one agent_ref.
+        $ref: "#/$defs/nonEmptyString"
+      advisor:
+        $ref: "#/$defs/nonEmptyString"
+      reporting:
+        type: object
+        additionalProperties: false
+        required: [strategy, include_task_updates]
+        properties:
+          strategy:
+            enum: [manager, direct]
+          include_task_updates:
+            type: boolean
+  runtimeBinding:
+    description: Requested runtime binding, never live process or session state.
+    type: object
+    additionalProperties: false
+    required: [provider]
+    properties:
+      provider:
+        const: herdr
+  viewPlacement:
+    description: Requested presentation placement, never a concrete pane identifier.
+    type: object
+    additionalProperties: false
+    required: [profile]
+    properties:
+      profile:
+        const: command-deck

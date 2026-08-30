@@ -1,0 +1,13 @@
+apiVersion: fleet.harness/v1
+kind: FleetDefaults
+metadata:
+  id: mvp
+spec:
+  collaboration:
+    reporting:
+      strategy: manager
+      include_task_updates: true
+  runtime:
+    provider: herdr
+  view:
+    profile: command-deck
