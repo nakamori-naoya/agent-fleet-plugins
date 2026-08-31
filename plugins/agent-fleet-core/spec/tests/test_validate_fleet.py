@@ -45,6 +45,19 @@ class FleetValidatorTest(unittest.TestCase):
     def test_example_is_valid(self) -> None:
         self.assertEqual([], validator.validate_document(self.valid))
 
+    def test_requires_fleet_and_task_completion_contracts(self) -> None:
+        def mutate(doc):
+            del doc["spec"]["completion_criteria"]
+            del doc["spec"]["stop_conditions"]
+            del doc["spec"]["tasks"][0]["expected_output"]
+            del doc["spec"]["tasks"][0]["completion_criteria"]
+
+        errors = self.errors_for(mutate)
+        self.assertIn("spec.completion_criteria: is required", errors)
+        self.assertIn("spec.stop_conditions: is required", errors)
+        self.assertIn("spec.tasks[0].expected_output: is required", errors)
+        self.assertIn("spec.tasks[0].completion_criteria: is required", errors)
+
     def test_cli_emits_normalized_json(self) -> None:
         result = subprocess.run(
             [sys.executable, str(VALIDATOR_PATH), str(EXAMPLE_PATH), "--output-json"],
@@ -242,14 +255,32 @@ class FleetValidatorTest(unittest.TestCase):
         )
         self.assertIn("spec.view.pane_id: is not allowed", errors)
 
-    def test_requires_command_deck_view_profile(self) -> None:
+    def test_requires_versioned_view_profile_reference(self) -> None:
         def old_layout(doc):
             doc["spec"]["view"] = {"layout": "tiled"}
 
         errors = self.errors_for(old_layout)
-        self.assertIn("spec.view.profile: is required", errors)
+        self.assertIn("spec.view.profile_ref: is required", errors)
         self.assertIn("spec.view.layout: is not allowed", errors)
-        self.assertIn("spec.view.profile: must be 'command-deck'", errors)
+
+        for invalid in ("command-deck", "command-deck@0", "../deck@1", "deck@latest"):
+            with self.subTest(profile_ref=invalid):
+                errors = self.errors_for(
+                    lambda doc, ref=invalid: doc["spec"]["view"].__setitem__(
+                        "profile_ref", ref
+                    )
+                )
+                self.assertTrue(
+                    any("spec.view.profile_ref: must match" in error for error in errors)
+                )
+
+    def test_core_accepts_unknown_but_well_formed_view_profile_reference(self) -> None:
+        errors = self.errors_for(
+            lambda doc: doc["spec"]["view"].__setitem__(
+                "profile_ref", "local/team-grid@9"
+            )
+        )
+        self.assertEqual([], errors)
 
     def test_rejects_role_definition_or_task_state_fields(self) -> None:
         def mutate(doc):

@@ -1,11 +1,11 @@
 ---
 name: control-agent-fleet
-description: YAML Fleet Specを検査し、logical agent、task、typed command、eventをSQLiteで管理する。Herdr paneの作成やUI配置には使わない。
+description: YAML Fleet Specを検査し、論理エージェント、タスク、型付き指示、出来事をSQLiteで管理する。Herdr paneの作成やUI配置には使わない。
 ---
 
 # control-agent-fleet
 
-Fleet Specはdesired state、SQLiteは実行時のlogical stateとして分ける。pane ID、workspace ID、tab ID、UI geometryをCore DBへ保存しない。
+Fleet Specはdesired state、SQLiteは実行時のlogical stateとして分ける。viewは版固定`profile_ref`だけを持ち、Coreはその形式だけを検査する。pane ID、workspace ID、tab ID、比率、UI geometryをCore DBへ保存しない。
 
 ## Fleet Specを検査する
 
@@ -22,12 +22,12 @@ python3 "${PLUGIN_ROOT}/spec/scripts/validate_fleet.py" fleet.yml --output-json
 
 - `fleet.provision`: 検査済みSpecからlogical fleetを初期化する
 - `task.assign`: managerがtaskをlogical agentへ割り当てる
-- `message.send`: managerがlogical agent宛てのtyped commandをoutboxへ積む
+- `message.send`: マネージャーが論理エージェント宛ての型付き指示を配送待ちへ積む
 - `task.report`: 割当済みagentが`--agent-ref`を示し、running、blocked、completed、failedを明示報告する
 - `fleet.reconcile`: current state、event、pending outboxを返す
 
-task完了をpane output、idle、doneから推測しない。terminal reportには検証結果またはblocked理由を含める。prompt timeoutで配送状態が不明なcommandを自動再送しない。
+タスク完了をpaneの出力、待機表示、完了表示から推測しない。終端報告には検証結果または停止理由を含める。入力送信の時間切れで配送状態が不明な指示を自動再送しない。
 
 ## Adapterとの境界
 
-Herdr Adapterへは`fleet.harness/v1`のCommand envelopeだけを渡す。相手pluginのinstall pathを探索・importしない。Runtime/View操作が必要なら`agent-fleet-herdr`を別途使う。
+Herdr Adapterへは`fleet.harness/v1`の指示JSONだけを渡す。相手pluginの導入先を探索・importしない。実行環境や表示の操作が必要なら`agent-fleet-herdr`を別途使う。

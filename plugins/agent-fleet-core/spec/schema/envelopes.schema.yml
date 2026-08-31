@@ -42,6 +42,74 @@ $defs:
         enum: [fleet, member, task, runtime, view, provider, system]
       ref:
         $ref: "#/$defs/nonEmptyString"
+  roleContext:
+    description: The complete, revisioned role context for the target member.
+    type: object
+    additionalProperties: false
+    required: [fleet_id, context_revision, agent, fleet, assignments, reporting]
+    properties:
+      fleet_id:
+        $ref: "#/$defs/nonEmptyString"
+      context_revision:
+        type: integer
+        minimum: 1
+      agent:
+        type: object
+        additionalProperties: false
+        required: [agent_ref, role_ref]
+        properties:
+          agent_ref:
+            $ref: "#/$defs/nonEmptyString"
+          role_ref:
+            $ref: "#/$defs/nonEmptyString"
+      fleet:
+        type: object
+        additionalProperties: false
+        required: [objective, completion_criteria, stop_conditions]
+        properties:
+          objective:
+            $ref: "#/$defs/nonEmptyString"
+          completion_criteria:
+            type: array
+            minItems: 1
+            items:
+              $ref: "#/$defs/nonEmptyString"
+          stop_conditions:
+            type: array
+            minItems: 1
+            items:
+              $ref: "#/$defs/nonEmptyString"
+      assignments:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [task_id, status, instructions, expected_output, completion_criteria]
+          properties:
+            task_id:
+              $ref: "#/$defs/nonEmptyString"
+            status:
+              $ref: "#/$defs/nonEmptyString"
+            instructions:
+              $ref: "#/$defs/nonEmptyString"
+            expected_output:
+              $ref: "#/$defs/nonEmptyString"
+            completion_criteria:
+              type: array
+              minItems: 1
+              items:
+                $ref: "#/$defs/nonEmptyString"
+      reporting:
+        type: object
+        additionalProperties: false
+        required: [manager_ref, strategy, completion_requires_manager_acceptance]
+        properties:
+          manager_ref:
+            $ref: "#/$defs/nonEmptyString"
+          strategy:
+            const: manager
+          completion_requires_manager_acceptance:
+            const: true
   commandEnvelope:
     description: A requested action. It contains intent, not execution state.
     type: object
@@ -57,7 +125,7 @@ $defs:
       spec:
         type: object
         additionalProperties: false
-        required: [source, target, type, payload]
+        required: [source, target, type, payload, context]
         properties:
           source:
             $ref: "#/$defs/source"
@@ -67,6 +135,8 @@ $defs:
             $ref: "#/$defs/nonEmptyString"
           payload:
             type: object
+          context:
+            $ref: "#/$defs/roleContext"
   eventEnvelope:
     description: A fact that occurred. Consumers must not interpret it as a command.
     type: object

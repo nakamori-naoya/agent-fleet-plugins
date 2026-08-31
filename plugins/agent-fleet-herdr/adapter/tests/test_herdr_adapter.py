@@ -5,10 +5,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 
 MODULE_PATH = Path(__file__).parents[1] / "herdr_adapter.py"
+sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("herdr_adapter", MODULE_PATH)
 herdr_adapter = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
@@ -45,7 +47,25 @@ FLEET = {
         ],
         "collaboration": {"manager": "manager-1"},
         "runtime": {"provider": "herdr"},
-        "view": {"profile": "command-deck"},
+        "view": {"profile_ref": "builtin/command-deck@1"},
+    },
+}
+
+VIEW_PROFILE = {
+    "apiVersion": "fleet.herdr.harness/v1",
+    "kind": "ViewProfile",
+    "metadata": {"id": "builtin/command-deck", "version": 1},
+    "spec": {
+        "constraints": {"min_members": 2, "max_members": 5},
+        "layout": {
+            "type": "split",
+            "direction": "horizontal",
+            "children": [
+                {"type": "slot", "selector": "manager", "weight": 32, "pane_slot": "left"},
+                {"type": "stack", "selector": "non-manager", "weight": 68,
+                 "direction": "vertical", "distribution": "equal", "pane_slot_prefix": "right"},
+            ],
+        },
     },
 }
 
@@ -65,11 +85,18 @@ class HerdrAdapterTest(unittest.TestCase):
         placement = self.state.place_view("worker-1", "main", "workers", "right", {"rank": 1})
         self.assertEqual("right", placement["pane_slot"])
 
+    def test_same_agent_ref_in_two_fleets_resolves_to_each_fleets_pane(self):
+        self.state.bind("worker-shared", "wa", "ta", "pa", fleet_id="fleet-a")
+        self.state.bind("worker-shared", "wb", "tb", "pb", fleet_id="fleet-b")
+
+        self.assertEqual("pa", self.state.resolve("worker-shared", "fleet-a").pane_id)
+        self.assertEqual("pb", self.state.resolve("worker-shared", "fleet-b").pane_id)
+
     def test_provision_dry_run_is_deterministic_command_deck_plan(self):
         runner = FakeRunner([])
         adapter = herdr_adapter.HerdrAdapter(self.state, runner=runner)
-        first = adapter.provision(FLEET, "/repo", "codex")
-        second = adapter.provision(FLEET, "/repo", "codex")
+        first = adapter.provision(FLEET, "/repo", "codex", VIEW_PROFILE)
+        second = adapter.provision(FLEET, "/repo", "codex", VIEW_PROFILE)
         self.assertEqual(first, second)
         self.assertEqual("dry-run", first["mode"])
         self.assertEqual([], runner.calls)
@@ -86,6 +113,65 @@ class HerdrAdapterTest(unittest.TestCase):
         self.assertEqual("down", operations[4]["argv"][5])
         self.assertEqual("left", first["plan"]["placements"][0]["pane_slot"])
         self.assertEqual("right.2", first["plan"]["placements"][2]["pane_slot"])
+        self.assertEqual("builtin/command-deck@1", first["plan"]["profile_ref"])
+
+    def test_layout_tree_compiles_equal_three_member_stack_to_sequential_ratios(self):
+        fleet = json.loads(json.dumps(FLEET))
+        fleet["spec"]["members"].append(
+            {"agent_ref": "worker-3", "role_ref": "worker@1"}
+        )
+        adapter = herdr_adapter.HerdrAdapter(self.state, runner=FakeRunner([]))
+        plan = adapter.provision(fleet, "/repo", "codex", VIEW_PROFILE)["plan"]
+        splits = [
+            operation
+            for operation in plan["operations"]
+            if operation["id"].startswith("pane.split:")
+        ]
+        self.assertIn(str(2 / 3), splits[1]["argv"])
+        self.assertIn("0.5", splits[2]["argv"])
+
+    def test_provision_rejects_profile_identity_mismatch(self):
+        profile = json.loads(json.dumps(VIEW_PROFILE))
+        profile["metadata"]["version"] = 2
+        adapter = herdr_adapter.HerdrAdapter(self.state, runner=FakeRunner([]))
+        with self.assertRaisesRegex(herdr_adapter.HerdrAdapterError, "does not match"):
+            adapter.provision(FLEET, "/repo", "codex", profile)
+
+    def _save_existing_fleet(self):
+        for index, agent_ref in enumerate(("manager-1", "worker-1", "worker-2")):
+            self.state.bind(
+                agent_ref,
+                "w-existing",
+                "t-existing",
+                f"p-existing-{index}",
+                fleet_id="demo-fleet",
+            )
+            self.state.place_view(
+                agent_ref,
+                "demo-fleet",
+                "builtin/command-deck@1",
+                "left" if index == 0 else f"right.{index}",
+                fleet_id="demo-fleet",
+                profile_ref="builtin/command-deck@1",
+            )
+
+    def test_provision_is_idempotent_for_same_existing_profile_and_members(self):
+        self._save_existing_fleet()
+        runner = FakeRunner([])
+        adapter = herdr_adapter.HerdrAdapter(self.state, runner=runner)
+        result = adapter.provision(FLEET, "/repo", "codex", VIEW_PROFILE, execute=True)
+        self.assertEqual("already_provisioned", result["status"])
+        self.assertEqual([], runner.calls)
+
+    def test_provision_rejects_existing_fleet_with_different_profile(self):
+        self._save_existing_fleet()
+        fleet = json.loads(json.dumps(FLEET))
+        fleet["spec"]["view"]["profile_ref"] = "builtin/command-deck@2"
+        profile = json.loads(json.dumps(VIEW_PROFILE))
+        profile["metadata"]["version"] = 2
+        adapter = herdr_adapter.HerdrAdapter(self.state, runner=FakeRunner([]))
+        with self.assertRaisesRegex(herdr_adapter.HerdrAdapterError, "Profile conflict"):
+            adapter.provision(fleet, "/repo", "codex", profile, execute=True)
 
     def test_provision_execute_parses_ids_and_saves_bindings_and_views(self):
         workspace = json.dumps(
@@ -108,17 +194,17 @@ class HerdrAdapterTest(unittest.TestCase):
             ]
         )
         adapter = herdr_adapter.HerdrAdapter(self.state, runner=runner)
-        result = adapter.provision(FLEET, "/repo", "codex", execute=True)
+        result = adapter.provision(FLEET, "/repo", "codex", VIEW_PROFILE, execute=True)
         self.assertEqual("provisioned", result["status"])
-        self.assertEqual("p-manager", self.state.resolve("manager-1").pane_id)
-        self.assertEqual("p-worker-1", self.state.resolve("worker-1").pane_id)
-        self.assertEqual("p-worker-2", self.state.resolve("worker-2").pane_id)
+        self.assertEqual("p-manager", self.state.resolve("manager-1", "demo-fleet").pane_id)
+        self.assertEqual("p-worker-1", self.state.resolve("worker-1", "demo-fleet").pane_id)
+        self.assertEqual("p-worker-2", self.state.resolve("worker-2", "demo-fleet").pane_id)
         self.assertEqual(
             ["herdr", "agent", "start", "manager-1", "--kind", "codex", "--pane", "p-manager"],
             runner.calls[1][0],
         )
         self.assertEqual("p-worker-1", runner.calls[4][0][3])
-        with sqlite3.connect(self.state.db_path) as db:
+        with closing(sqlite3.connect(self.state.db_path)) as db:
             placements = db.execute(
                 "SELECT agent_ref,pane_slot FROM view_placements ORDER BY agent_ref"
             ).fetchall()
@@ -127,20 +213,203 @@ class HerdrAdapterTest(unittest.TestCase):
             placements,
         )
 
+    def test_provision_retries_agent_start_when_new_split_pane_is_temporarily_busy(self):
+        workspace = json.dumps(
+            {
+                "result": {
+                    "workspace": {"workspace_id": "w-created"},
+                    "tab": {"tab_id": "t-created"},
+                    "root_pane": {"pane_id": "p-manager"},
+                }
+            }
+        )
+        runner = FakeRunner(
+            [
+                completed(stdout=workspace),
+                completed(stdout="started"),
+                completed(stdout=json.dumps({"result": {"pane": {"pane_id": "p-worker-1"}}})),
+                completed(returncode=1, stderr="agent_pane_busy"),
+                completed(stdout="started"),
+                completed(stdout=json.dumps({"result": {"pane": {"pane_id": "p-worker-2"}}})),
+                completed(stdout="started"),
+            ]
+        )
+        retry_delays = []
+        adapter = herdr_adapter.HerdrAdapter(
+            self.state, runner=runner, sleeper=retry_delays.append
+        )
+
+        result = adapter.provision(FLEET, "/repo", "codex", VIEW_PROFILE, execute=True)
+
+        self.assertEqual("provisioned", result["status"])
+        worker_1_start = [
+            call for call, _ in runner.calls if call[:4] == ["herdr", "agent", "start", "worker-1"]
+        ]
+        worker_2_start = [
+            call for call, _ in runner.calls if call[:4] == ["herdr", "agent", "start", "worker-2"]
+        ]
+        self.assertEqual(2, len(worker_1_start))
+        self.assertEqual(1, len(worker_2_start))
+        self.assertEqual([1.0], retry_delays)
+
+    def test_provision_stops_retrying_new_split_pane_after_three_busy_results(self):
+        workspace = json.dumps(
+            {
+                "result": {
+                    "workspace": {"workspace_id": "w-created"},
+                    "tab": {"tab_id": "t-created"},
+                    "root_pane": {"pane_id": "p-manager"},
+                }
+            }
+        )
+        runner = FakeRunner(
+            [
+                completed(stdout=workspace),
+                completed(stdout="started"),
+                completed(stdout=json.dumps({"result": {"pane": {"pane_id": "p-worker-1"}}})),
+                completed(returncode=1, stderr="agent_pane_busy"),
+                completed(returncode=1, stderr="agent_pane_busy"),
+                completed(returncode=1, stderr="agent_pane_busy"),
+            ]
+        )
+        retry_delays = []
+        adapter = herdr_adapter.HerdrAdapter(
+            self.state, runner=runner, sleeper=retry_delays.append
+        )
+
+        with self.assertRaisesRegex(herdr_adapter.HerdrAdapterError, "agent_pane_busy"):
+            adapter.provision(FLEET, "/repo", "codex", VIEW_PROFILE, execute=True)
+
+        worker_starts = [
+            call for call, _ in runner.calls if call[:4] == ["herdr", "agent", "start", "worker-1"]
+        ]
+        self.assertEqual(3, len(worker_starts))
+        self.assertEqual([1.0, 1.0], retry_delays)
+
+    def test_provision_does_not_retry_manager_start_on_existing_root_pane(self):
+        workspace = json.dumps(
+            {
+                "result": {
+                    "workspace": {"workspace_id": "w-created"},
+                    "tab": {"tab_id": "t-created"},
+                    "root_pane": {"pane_id": "p-manager"},
+                }
+            }
+        )
+        runner = FakeRunner(
+            [
+                completed(stdout=workspace),
+                completed(returncode=1, stderr="agent_pane_busy"),
+            ]
+        )
+        adapter = herdr_adapter.HerdrAdapter(self.state, runner=runner)
+
+        with self.assertRaisesRegex(herdr_adapter.HerdrAdapterError, "agent_pane_busy"):
+            adapter.provision(FLEET, "/repo", "codex", VIEW_PROFILE, execute=True)
+
+        manager_starts = [
+            call for call, _ in runner.calls if call[:4] == ["herdr", "agent", "start", "manager-1"]
+        ]
+        self.assertEqual(1, len(manager_starts))
+
+    def test_provision_does_not_retry_other_new_pane_start_errors(self):
+        workspace = json.dumps(
+            {
+                "result": {
+                    "workspace": {"workspace_id": "w-created"},
+                    "tab": {"tab_id": "t-created"},
+                    "root_pane": {"pane_id": "p-manager"},
+                }
+            }
+        )
+        runner = FakeRunner(
+            [
+                completed(stdout=workspace),
+                completed(stdout="started"),
+                completed(stdout=json.dumps({"result": {"pane": {"pane_id": "p-worker-1"}}})),
+                completed(returncode=1, stderr="server unavailable"),
+            ]
+        )
+        adapter = herdr_adapter.HerdrAdapter(self.state, runner=runner)
+
+        with self.assertRaisesRegex(herdr_adapter.HerdrAdapterError, "server unavailable"):
+            adapter.provision(FLEET, "/repo", "codex", VIEW_PROFILE, execute=True)
+
+        worker_starts = [
+            call for call, _ in runner.calls if call[:4] == ["herdr", "agent", "start", "worker-1"]
+        ]
+        self.assertEqual(1, len(worker_starts))
+
     def test_provision_unparseable_output_does_not_save_new_bindings(self):
         runner = FakeRunner([completed(stdout='{"result":{"workspace":{}}}')])
         adapter = herdr_adapter.HerdrAdapter(self.state, runner=runner)
         with self.assertRaisesRegex(herdr_adapter.HerdrAdapterError, "bindings were not saved"):
-            adapter.provision(FLEET, "/repo", "codex", execute=True)
+            adapter.provision(FLEET, "/repo", "codex", VIEW_PROFILE, execute=True)
         with self.assertRaisesRegex(herdr_adapter.HerdrAdapterError, "is not bound"):
-            self.state.resolve("manager-1")
+            self.state.resolve("manager-1", "demo-fleet")
 
     def test_provision_rejects_unvalidated_runtime_or_view_contract(self):
         invalid = json.loads(json.dumps(FLEET))
-        invalid["spec"]["view"] = {"profile": "tiled"}
+        invalid["spec"]["view"] = {"profile_ref": "local/tiled@1"}
         adapter = herdr_adapter.HerdrAdapter(self.state, runner=FakeRunner([]))
-        with self.assertRaisesRegex(herdr_adapter.HerdrAdapterError, "command-deck"):
-            adapter.provision(invalid, "/repo", "codex")
+        with self.assertRaisesRegex(herdr_adapter.HerdrAdapterError, "does not match"):
+            adapter.provision(invalid, "/repo", "codex", VIEW_PROFILE)
+
+    def test_status_is_read_only_and_reports_profile_bindings_and_placements(self):
+        self.state.bind(
+            "worker-status", "w-status", "t-status", "p-status", fleet_id="demo"
+        )
+        self.state.place_view(
+            "worker-status",
+            "main",
+            "members",
+            "right.1",
+            {"profile_ref": "builtin/command-deck@1"},
+            fleet_id="demo",
+            profile_ref="builtin/command-deck@1",
+        )
+        before = Path(self.state.db_path).read_bytes()
+        status = self.state.status("demo")
+        after = Path(self.state.db_path).read_bytes()
+        self.assertEqual(before, after)
+        self.assertEqual("builtin/command-deck@1", status["profile_ref"])
+        self.assertEqual("worker-status", status["bindings"][0]["agent_ref"])
+        self.assertEqual("worker-status", status["placements"][0]["agent_ref"])
+
+    def test_cli_status_uses_existing_adapter_state(self):
+        self.state.bind("worker-status", "ws", "ts", "ps", fleet_id="demo-status")
+        self.assertEqual(
+            0,
+            herdr_adapter.main(
+                ["--state-db", self.state.db_path, "status", "--fleet", "demo-status"]
+            ),
+        )
+
+    def test_provision_dry_run_does_not_create_requested_state_database(self):
+        state_path = Path(self.temp.name) / "missing" / "herdr.sqlite3"
+        self.assertEqual(
+            0,
+            herdr_adapter.main(
+                [
+                    "--state-db",
+                    str(state_path),
+                    "provision",
+                    "--fleet-json",
+                    json.dumps(FLEET),
+                    "--view-profile-json",
+                    json.dumps(VIEW_PROFILE),
+                    "--cwd",
+                    "/repo",
+                    "--agent-kind",
+                    "codex",
+                ]
+            ),
+        )
+        self.assertFalse(state_path.exists())
+        self.assertFalse(state_path.parent.exists())
+
+    def test_command_types_include_context_sync(self):
+        self.assertIn("context.sync", herdr_adapter.COMMAND_TYPES)
 
     def test_dry_run_is_default_and_does_not_call_runner(self):
         runner = FakeRunner([])
@@ -211,6 +480,8 @@ class HerdrAdapterTest(unittest.TestCase):
                     "bind",
                     "--agent-ref",
                     "worker-json",
+                    "--fleet",
+                    "demo",
                     "--workspace",
                     "w1",
                     "--tab",

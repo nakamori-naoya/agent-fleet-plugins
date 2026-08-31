@@ -10,4 +10,4 @@ spec:
   runtime:
     provider: herdr
   view:
-    profile: command-deck
+    profile_ref: builtin/command-deck@1

@@ -1,0 +1,21 @@
+apiVersion: fleet.herdr.harness/v1
+kind: ViewProfile
+metadata:
+  id: local/development-focus
+  version: 1
+spec:
+  constraints:
+    min_members: 2
+    max_members: 5
+  layout:
+    type: split
+    direction: horizontal
+    children:
+      - type: slot
+        selector: manager
+        weight: 36
+      - type: stack
+        selector: non-manager
+        weight: 64
+        direction: vertical
+        distribution: equal

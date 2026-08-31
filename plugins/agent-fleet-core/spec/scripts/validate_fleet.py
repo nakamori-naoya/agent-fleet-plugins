@@ -19,6 +19,9 @@ class FleetLoadError(Exception):
 ROLE_REF_PATTERN = re.compile(
     r"^(manager|advisor|worker|reviewer|researcher)@[1-9][0-9]*$"
 )
+VIEW_PROFILE_REF_PATTERN = re.compile(
+    r"^[a-z][a-z0-9-]*(?:/[a-z][a-z0-9-]*)?@[1-9][0-9]*$"
+)
 
 
 def _load_with_ruby(path: Path) -> Any:
@@ -97,6 +100,14 @@ def _string(value: Any, path: str, errors: list[str]) -> None:
         errors.append(f"{path}: must be a non-empty string")
 
 
+def _string_list(value: Any, path: str, errors: list[str]) -> None:
+    if not isinstance(value, list) or not value:
+        errors.append(f"{path}: must be a non-empty list")
+        return
+    for index, item in enumerate(value):
+        _string(item, f"{path}[{index}]", errors)
+
+
 def _members(value: Any, errors: list[str]) -> dict[str, str]:
     path = "spec.members"
     if not isinstance(value, list):
@@ -155,13 +166,33 @@ def _tasks(value: Any, members_by_ref: dict[str, str], errors: list[str]) -> Non
         _keys(
             task,
             task_path,
-            {"id", "assignee", "depends_on", "instructions"},
-            {"id", "assignee", "depends_on", "instructions"},
+            {
+                "id",
+                "assignee",
+                "depends_on",
+                "instructions",
+                "expected_output",
+                "completion_criteria",
+            },
+            {
+                "id",
+                "assignee",
+                "depends_on",
+                "instructions",
+                "expected_output",
+                "completion_criteria",
+            },
             errors,
         )
-        for field in ("id", "assignee", "instructions"):
+        for field in ("id", "assignee", "instructions", "expected_output"):
             if field in task:
                 _string(task[field], f"{task_path}.{field}", errors)
+        if "completion_criteria" in task:
+            _string_list(
+                task["completion_criteria"],
+                f"{task_path}.completion_criteria",
+                errors,
+            )
 
         task_id = task.get("id")
         if _non_empty_string(task_id):
@@ -280,8 +311,8 @@ def _collaboration(
         {"strategy", "include_task_updates"},
         errors,
     )
-    if reporting.get("strategy") not in {"manager", "direct"}:
-        errors.append(f"{reporting_path}.strategy: must be 'manager' or 'direct'")
+    if reporting.get("strategy") != "manager":
+        errors.append(f"{reporting_path}.strategy: must be 'manager'")
     if "include_task_updates" in reporting and not isinstance(
         reporting["include_task_updates"], bool
     ):
@@ -303,9 +334,16 @@ def _view(value: Any, errors: list[str]) -> None:
     view = _mapping(value, path, errors)
     if view is None:
         return
-    _keys(view, path, {"profile"}, {"profile"}, errors)
-    if view.get("profile") != "command-deck":
-        errors.append(f"{path}.profile: must be 'command-deck'")
+    _keys(view, path, {"profile_ref"}, {"profile_ref"}, errors)
+    profile_ref = view.get("profile_ref")
+    if "profile_ref" in view:
+        _string(profile_ref, f"{path}.profile_ref", errors)
+    if _non_empty_string(profile_ref) and not VIEW_PROFILE_REF_PATTERN.fullmatch(
+        profile_ref
+    ):
+        errors.append(
+            f"{path}.profile_ref: must match '<namespace/>name@<positive-version>'"
+        )
 
 
 def validate_document(document: Any) -> list[str]:
@@ -338,12 +376,36 @@ def validate_document(document: Any) -> list[str]:
     _keys(
         fleet_spec,
         "spec",
-        {"objective", "members", "tasks", "collaboration", "runtime", "view"},
-        {"objective", "members", "tasks", "collaboration", "runtime", "view"},
+        {
+            "objective",
+            "completion_criteria",
+            "stop_conditions",
+            "members",
+            "tasks",
+            "collaboration",
+            "runtime",
+            "view",
+        },
+        {
+            "objective",
+            "completion_criteria",
+            "stop_conditions",
+            "members",
+            "tasks",
+            "collaboration",
+            "runtime",
+            "view",
+        },
         errors,
     )
     if "objective" in fleet_spec:
         _string(fleet_spec["objective"], "spec.objective", errors)
+    if "completion_criteria" in fleet_spec:
+        _string_list(
+            fleet_spec["completion_criteria"], "spec.completion_criteria", errors
+        )
+    if "stop_conditions" in fleet_spec:
+        _string_list(fleet_spec["stop_conditions"], "spec.stop_conditions", errors)
     members_by_ref = _members(fleet_spec.get("members"), errors)
     _tasks(fleet_spec.get("tasks"), members_by_ref, errors)
     _collaboration(fleet_spec.get("collaboration"), members_by_ref, errors)

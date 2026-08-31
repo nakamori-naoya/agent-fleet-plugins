@@ -1,0 +1,40 @@
+{
+  "description": "Agent Fleetの役割文脈をClaude Code sessionへ再注入する",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/role_context.py",
+              "--runtime-product",
+              "claude"
+            ],
+            "timeout": 3,
+            "statusMessage": "艦隊の役割文脈を確認しています"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/role_context.py",
+              "--runtime-product",
+              "claude"
+            ],
+            "timeout": 3,
+            "statusMessage": "艦隊の役割文脈を復元しています"
+          }
+        ]
+      }
+    ]
+  }
+}

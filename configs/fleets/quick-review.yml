@@ -1,0 +1,46 @@
+apiVersion: fleet.harness/v1
+kind: Fleet
+metadata:
+  id: quick-review
+spec:
+  objective: 小さな変更を実装し、独立レビューを通して短時間で完了判断する。
+  completion_criteria:
+    - 実装と検証の証拠がマネージャーへ集約されている。
+    - マネージャーが成果を受け入れている。
+  stop_conditions:
+    - 変更範囲が当初想定を超える。
+    - 破壊的操作または外部公開が必要になる。
+  members:
+    - agent_ref: manager
+      role_ref: manager@1
+    - agent_ref: worker
+      role_ref: worker@1
+    - agent_ref: reviewer
+      role_ref: reviewer@1
+  tasks:
+    - id: implement-and-verify
+      assignee: worker
+      depends_on: []
+      instructions: 要求をテスト駆動で実装し、利用者の操作経路まで検証する。
+      expected_output: 実装差分、テスト結果、残る制約。
+      completion_criteria:
+        - 要求を表すテストが成功している。
+        - 実際の操作経路が確認されている。
+    - id: review
+      assignee: reviewer
+      depends_on:
+        - implement-and-verify
+      instructions: 実装と検証証拠を独立に確認し、回帰や未達を指摘する。
+      expected_output: 受入可否と重要度付き指摘。
+      completion_criteria:
+        - 要求との対応関係が確認されている。
+        - 重大な指摘の有無が明記されている。
+  collaboration:
+    manager: manager
+    reporting:
+      strategy: manager
+      include_task_updates: true
+  runtime:
+    provider: herdr
+  view:
+    profile_ref: local/review-grid@1

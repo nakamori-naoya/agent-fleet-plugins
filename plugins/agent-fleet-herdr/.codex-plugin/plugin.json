@@ -6,6 +6,7 @@
     "name": "NaoyaNakamori"
   },
   "skills": "./skills/",
+  "hooks": "./hooks/codex-hooks.json",
   "interface": {
     "displayName": "Agent Fleet Herdr",
     "shortDescription": "Agent fleetをHerdr paneへ配置・bindする",

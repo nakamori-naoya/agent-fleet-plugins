@@ -1,0 +1,72 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://agent-fleet.local/schema/view-profile.schema.yml
+title: Herdr View Profile
+type: object
+additionalProperties: false
+required: [apiVersion, kind, metadata, spec]
+properties:
+  apiVersion:
+    const: fleet.herdr.harness/v1
+  kind:
+    const: ViewProfile
+  metadata:
+    type: object
+    additionalProperties: false
+    required: [id, version]
+    properties:
+      id:
+        type: string
+        pattern: ^[a-z][a-z0-9-]*(/[a-z][a-z0-9-]*)?$
+      version:
+        type: integer
+        minimum: 1
+  spec:
+    type: object
+    additionalProperties: false
+    required: [constraints, layout]
+    properties:
+      constraints:
+        type: object
+        additionalProperties: false
+        required: [min_members, max_members]
+        properties:
+          min_members: {type: integer, minimum: 1}
+          max_members: {type: integer, minimum: 1}
+      layout:
+        $ref: '#/$defs/layout'
+$defs:
+  positiveWeight: {type: integer, minimum: 1}
+  layout:
+    type: object
+    additionalProperties: false
+    required: [type, direction, children]
+    properties:
+      type: {const: split}
+      direction: {enum: [horizontal, vertical]}
+      children:
+        type: array
+        minItems: 2
+        maxItems: 2
+        prefixItems:
+          - $ref: '#/$defs/managerSlot'
+          - $ref: '#/$defs/memberStack'
+  managerSlot:
+    type: object
+    additionalProperties: false
+    required: [type, selector, weight]
+    properties:
+      type: {const: slot}
+      selector: {const: manager}
+      weight: {$ref: '#/$defs/positiveWeight'}
+      pane_slot: {type: string, minLength: 1}
+  memberStack:
+    type: object
+    additionalProperties: false
+    required: [type, selector, weight, direction, distribution]
+    properties:
+      type: {const: stack}
+      selector: {const: non-manager}
+      weight: {$ref: '#/$defs/positiveWeight'}
+      direction: {enum: [horizontal, vertical]}
+      distribution: {const: equal}
+      pane_slot_prefix: {type: string, minLength: 1}

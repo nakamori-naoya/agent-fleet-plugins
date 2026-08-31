@@ -1,0 +1,32 @@
+{
+  "description": "Agent Fleetの役割文脈をCodex sessionへ再注入する",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/role_context.py\" --runtime-product codex",
+            "timeout": 3,
+            "statusMessage": "艦隊の役割文脈を確認しています",
+            "additionalContextLimit": 5000
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/role_context.py\" --runtime-product codex",
+            "timeout": 3,
+            "statusMessage": "艦隊の役割文脈を復元しています",
+            "additionalContextLimit": 5000
+          }
+        ]
+      }
+    ]
+  }
+}

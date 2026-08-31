@@ -19,10 +19,14 @@ properties:
   spec:
     type: object
     additionalProperties: false
-    required: [objective, members, tasks, collaboration, runtime, view]
+    required: [objective, completion_criteria, stop_conditions, members, tasks, collaboration, runtime, view]
     properties:
       objective:
         $ref: "#/$defs/nonEmptyString"
+      completion_criteria:
+        $ref: "#/$defs/nonEmptyStringList"
+      stop_conditions:
+        $ref: "#/$defs/nonEmptyStringList"
       members:
         type: array
         minItems: 1
@@ -42,6 +46,11 @@ $defs:
   nonEmptyString:
     type: string
     minLength: 1
+  nonEmptyStringList:
+    type: array
+    minItems: 1
+    items:
+      $ref: "#/$defs/nonEmptyString"
   agentInstance:
     description: A fleet member instance; it is not a reusable RoleDefinition.
     type: object
@@ -59,7 +68,7 @@ $defs:
     description: A declarative assignment; it is not task execution state.
     type: object
     additionalProperties: false
-    required: [id, assignee, depends_on, instructions]
+    required: [id, assignee, depends_on, instructions, expected_output, completion_criteria]
     properties:
       id:
         $ref: "#/$defs/nonEmptyString"
@@ -72,6 +81,10 @@ $defs:
           $ref: "#/$defs/nonEmptyString"
       instructions:
         $ref: "#/$defs/nonEmptyString"
+      expected_output:
+        $ref: "#/$defs/nonEmptyString"
+      completion_criteria:
+        $ref: "#/$defs/nonEmptyStringList"
   collaboration:
     type: object
     additionalProperties: false
@@ -88,7 +101,7 @@ $defs:
         required: [strategy, include_task_updates]
         properties:
           strategy:
-            enum: [manager, direct]
+            const: manager
           include_task_updates:
             type: boolean
   runtimeBinding:
@@ -100,10 +113,11 @@ $defs:
       provider:
         const: herdr
   viewPlacement:
-    description: Requested presentation placement, never a concrete pane identifier.
+    description: Versioned logical presentation reference, never Herdr geometry or a file path.
     type: object
     additionalProperties: false
-    required: [profile]
+    required: [profile_ref]
     properties:
-      profile:
-        const: command-deck
+      profile_ref:
+        type: string
+        pattern: ^[a-z][a-z0-9-]*(/[a-z][a-z0-9-]*)?@[1-9][0-9]*$

@@ -4,6 +4,12 @@ metadata:
   id: release-readiness
 spec:
   objective: Determine whether the release candidate is ready to ship.
+  completion_criteria:
+    - Every declared task has evidence accepted by the manager.
+    - The manager records the final release-readiness decision.
+  stop_conditions:
+    - Delivery of an irreversible instruction becomes unknown.
+    - A required independent review cannot be completed.
   members:
     - agent_ref: manager-1
       role_ref: manager@1
@@ -17,14 +23,23 @@ spec:
       assignee: worker-1
       depends_on: []
       instructions: Run the release checks and record failures with reproduction steps.
+      expected_output: Release check results with reproduction evidence for every failure.
+      completion_criteria:
+        - All declared release checks have a recorded outcome.
     - id: review-evidence
       assignee: worker-2
       depends_on: [verify-candidate]
       instructions: Review the verification evidence and identify remaining release risks.
+      expected_output: An independent review of evidence gaps and release risks.
+      completion_criteria:
+        - Every claimed check result is confirmed or marked unverified.
     - id: decide-readiness
       assignee: manager-1
       depends_on: [review-evidence]
       instructions: Review the evidence and issue the release-readiness decision.
+      expected_output: A release-readiness decision with its evidence and remaining risks.
+      completion_criteria:
+        - The decision references the accepted verification and review evidence.
   collaboration:
     manager: manager-1
     reporting:
@@ -33,4 +48,4 @@ spec:
   runtime:
     provider: herdr
   view:
-    profile: command-deck
+    profile_ref: builtin/command-deck@1

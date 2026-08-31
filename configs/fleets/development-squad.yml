@@ -1,0 +1,70 @@
+apiVersion: fleet.harness/v1
+kind: Fleet
+metadata:
+  id: development-squad
+spec:
+  objective: 要求を安全に実装し、独立レビューを経て、マネージャーが完了を判断する。
+  completion_criteria:
+    - すべての作業が検証結果とともにマネージャーへ報告されている。
+    - レビュー指摘が解消され、マネージャーが成果を受け入れている。
+  stop_conditions:
+    - 破壊的変更または外部公開に追加承認が必要である。
+    - 要求と安全性を両立できない未解決事項がある。
+  members:
+    - agent_ref: manager
+      role_ref: manager@1
+    - agent_ref: worker-implementation
+      role_ref: worker@1
+    - agent_ref: worker-verification
+      role_ref: worker@1
+    - agent_ref: advisor
+      role_ref: advisor@1
+    - agent_ref: reviewer
+      role_ref: reviewer@1
+  tasks:
+    - id: architecture-advice
+      assignee: advisor
+      depends_on: []
+      instructions: 要求、制約、既存設計を調べ、実装判断とリスクをマネージャーへ報告する。
+      expected_output: 根拠、推奨案、反例を含む設計助言。
+      completion_criteria:
+        - 実装前に判断が必要な論点が列挙されている。
+        - 推奨案と採らない案の理由が示されている。
+    - id: implementation
+      assignee: worker-implementation
+      depends_on:
+        - architecture-advice
+      instructions: 合意された設計を小さな検証可能単位で実装する。
+      expected_output: 実装差分と実行した検証の結果。
+      completion_criteria:
+        - 要求を満たす自動テストが成功している。
+        - 無関係な変更を含まない。
+    - id: verification
+      assignee: worker-verification
+      depends_on:
+        - implementation
+      instructions: 利用者の操作経路で結合検証し、失敗条件と待ち時間を確認する。
+      expected_output: 再現可能な検証手順と観測結果。
+      completion_criteria:
+        - 正常系と主要な異常系が検証されている。
+        - 待ち時間と再試行の観測値が示されている。
+    - id: independent-review
+      assignee: reviewer
+      depends_on:
+        - implementation
+        - verification
+      instructions: 要求、設計、差分、検証証拠を独立に反証する。
+      expected_output: 重要度付き指摘と、受入可否の判断材料。
+      completion_criteria:
+        - 重大な見落としと回帰可能性が確認されている。
+        - 各指摘に根拠と修正条件がある。
+  collaboration:
+    manager: manager
+    advisor: advisor
+    reporting:
+      strategy: manager
+      include_task_updates: true
+  runtime:
+    provider: herdr
+  view:
+    profile_ref: local/development-focus@1
