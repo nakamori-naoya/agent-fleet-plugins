@@ -209,7 +209,7 @@ class ViewProfileCatalog:
         documents: list[Mapping[str, Any]] = []
         for directory in directories:
             if not directory.is_dir():
-                raise ViewProfileError(f"View Profile directory not found: {directory}")
+                continue
             for path in sorted((*directory.glob("*.yml"), *directory.glob("*.yaml"))):
                 document = _load_yaml(path)
                 if not isinstance(document, Mapping):

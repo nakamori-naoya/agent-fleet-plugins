@@ -661,10 +661,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    builtin_profiles = Path(__file__).resolve().parent.parent / "view-profiles"
     config_root = Path.home() / ".config" / "agent-fleet"
     fleet_dirs = args.fleet_dir or [config_root / "fleets"]
-    profile_dirs = [builtin_profiles, *(args.profile_dir or [config_root / "view-profiles"])]
+    profile_dirs = args.profile_dir or [config_root / "view-profiles"]
     runtime = FleetRuntime(
         [args.core_command], [args.herdr_command], [args.controller_command]
     )

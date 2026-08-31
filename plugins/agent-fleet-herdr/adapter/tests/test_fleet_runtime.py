@@ -3,7 +3,9 @@ import json
 import subprocess
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).parents[1] / "fleet_runtime.py"
@@ -153,6 +155,23 @@ class FleetRuntimeTest(unittest.TestCase):
         )
         result = runtime.list_configs([self.fleets], [self.profiles], self.state)
         self.assertEqual("fleet-runtime start review --execute", result[0]["start_command"])
+
+    def test_cli_defaults_only_to_user_configuration_directories(self):
+        runtime = mock.Mock()
+        runtime.list_configs.return_value = []
+        stdout = StringIO()
+        with (
+            mock.patch.object(fleet_runtime.Path, "home", return_value=self.root),
+            mock.patch.object(fleet_runtime, "FleetRuntime", return_value=runtime),
+            mock.patch("sys.stdout", stdout),
+        ):
+            result = fleet_runtime.main(["list"])
+
+        self.assertEqual(0, result)
+        fleet_dirs, profile_dirs, _state_dir = runtime.list_configs.call_args.args
+        self.assertEqual([self.root / ".config/agent-fleet/fleets"], fleet_dirs)
+        self.assertEqual([self.root / ".config/agent-fleet/view-profiles"], profile_dirs)
+        self.assertNotIn("plugins", str(profile_dirs))
 
     def test_start_provisions_context_and_tasks_then_runs_paneless_controller(self):
         runner = FakeRunner()

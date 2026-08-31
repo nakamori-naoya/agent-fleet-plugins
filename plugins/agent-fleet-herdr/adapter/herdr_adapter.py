@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS view_placements (
     workspace_slot TEXT NOT NULL,
     tab_slot TEXT NOT NULL,
     pane_slot TEXT NOT NULL,
-    profile_ref TEXT NOT NULL DEFAULT 'builtin/command-deck@1',
+    profile_ref TEXT NOT NULL,
     metadata_json TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT NOT NULL,
     PRIMARY KEY (fleet_id, agent_ref)
@@ -145,7 +145,7 @@ class AdapterState:
             if "profile_ref" not in placement_columns:
                 db.execute(
                     "ALTER TABLE view_placements ADD COLUMN profile_ref TEXT NOT NULL "
-                    "DEFAULT 'builtin/command-deck@1'"
+                    "DEFAULT 'legacy/unversioned@1'"
                 )
 
     @contextmanager
@@ -228,7 +228,7 @@ class AdapterState:
         metadata: Mapping[str, Any] | None = None,
         *,
         fleet_id: str = "default",
-        profile_ref: str = "builtin/command-deck@1",
+        profile_ref: str,
     ) -> dict[str, Any]:
         values = (
             safe_token(fleet_id, "fleet_id"),
@@ -969,7 +969,7 @@ def build_parser() -> argparse.ArgumentParser:
     place.add_argument("--workspace-slot", required=True)
     place.add_argument("--tab-slot", required=True)
     place.add_argument("--pane-slot", required=True)
-    place.add_argument("--profile-ref", default="builtin/command-deck@1")
+    place.add_argument("--profile-ref", required=True)
     place.add_argument("--metadata", type=json_object, default={})
     status = sub.add_parser("status")
     status.add_argument("--fleet", required=True)

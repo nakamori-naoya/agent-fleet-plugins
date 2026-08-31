@@ -9,5 +9,3 @@ spec:
       include_task_updates: true
   runtime:
     provider: herdr
-  view:
-    profile_ref: builtin/command-deck@1

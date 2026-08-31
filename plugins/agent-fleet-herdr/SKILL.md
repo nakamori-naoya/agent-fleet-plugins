@@ -13,7 +13,7 @@ Herdrは実行環境と表示のAdapterであり、Fleetの正本ではない。
 
 利用者が複数のFleet設定から選んで起動する入口は`adapter/scripts/fleet-runtime`である。`list`、`plan <fleet_id>`、`start <fleet_id> --execute`、`status <fleet_id>`を使う。Fleet設定は版固定の`profile_ref`でView Profileを一方向参照し、比率を一時引数で上書きしない。
 
-`provision`はFleetの版固定`profile_ref`と別入力のView Profileを照合し、layout weightを再現可能なsplit計画へ変換する。組み込み`builtin/command-deck@1`はmanager左約32%、member右側を定義する。生成argvとlogical agentの配置を確認してから、利用者が明示した場合だけ`--execute`を使う。
+`provision`はFleetの版固定`profile_ref`と別入力のView Profileを照合し、layout weightを再現可能なsplit計画へ変換する。艦隊編成とpane比率の実体をplugin内へ同梱せず、利用者の設定directoryからだけ読む。生成argvと論理エージェントの配置を確認してから、利用者が明示した場合だけ`--execute`を使う。
 
 ## Bindingと配送
 

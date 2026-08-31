@@ -6,9 +6,5 @@ herdr:
 execution:
   default: dry-run
   retry_unknown_timeout: false
-view:
-  profile_ref: builtin/command-deck@1
-  builtin_profiles: ${CLAUDE_PLUGIN_ROOT}/view-profiles
-  manager_ratio: 0.32
 state:
   database: ${XDG_STATE_HOME}/agent-fleet/herdr.sqlite3

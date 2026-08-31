@@ -17,7 +17,7 @@ daemon、multi-host、fleet間gateway、独自Web UI、自動pane再作成は対
 ## Installable plugin
 
 - `agent-fleet-core`: Fleet Spec、logical agent、task、command、event、outbox
-- `agent-fleet-herdr`: Herdr 0.8のRuntimeBinding、ViewPlacement、command-deck、command配送
+- `agent-fleet-herdr`: Herdr 0.8の実行時関連付け、利用者定義のpane配置、指示配送
 
 role catalogは別marketplaceの`agent-roles`を使う。Coreだけを使う場合、Herdr pluginをinstallする必要はない。
 
@@ -73,9 +73,9 @@ claude plugin install agent-fleet-herdr@agent-fleet
 
 Coreだけを利用する場合、Herdr CLIと`agent-fleet-herdr`は不要である。Adapterのdry-runはHerdrを実行しないが、`--execute`を使う前に`herdr --version`が0.8.xであることを確認する。
 
-Fleet YAMLの例は[manager 1・worker 2のFleet Spec](plugins/agent-fleet-core/spec/examples/fleet.example.yml)にある。最初にCore validatorでnormalized JSONへ変換し、Herdr Adapterの`provision`へ渡す。`provision`はdry-runが既定であり、`--execute`を付けない限りHerdrを変更しない。
+Fleet YAMLの形式例は[manager 1・worker 2のFleet Spec](plugins/agent-fleet-core/spec/examples/fleet.example.yml)にある。最初にCore validatorでnormalized JSONへ変換し、Herdr Adapterの`provision`へ渡す。`provision`はdry-runが既定であり、`--execute`を付けない限りHerdrを変更しない。
 
-設定の正本は[Core defaults](plugins/agent-fleet-core/config/defaults.yml)と[Herdr defaults](plugins/agent-fleet-herdr/config/defaults.yml)である。実行時SQLiteはrepository外のstate directoryを指定する。
+艦隊編成とpane配置の正本はplugin外の利用者設定である。既定では`~/.config/agent-fleet/fleets`と`~/.config/agent-fleet/view-profiles`を読む。repositoryの[艦隊設定例](configs/fleets/development-squad.yml)と[表示設定例](configs/view-profiles/development-focus.v1.yml)は手元へ複製して編集するための例であり、pluginは自動読込しない。実行時SQLiteもrepository外のstate directoryへ保存する。
 
 ## 検証
 

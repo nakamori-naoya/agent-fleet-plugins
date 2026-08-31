@@ -7,7 +7,6 @@ from pathlib import Path
 
 
 MODULE_PATH = Path(__file__).parents[1] / "view_profiles.py"
-BUILTIN_DIR = Path(__file__).parents[2] / "view-profiles"
 SPEC = importlib.util.spec_from_file_location("view_profiles", MODULE_PATH)
 view_profiles = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
@@ -35,9 +34,13 @@ PROFILE = {
 
 
 class ViewProfileTest(unittest.TestCase):
-    def test_builtin_profile_is_valid_and_catalogued(self):
-        catalog = view_profiles.ViewProfileCatalog.from_directories([BUILTIN_DIR])
-        self.assertEqual(["builtin/command-deck@1"], catalog.identities())
+    def test_missing_user_directory_does_not_create_a_fallback_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "not-created"
+            catalog = view_profiles.ViewProfileCatalog.from_directories([missing])
+        self.assertEqual([], catalog.identities())
+        with self.assertRaisesRegex(view_profiles.ViewProfileError, "not found"):
+            catalog.resolve("local/team-grid@1")
 
     def test_valid_profile_has_versioned_identity(self):
         self.assertEqual([], view_profiles.validate_document(PROFILE))

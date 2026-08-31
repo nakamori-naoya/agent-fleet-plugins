@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scenario: YAML Fleet SpecからCore stateとHerdr command-deck dry-run planを再現できる。
+# Scenario: 利用者のYAML設定からCore stateとHerdr pane配置計画を再現できる。
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CORE="$ROOT/plugins/agent-fleet-core"
@@ -19,11 +19,15 @@ jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.SessionSta
   "$HERDR/hooks/codex-hooks.json" >/dev/null || failed=1
 jq -e '.hooks=="./hooks/claude-hooks.json"' "$HERDR/.claude-plugin/plugin.json" >/dev/null || failed=1
 jq -e '.hooks=="./hooks/codex-hooks.json"' "$HERDR/.codex-plugin/plugin.json" >/dev/null || failed=1
+test ! -e "$HERDR/view-profiles" || failed=1
+if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
+  failed=1
+fi
 jq -e '.name=="agent-fleet" and (.plugins|length==2) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr"] and all(.plugins[]; .version=="0.1.0")' \
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \
-  "$HERDR/view-profiles/command-deck.v1.yml" "$HERDR/adapter/schema/view-profile.schema.yml" \
+  "$HERDR/adapter/schema/view-profile.schema.yml" \
   "$ROOT/configs/fleets/development-squad.yml" "$ROOT/configs/fleets/quick-review.yml" \
   "$ROOT/configs/view-profiles/development-focus.v1.yml" \
   "$ROOT/configs/view-profiles/review-grid.v1.yml"; do
@@ -35,26 +39,26 @@ python3 -m unittest discover -s "$CORE/core/tests" -p 'test_*.py' >/dev/null || 
 python3 -m unittest discover -s "$HERDR/adapter/tests" -p 'test_*.py' >/dev/null || failed=1
 
 fleet_json=$(python3 -S "$CORE/spec/scripts/validate_fleet.py" \
-  "$CORE/spec/examples/fleet.example.yml" --output-json) || failed=1
-view_profile_json=$(yq -o=json '.' "$HERDR/view-profiles/command-deck.v1.yml") || failed=1
+  "$ROOT/configs/fleets/development-squad.yml" --output-json) || failed=1
+view_profile_json=$(yq -o=json '.' "$ROOT/configs/view-profiles/development-focus.v1.yml") || failed=1
 if [ -n "${fleet_json:-}" ]; then
   "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" \
-    fleet.provision --config "$CORE/spec/examples/fleet.example.yml" \
+    fleet.provision --config "$ROOT/configs/fleets/development-squad.yml" \
     > "$TMP_ROOT/core.json" || failed=1
-  jq -e '.ok==true and .result.members==3 and .result.tasks==3' "$TMP_ROOT/core.json" >/dev/null || failed=1
+  jq -e '.ok==true and .result.members==5 and .result.tasks==4' "$TMP_ROOT/core.json" >/dev/null || failed=1
 
   "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" outbox \
-    --fleet release-readiness --sender-ref manager-1 --target-agent-ref worker-1 \
+    --fleet development-squad --sender-ref manager --target-agent-ref worker-implementation \
     --type message.send --command-id validation-message \
     --payload '{"text":"role context gate"}' >/dev/null || failed=1
   "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" delivery.claim \
-    --fleet release-readiness --worker-id validation-controller \
+    --fleet development-squad --worker-id validation-controller \
     > "$TMP_ROOT/unconfirmed-claim.json" || failed=1
   jq -e '.ok==true and .result==null' "$TMP_ROOT/unconfirmed-claim.json" >/dev/null || failed=1
   "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" context.confirm \
-    --fleet release-readiness --agent-ref worker-1 --revision 1 >/dev/null || failed=1
+    --fleet development-squad --agent-ref worker-implementation --revision 1 >/dev/null || failed=1
   "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" delivery.claim \
-    --fleet release-readiness --worker-id validation-controller \
+    --fleet development-squad --worker-id validation-controller \
     > "$TMP_ROOT/confirmed-claim.json" || failed=1
   jq -e '.ok==true and .result.command.spec.type=="message.send"' \
     "$TMP_ROOT/confirmed-claim.json" >/dev/null || failed=1
@@ -63,7 +67,7 @@ if [ -n "${fleet_json:-}" ]; then
     provision --fleet-json "$fleet_json" --view-profile-json "$view_profile_json" \
     --cwd "$ROOT" --agent-kind codex \
     > "$TMP_ROOT/herdr-plan.json" || failed=1
-  jq -e '.ok==true and .result.mode=="dry-run" and .result.status=="planned" and (.result.plan.operations|length)==6 and (.result.plan.placements|length)==3' \
+  jq -e '.ok==true and .result.mode=="dry-run" and .result.status=="planned" and (.result.plan.operations|length)==10 and (.result.plan.placements|length)==5' \
     "$TMP_ROOT/herdr-plan.json" >/dev/null || failed=1
 fi
 

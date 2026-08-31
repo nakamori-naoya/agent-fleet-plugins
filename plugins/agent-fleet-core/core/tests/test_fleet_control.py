@@ -39,7 +39,7 @@ NORMALIZED = {
             }
         ],
         "collaboration": {"manager": "manager"},
-        "view": {"profile_ref": "builtin/command-deck@1"},
+        "view": {"profile_ref": "local/test-deck@1"},
     },
 }
 
@@ -76,7 +76,7 @@ class FleetStoreTest(unittest.TestCase):
         self.assertNotIn("pane_id", columns)
         self.assertEqual(2, len(self.store.status("demo")["members"]))
         self.assertEqual(
-            "builtin/command-deck@1", self.store.status("demo")["fleet"]["profile_ref"]
+            "local/test-deck@1", self.store.status("demo")["fleet"]["profile_ref"]
         )
 
     def test_same_fleet_config_initialization_is_idempotent(self):

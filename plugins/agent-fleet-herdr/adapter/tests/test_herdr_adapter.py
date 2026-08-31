@@ -47,14 +47,14 @@ FLEET = {
         ],
         "collaboration": {"manager": "manager-1"},
         "runtime": {"provider": "herdr"},
-        "view": {"profile_ref": "builtin/command-deck@1"},
+        "view": {"profile_ref": "local/test-deck@1"},
     },
 }
 
 VIEW_PROFILE = {
     "apiVersion": "fleet.herdr.harness/v1",
     "kind": "ViewProfile",
-    "metadata": {"id": "builtin/command-deck", "version": 1},
+    "metadata": {"id": "local/test-deck", "version": 1},
     "spec": {
         "constraints": {"min_members": 2, "max_members": 5},
         "layout": {
@@ -82,7 +82,14 @@ class HerdrAdapterTest(unittest.TestCase):
     def test_runtime_binding_and_view_placement_are_adapter_state(self):
         binding = self.state.resolve("worker-1")
         self.assertEqual("p1", binding.pane_id)
-        placement = self.state.place_view("worker-1", "main", "workers", "right", {"rank": 1})
+        placement = self.state.place_view(
+            "worker-1",
+            "main",
+            "workers",
+            "right",
+            {"rank": 1},
+            profile_ref="local/test-deck@1",
+        )
         self.assertEqual("right", placement["pane_slot"])
 
     def test_same_agent_ref_in_two_fleets_resolves_to_each_fleets_pane(self):
@@ -113,7 +120,7 @@ class HerdrAdapterTest(unittest.TestCase):
         self.assertEqual("down", operations[4]["argv"][5])
         self.assertEqual("left", first["plan"]["placements"][0]["pane_slot"])
         self.assertEqual("right.2", first["plan"]["placements"][2]["pane_slot"])
-        self.assertEqual("builtin/command-deck@1", first["plan"]["profile_ref"])
+        self.assertEqual("local/test-deck@1", first["plan"]["profile_ref"])
 
     def test_layout_tree_compiles_equal_three_member_stack_to_sequential_ratios(self):
         fleet = json.loads(json.dumps(FLEET))
@@ -149,10 +156,10 @@ class HerdrAdapterTest(unittest.TestCase):
             self.state.place_view(
                 agent_ref,
                 "demo-fleet",
-                "builtin/command-deck@1",
+                "local/test-deck@1",
                 "left" if index == 0 else f"right.{index}",
                 fleet_id="demo-fleet",
-                profile_ref="builtin/command-deck@1",
+                profile_ref="local/test-deck@1",
             )
 
     def test_provision_is_idempotent_for_same_existing_profile_and_members(self):
@@ -166,7 +173,7 @@ class HerdrAdapterTest(unittest.TestCase):
     def test_provision_rejects_existing_fleet_with_different_profile(self):
         self._save_existing_fleet()
         fleet = json.loads(json.dumps(FLEET))
-        fleet["spec"]["view"]["profile_ref"] = "builtin/command-deck@2"
+        fleet["spec"]["view"]["profile_ref"] = "local/test-deck@2"
         profile = json.loads(json.dumps(VIEW_PROFILE))
         profile["metadata"]["version"] = 2
         adapter = herdr_adapter.HerdrAdapter(self.state, runner=FakeRunner([]))
@@ -364,15 +371,15 @@ class HerdrAdapterTest(unittest.TestCase):
             "main",
             "members",
             "right.1",
-            {"profile_ref": "builtin/command-deck@1"},
+            {"profile_ref": "local/test-deck@1"},
             fleet_id="demo",
-            profile_ref="builtin/command-deck@1",
+            profile_ref="local/test-deck@1",
         )
         before = Path(self.state.db_path).read_bytes()
         status = self.state.status("demo")
         after = Path(self.state.db_path).read_bytes()
         self.assertEqual(before, after)
-        self.assertEqual("builtin/command-deck@1", status["profile_ref"])
+        self.assertEqual("local/test-deck@1", status["profile_ref"])
         self.assertEqual("worker-status", status["bindings"][0]["agent_ref"])
         self.assertEqual("worker-status", status["placements"][0]["agent_ref"])
 
