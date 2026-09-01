@@ -11,15 +11,15 @@ failed=0
 for manifest in \
   "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json" \
   "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.2.7" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.2.8" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
 done
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact|fork" and .hooks.SessionStart[0].hooks[0].timeout==12' \
   "$HERDR/hooks/claude-hooks.json" >/dev/null || failed=1
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact" and .hooks.SessionStart[0].hooks[0].timeout==12' \
   "$HERDR/hooks/codex-hooks.json" >/dev/null || failed=1
-jq -e '.hooks.UserPromptSubmit[0].hooks[0].args[0]=="-c" and .hooks.UserPromptSubmit[0].hooks[0].args[-1]=="${CLAUDE_PLUGIN_ROOT}/hooks/role_context.py" and .hooks.UserPromptSubmit[0].hooks[0].args==.hooks.SessionStart[0].hooks[0].args' \
+jq -e '.hooks.UserPromptSubmit[0].hooks[0].command=="sh" and .hooks.UserPromptSubmit[0].hooks[0].args[0]=="-c" and (.hooks.UserPromptSubmit[0].hooks[0].args[1] | contains("AGENT_FLEET_HOOK_RUNTIME") and contains("--runtime-product claude") and (contains("python3 -c")|not) and (contains("PLUGIN_ROOT")|not)) and .hooks.UserPromptSubmit[0].hooks[0].args==.hooks.SessionStart[0].hooks[0].args' \
   "$HERDR/hooks/claude-hooks.json" >/dev/null || failed=1
-jq -e '.hooks.UserPromptSubmit[0].hooks[0].command | contains("python3 -c") and contains("${PLUGIN_ROOT}/hooks/role_context.py")' \
+jq -e '.hooks.UserPromptSubmit[0].hooks[0].command | contains("AGENT_FLEET_HOOK_RUNTIME") and contains("--runtime-product codex") and (contains("python3 -c")|not) and (contains("PLUGIN_ROOT")|not)' \
   "$HERDR/hooks/codex-hooks.json" >/dev/null || failed=1
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].command==.hooks.SessionStart[0].hooks[0].command' \
   "$HERDR/hooks/codex-hooks.json" >/dev/null || failed=1
@@ -29,7 +29,7 @@ test ! -e "$HERDR/view-profiles" || failed=1
 if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
   failed=1
 fi
-jq -e '.name=="agent-fleet" and (.plugins|length==2) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr"] and all(.plugins[]; .version=="0.2.7")' \
+jq -e '.name=="agent-fleet" and (.plugins|length==2) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr"] and all(.plugins[]; .version=="0.2.8")' \
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \

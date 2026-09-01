@@ -768,16 +768,14 @@ class RoleContextHookTest(unittest.TestCase):
         )
         claude_handler = claude_hooks["hooks"]["SessionStart"][0]["hooks"][0]
         codex_handler = codex_hooks["hooks"]["SessionStart"][0]["hooks"][0]
-        self.assertEqual("python3", claude_handler["command"])
+        self.assertEqual("sh", claude_handler["command"])
         self.assertEqual("-c", claude_handler["args"][0])
         self.assertIn("--runtime-product", claude_handler["args"][1])
-        self.assertEqual("claude", claude_handler["args"][-2])
-        self.assertEqual(
-            "${CLAUDE_PLUGIN_ROOT}/hooks/role_context.py",
-            claude_handler["args"][-1],
-        )
-        self.assertIn("python3 -c", codex_handler["command"])
-        self.assertIn("${PLUGIN_ROOT}/hooks/role_context.py", codex_handler["command"])
+        self.assertIn("AGENT_FLEET_HOOK_RUNTIME", claude_handler["args"][1])
+        self.assertIn("claude", claude_handler["args"][1])
+        self.assertNotIn("python3 -c", codex_handler["command"])
+        self.assertIn("AGENT_FLEET_HOOK_RUNTIME", codex_handler["command"])
+        self.assertNotIn("PLUGIN_ROOT", codex_handler["command"])
         self.assertNotIn("additionalContextLimit", claude_handler)
         self.assertEqual(5000, codex_handler["additionalContextLimit"])
 

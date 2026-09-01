@@ -479,6 +479,7 @@ class Herdr08Commands:
             "AGENT_FLEET_CODEX_HOOK_TRUST",
             "AGENT_FLEET_CORE_COMMAND",
             "AGENT_FLEET_CORE_DB",
+            "AGENT_FLEET_HOOK_RUNTIME",
         }
         unknown = set(environment) - allowed
         if unknown:
@@ -1348,6 +1349,7 @@ def build_parser() -> argparse.ArgumentParser:
     provision.add_argument("--agent-kind", required=True)
     provision.add_argument("--agent-core-command")
     provision.add_argument("--agent-core-db")
+    provision.add_argument("--agent-hook-runtime")
     provision.add_argument("--execute", action="store_true")
     deprovision = sub.add_parser("deprovision")
     deprovision.add_argument("--fleet", required=True)
@@ -1416,6 +1418,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.agent_core_command
                 else {}
             )
+            if args.agent_hook_runtime:
+                agent_environment["AGENT_FLEET_HOOK_RUNTIME"] = args.agent_hook_runtime
             result = adapter.provision(
                 args.fleet_json,
                 args.cwd,

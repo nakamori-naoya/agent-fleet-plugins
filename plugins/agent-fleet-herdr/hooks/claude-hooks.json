@@ -6,12 +6,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
+            "command": "sh",
             "args": [
               "-c",
-              "import json,os,re,stat,sys\nfrom pathlib import Path\nproduct=sys.argv[1]\ndirect=Path(sys.argv[2]).expanduser()\nbase=direct.parents[2]\nmanifest_rel=Path(\".claude-plugin/plugin.json\")\nhooks_ref=\"./hooks/claude-hooks.json\"\nstable=re.compile(r\"\\d+\\.\\d+\\.\\d+\")\ntry:\n    safe_base=base.resolve(strict=True)\nexcept OSError:\n    safe_base=None\ndef checked(candidate):\n    if safe_base is None:\n        return None\n    try:\n        version=candidate.parents[1].name\n        manifest=candidate.parents[1]/manifest_rel\n        resolved=candidate.resolve(strict=True)\n        resolved_manifest=manifest.resolve(strict=True)\n        code_stat=resolved.stat()\n        manifest_stat=resolved_manifest.stat()\n        metadata=json.loads(resolved_manifest.read_text(encoding=\"utf-8\"))\n        safe_mode=not (code_stat.st_mode & (stat.S_IWGRP|stat.S_IWOTH)) and not (manifest_stat.st_mode & (stat.S_IWGRP|stat.S_IWOTH))\n        if stable.fullmatch(version) and candidate.is_file() and not candidate.is_symlink() and manifest.is_file() and not manifest.is_symlink() and resolved.is_relative_to(safe_base) and resolved_manifest.is_relative_to(safe_base) and code_stat.st_uid==os.getuid() and manifest_stat.st_uid==os.getuid() and safe_mode and metadata.get(\"name\")==\"agent-fleet-herdr\" and metadata.get(\"version\")==version and metadata.get(\"hooks\")==hooks_ref:\n            return resolved\n    except (OSError,ValueError,json.JSONDecodeError):\n        pass\n    return None\ntarget=checked(direct)\nif target is None and safe_base is not None:\n    found=[resolved for candidate in base.glob(\"*/hooks/role_context.py\") if (resolved:=checked(candidate)) is not None]\n    if found:\n        target=max(found,key=lambda p:tuple(int(n) for n in p.parents[1].name.split(\".\")))\nif target is not None:\n    os.execv(sys.executable,[sys.executable,str(target),\"--runtime-product\",product])\nreason=\"Agent Fleet pluginの実行ファイルを確認できません。plugin更新後のsessionを再起動してください。\"\ntry:\n    event=json.load(sys.stdin)\nexcept (json.JSONDecodeError,OSError,ValueError):\n    event={}\nif event.get(\"hook_event_name\")==\"UserPromptSubmit\":\n    result={\"decision\":\"block\",\"reason\":reason}\nelif product==\"codex\":\n    result={\"continue\":False,\"stopReason\":reason,\"systemMessage\":reason}\nelse:\n    result={\"systemMessage\":reason}\nprint(json.dumps(result,ensure_ascii=False,sort_keys=True))",
-              "claude",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/role_context.py"
+              "if [ -n \"${AGENT_FLEET_HOOK_RUNTIME:-}\" ]; then exec python3 \"$AGENT_FLEET_HOOK_RUNTIME\" --runtime-product claude; fi"
             ],
             "timeout": 12,
             "statusMessage": "艦隊の役割文脈を確認しています"
@@ -25,12 +23,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
+            "command": "sh",
             "args": [
               "-c",
-              "import json,os,re,stat,sys\nfrom pathlib import Path\nproduct=sys.argv[1]\ndirect=Path(sys.argv[2]).expanduser()\nbase=direct.parents[2]\nmanifest_rel=Path(\".claude-plugin/plugin.json\")\nhooks_ref=\"./hooks/claude-hooks.json\"\nstable=re.compile(r\"\\d+\\.\\d+\\.\\d+\")\ntry:\n    safe_base=base.resolve(strict=True)\nexcept OSError:\n    safe_base=None\ndef checked(candidate):\n    if safe_base is None:\n        return None\n    try:\n        version=candidate.parents[1].name\n        manifest=candidate.parents[1]/manifest_rel\n        resolved=candidate.resolve(strict=True)\n        resolved_manifest=manifest.resolve(strict=True)\n        code_stat=resolved.stat()\n        manifest_stat=resolved_manifest.stat()\n        metadata=json.loads(resolved_manifest.read_text(encoding=\"utf-8\"))\n        safe_mode=not (code_stat.st_mode & (stat.S_IWGRP|stat.S_IWOTH)) and not (manifest_stat.st_mode & (stat.S_IWGRP|stat.S_IWOTH))\n        if stable.fullmatch(version) and candidate.is_file() and not candidate.is_symlink() and manifest.is_file() and not manifest.is_symlink() and resolved.is_relative_to(safe_base) and resolved_manifest.is_relative_to(safe_base) and code_stat.st_uid==os.getuid() and manifest_stat.st_uid==os.getuid() and safe_mode and metadata.get(\"name\")==\"agent-fleet-herdr\" and metadata.get(\"version\")==version and metadata.get(\"hooks\")==hooks_ref:\n            return resolved\n    except (OSError,ValueError,json.JSONDecodeError):\n        pass\n    return None\ntarget=checked(direct)\nif target is None and safe_base is not None:\n    found=[resolved for candidate in base.glob(\"*/hooks/role_context.py\") if (resolved:=checked(candidate)) is not None]\n    if found:\n        target=max(found,key=lambda p:tuple(int(n) for n in p.parents[1].name.split(\".\")))\nif target is not None:\n    os.execv(sys.executable,[sys.executable,str(target),\"--runtime-product\",product])\nreason=\"Agent Fleet pluginの実行ファイルを確認できません。plugin更新後のsessionを再起動してください。\"\ntry:\n    event=json.load(sys.stdin)\nexcept (json.JSONDecodeError,OSError,ValueError):\n    event={}\nif event.get(\"hook_event_name\")==\"UserPromptSubmit\":\n    result={\"decision\":\"block\",\"reason\":reason}\nelif product==\"codex\":\n    result={\"continue\":False,\"stopReason\":reason,\"systemMessage\":reason}\nelse:\n    result={\"systemMessage\":reason}\nprint(json.dumps(result,ensure_ascii=False,sort_keys=True))",
-              "claude",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/role_context.py"
+              "if [ -n \"${AGENT_FLEET_HOOK_RUNTIME:-}\" ]; then exec python3 \"$AGENT_FLEET_HOOK_RUNTIME\" --runtime-product claude; fi"
             ],
             "timeout": 12,
             "statusMessage": "艦隊の役割文脈を復元しています"

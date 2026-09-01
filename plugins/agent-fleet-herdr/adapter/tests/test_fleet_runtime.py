@@ -9,6 +9,7 @@ from unittest import mock
 
 
 MODULE_PATH = Path(__file__).parents[1] / "fleet_runtime.py"
+ROLE_CONTEXT = Path(__file__).parents[2] / "hooks" / "role_context.py"
 SPEC = importlib.util.spec_from_file_location("fleet_runtime", MODULE_PATH)
 fleet_runtime = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
@@ -207,6 +208,20 @@ class FleetRuntimeTest(unittest.TestCase):
             "fleet-control", controller[controller.index("--core-command") + 1]
         )
         self.assertTrue((self.state / "runtimes/review.json").is_file())
+        provision = next(
+            call for call in runner.calls
+            if "provision" in call and "--execute" in call
+        )
+        hook_runtime = Path(
+            provision[provision.index("--agent-hook-runtime") + 1]
+        )
+        self.assertEqual(ROLE_CONTEXT.read_bytes(), hook_runtime.read_bytes())
+        self.assertEqual(0o600, hook_runtime.stat().st_mode & 0o777)
+        self.assertTrue(
+            hook_runtime.is_relative_to(
+                (self.state / "fleets/review/hook-runtimes").resolve()
+            )
+        )
 
         repeat = runtime.start(
             "review",
@@ -252,6 +267,101 @@ class FleetRuntimeTest(unittest.TestCase):
         removed = runtime.remove("review", self.state, execute=True)
         self.assertEqual("removed", removed["status"])
         self.assertFalse((self.state / "runtimes/review.json").exists())
+
+    def test_start_rejects_a_modified_materialized_hook_runtime(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review",
+            [self.fleets],
+            [self.profiles],
+            self.state,
+            str(self.root),
+            "codex",
+            execute=True,
+            once=True,
+        )
+        hook_runtime = next(
+            (self.state / "fleets/review/hook-runtimes").glob("*/role_context.py")
+        )
+        hook_runtime.write_text("raise SystemExit(91)\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "hook runtime content"
+        ):
+            runtime.start(
+                "review",
+                [self.fleets],
+                [self.profiles],
+                self.state,
+                str(self.root),
+                "codex",
+                execute=True,
+                once=True,
+            )
+
+    def test_active_fleet_keeps_its_hook_snapshot_until_stop_and_restart(self):
+        runner = FakeRunner()
+        first_source = self.root / "role-context-v1.py"
+        second_source = self.root / "role-context-v2.py"
+        first_source.write_text("print('v1')\n", encoding="utf-8")
+        second_source.write_text("print('v2')\n", encoding="utf-8")
+        first_runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"],
+            ["fleet-herdr"],
+            ["fleet-controller"],
+            runner=runner,
+            hook_source=first_source,
+        )
+        started = first_runtime.start(
+            "review",
+            [self.fleets],
+            [self.profiles],
+            self.state,
+            str(self.root),
+            "codex",
+            execute=True,
+            once=True,
+        )
+        first_hook = Path(started["hook_runtime"])
+
+        updated_runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"],
+            ["fleet-herdr"],
+            ["fleet-controller"],
+            runner=runner,
+            hook_source=second_source,
+        )
+        resumed = updated_runtime.start(
+            "review",
+            [self.fleets],
+            [self.profiles],
+            self.state,
+            str(self.root),
+            "codex",
+            execute=True,
+            once=True,
+        )
+        self.assertEqual("resumed", resumed["status"])
+        self.assertEqual(first_hook, Path(resumed["hook_runtime"]))
+        self.assertEqual("print('v1')\n", first_hook.read_text(encoding="utf-8"))
+
+        updated_runtime.stop("review", self.state, execute=True)
+        restarted = updated_runtime.start(
+            "review",
+            [self.fleets],
+            [self.profiles],
+            self.state,
+            str(self.root),
+            "codex",
+            execute=True,
+            once=True,
+        )
+        second_hook = Path(restarted["hook_runtime"])
+        self.assertNotEqual(first_hook, second_hook)
+        self.assertEqual("print('v2')\n", second_hook.read_text(encoding="utf-8"))
 
     def test_init_and_doctor_keep_configuration_outside_the_plugin(self):
         runtime = fleet_runtime.FleetRuntime(

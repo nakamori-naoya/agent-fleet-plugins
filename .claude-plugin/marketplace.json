@@ -3,7 +3,7 @@
   "owner": {"name": "NaoyaNakamori"},
   "description": "Fleet CoreとHerdr Adapterを独立配布し、YAMLで定義したagent fleetを制御するmarketplace",
   "plugins": [
-    {"name":"agent-fleet-core","source":"./plugins/agent-fleet-core","description":"Fleet Spec、logical agent、task、command、eventを管理する","version":"0.2.7"},
-    {"name":"agent-fleet-herdr","source":"./plugins/agent-fleet-herdr","description":"Fleet Coreの公開JSON契約をHerdrのRuntime/View操作へ変換する","version":"0.2.7"}
+    {"name":"agent-fleet-core","source":"./plugins/agent-fleet-core","description":"Fleet Spec、logical agent、task、command、eventを管理する","version":"0.2.8"},
+    {"name":"agent-fleet-herdr","source":"./plugins/agent-fleet-herdr","description":"Fleet Coreの公開JSON契約をHerdrのRuntime/View操作へ変換する","version":"0.2.8"}
   ]
 }

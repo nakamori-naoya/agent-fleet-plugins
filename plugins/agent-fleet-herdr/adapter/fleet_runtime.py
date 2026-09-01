@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+DEFAULT_HOOK_SOURCE = Path(__file__).parents[1] / "hooks" / "role_context.py"
 
 
 class FleetRuntimeError(RuntimeError):
@@ -122,12 +123,14 @@ class FleetRuntime:
         *,
         runner: Runner = subprocess.run,
         sleeper: Callable[[float], None] = time.sleep,
+        hook_source: Path = DEFAULT_HOOK_SOURCE,
     ):
         self.core_command = tuple(core_command)
         self.herdr_command = tuple(herdr_command)
         self.controller_command = tuple(controller_command)
         self.runner = runner
         self.sleeper = sleeper
+        self.hook_source = hook_source
 
     def _agent_core_command(self) -> str:
         argv = list(self.core_command)
@@ -392,6 +395,72 @@ class FleetRuntime:
         temporary.replace(path)
         path.chmod(0o600)
 
+    def _materialize_hook_runtime(self, fleet_state_dir: Path) -> tuple[Path, str]:
+        source = self.hook_source
+        if source.is_symlink() or not source.is_file():
+            raise FleetRuntimeError("hook runtime source must be a regular file")
+        try:
+            payload = source.read_bytes()
+        except OSError as exc:
+            raise FleetRuntimeError(f"cannot read hook runtime source: {exc}") from exc
+        digest = hashlib.sha256(payload).hexdigest()
+        root = (fleet_state_dir / "hook-runtimes").resolve()
+        version_dir = (root / digest).resolve()
+        if version_dir.parent != root:
+            raise FleetRuntimeError("hook runtime identity escapes the Fleet state directory")
+        version_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root.chmod(0o700)
+        version_dir.chmod(0o700)
+        target = version_dir / "role_context.py"
+        if target.is_symlink():
+            raise FleetRuntimeError("hook runtime must not be a symbolic link")
+        if target.exists():
+            try:
+                existing = target.read_bytes()
+            except OSError as exc:
+                raise FleetRuntimeError(f"cannot read materialized hook runtime: {exc}") from exc
+            if existing != payload:
+                raise FleetRuntimeError("materialized hook runtime content does not match its hash")
+        else:
+            temporary = version_dir / f".role_context-{uuid.uuid4().hex}.tmp"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(temporary, flags, 0o600)
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                temporary.replace(target)
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
+        target.chmod(0o600)
+        return target, digest
+
+    def _validate_hook_runtime(
+        self, fleet_state_dir: Path, path: Path, expected_digest: str
+    ) -> Path:
+        root = (fleet_state_dir / "hook-runtimes").resolve()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+            raise FleetRuntimeError("runtime manifest has an invalid hook hash")
+        if path.is_symlink() or not path.is_file():
+            raise FleetRuntimeError("materialized hook runtime is missing or unsafe")
+        resolved = path.resolve()
+        if not resolved.is_relative_to(root):
+            raise FleetRuntimeError("materialized hook runtime escapes Fleet state")
+        try:
+            payload = resolved.read_bytes()
+            metadata = resolved.stat()
+        except OSError as exc:
+            raise FleetRuntimeError(f"cannot validate materialized hook runtime: {exc}") from exc
+        if metadata.st_uid != os.getuid() or metadata.st_mode & 0o022:
+            raise FleetRuntimeError("materialized hook runtime has unsafe ownership or mode")
+        if hashlib.sha256(payload).hexdigest() != expected_digest:
+            raise FleetRuntimeError("materialized hook runtime content does not match its hash")
+        return resolved
+
     def start(
         self,
         fleet_name: str,
@@ -464,6 +533,7 @@ class FleetRuntime:
         phase = "planned"
         runtime_generation = uuid.uuid4().hex
         restarting = False
+        current: Mapping[str, Any] | None = None
         if manifest_path.exists():
             current = _load_document(manifest_path)
             if not all(current.get(key) == value for key, value in desired.items()):
@@ -474,26 +544,46 @@ class FleetRuntime:
             runtime_generation = str(
                 current.get("runtime_generation") or runtime_generation
             )
-            if phase == "active":
-                monitor = self.monitor(
-                    resolved.fleet_id,
-                    state_dir,
-                    once=once,
-                    poll_seconds=poll_seconds,
-                )
-                return {**desired, "status": "resumed", "monitor": monitor}
             if phase == "stopped":
                 phase = "core_provisioned"
                 runtime_generation = uuid.uuid4().hex
                 restarting = True
+        fleet_state_dir = self._fleet_state_dir(state_dir, resolved.fleet_id)
+        if current is not None and not restarting and current.get("hook_runtime"):
+            hook_runtime = self._validate_hook_runtime(
+                fleet_state_dir,
+                Path(str(current["hook_runtime"])),
+                str(current.get("hook_sha256") or ""),
+            )
+            hook_sha256 = str(current["hook_sha256"])
+        elif current is not None and phase in {"active", "herdr_provisioned"}:
+            raise FleetRuntimeError(
+                "active Fleet predates stable hook runtimes; stop and restart it once"
+            )
         else:
+            hook_runtime, hook_sha256 = self._materialize_hook_runtime(fleet_state_dir)
+        runtime_manifest = {
+            **desired,
+            "runtime_generation": runtime_generation,
+            "hook_runtime": str(hook_runtime),
+            "hook_sha256": hook_sha256,
+        }
+        if current is None:
             self._write_manifest(
                 manifest_path,
-                {**desired, "runtime_generation": runtime_generation},
+                runtime_manifest,
                 phase,
             )
-        runtime_manifest = {**desired, "runtime_generation": runtime_generation}
-        fleet_state_dir = self._fleet_state_dir(state_dir, resolved.fleet_id)
+        elif phase == "active":
+            monitor = self.monitor(
+                resolved.fleet_id,
+                state_dir,
+                once=once,
+                poll_seconds=poll_seconds,
+            )
+            return {**runtime_manifest, "status": "resumed", "monitor": monitor}
+        elif not current.get("hook_runtime"):
+            self._write_manifest(manifest_path, runtime_manifest, phase)
         core_db = fleet_state_dir / "core.sqlite3"
         herdr_db = fleet_state_dir / "herdr.sqlite3"
         phases = ["planned", "core_provisioned", "herdr_provisioned", "active"]
@@ -545,6 +635,8 @@ class FleetRuntime:
                     self._agent_core_command(),
                     "--agent-core-db",
                     str(core_db),
+                    "--agent-hook-runtime",
+                    str(hook_runtime),
                     "--execute",
                 ],
                 "Herdr fleet provision",

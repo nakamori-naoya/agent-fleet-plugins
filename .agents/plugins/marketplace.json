@@ -1,4 +1,4 @@
 {"name":"agent-fleet","interface":{"displayName":"Agent Fleet"},"plugins":[
-  {"name":"agent-fleet-core","source":{"source":"local","path":"./plugins/agent-fleet-core"},"policy":{"installation":"AVAILABLE","authentication":"ON_INSTALL"},"category":"Productivity","version":"0.2.7"},
-  {"name":"agent-fleet-herdr","source":{"source":"local","path":"./plugins/agent-fleet-herdr"},"policy":{"installation":"AVAILABLE","authentication":"ON_INSTALL"},"category":"Productivity","version":"0.2.7"}
+  {"name":"agent-fleet-core","source":{"source":"local","path":"./plugins/agent-fleet-core"},"policy":{"installation":"AVAILABLE","authentication":"ON_INSTALL"},"category":"Productivity","version":"0.2.8"},
+  {"name":"agent-fleet-herdr","source":{"source":"local","path":"./plugins/agent-fleet-herdr"},"policy":{"installation":"AVAILABLE","authentication":"ON_INSTALL"},"category":"Productivity","version":"0.2.8"}
 ]}

@@ -136,6 +136,7 @@ class HerdrAdapterTest(unittest.TestCase):
         environment = {
             "AGENT_FLEET_CORE_COMMAND": "/opt/agent-fleet/fleet-control",
             "AGENT_FLEET_CORE_DB": "/state/demo/core.sqlite3",
+            "AGENT_FLEET_HOOK_RUNTIME": "/state/demo/hooks/role_context.py",
         }
 
         plan = herdr_adapter.HerdrAdapter(self.state).plan_provision(
@@ -154,6 +155,9 @@ class HerdrAdapterTest(unittest.TestCase):
                 "AGENT_FLEET_CORE_COMMAND=/opt/agent-fleet/fleet-control", argv
             )
             self.assertIn("AGENT_FLEET_CORE_DB=/state/demo/core.sqlite3", argv)
+            self.assertIn(
+                "AGENT_FLEET_HOOK_RUNTIME=/state/demo/hooks/role_context.py", argv
+            )
             self.assertIn("AGENT_FLEET_CODEX_HOOK_TRUST=preapproved", argv)
 
     def test_member_model_is_forwarded_to_supported_agent(self):
