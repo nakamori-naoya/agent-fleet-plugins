@@ -376,7 +376,7 @@ class RoleContextHookTest(unittest.TestCase):
             ) as run,
         ):
             result = role_context_hook._consume_activation(
-                "demo", "cmd-1", "token", "session-1", "codex"
+                "demo", "cmd-1", "-leading-token", "session-1", "codex"
             )
 
         self.assertEqual(self.context, result["context"])
@@ -390,8 +390,7 @@ class RoleContextHookTest(unittest.TestCase):
                 "demo",
                 "--command-id",
                 "cmd-1",
-                "--activation-token",
-                "token",
+                "--activation-token=-leading-token",
                 "--session-id",
                 "session-1",
                 "--runtime-product",
