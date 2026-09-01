@@ -5,7 +5,7 @@ description: YAML Fleet Specを検査し、論理エージェント、タスク�
 
 # control-agent-fleet
 
-Fleet Specはdesired state、SQLiteは実行時のlogical stateとして分ける。viewは版固定`profile_ref`だけを持ち、Coreはその形式だけを検査する。pane ID、workspace ID、tab ID、比率、UI geometryをCore DBへ保存しない。
+Fleet Specはdesired state、SQLiteは実行時のlogical stateとして分ける。Coreだけで使うFleetは`runtime`と`view`を省略できる。Herdr Adapterを使う場合だけ版固定`profile_ref`を指定する。pane ID、workspace ID、tab ID、比率、UI geometryをCore DBへ保存しない。
 
 ## Fleet Specを検査する
 
@@ -26,7 +26,7 @@ python3 "${PLUGIN_ROOT}/spec/scripts/validate_fleet.py" fleet.yml --output-json
 - `task.report`: 割当済みagentが`--agent-ref`を示し、running、blocked、completed、failedを明示報告する
 - `fleet.reconcile`: current state、event、pending outboxを返す
 
-タスク完了をpaneの出力、待機表示、完了表示から推測しない。終端報告には検証結果または停止理由を含める。入力送信の時間切れで配送状態が不明な指示を自動再送しない。
+タスク完了をpaneの出力、待機表示、完了表示から推測しない。終端報告には検証結果または停止理由を含める。終端報告は同じ処理でマネージャー宛て通知にし、マネージャーだけが`task.accept`で受理する。入力送信の時間切れで配送状態が不明な指示を自動再送しない。Hookが指示内容・宛先・受信sessionをCoreと照合した時点を配送済みとする。
 
 ## Adapterとの境界
 

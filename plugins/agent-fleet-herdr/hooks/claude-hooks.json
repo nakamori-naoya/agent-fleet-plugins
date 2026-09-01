@@ -12,7 +12,7 @@
               "--runtime-product",
               "claude"
             ],
-            "timeout": 3,
+            "timeout": 12,
             "statusMessage": "艦隊の役割文脈を確認しています"
           }
         ]
@@ -30,7 +30,7 @@
               "--runtime-product",
               "claude"
             ],
-            "timeout": 3,
+            "timeout": 12,
             "statusMessage": "艦隊の役割文脈を復元しています"
           }
         ]

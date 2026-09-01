@@ -29,7 +29,7 @@ class FakeRunner:
 
 
 class FleetControllerTest(unittest.TestCase):
-    def test_run_once_claims_dispatches_without_wait_and_records_delivery(self):
+    def test_run_once_does_not_treat_agent_state_as_hook_receipt(self):
         command = {
             "apiVersion": "fleet.harness/v1",
             "kind": "Command",
@@ -66,7 +66,7 @@ class FleetControllerTest(unittest.TestCase):
                 completed(
                     {
                         "ok": True,
-                        "result": {"command_id": "cmd-1", "status": "delivered"},
+                        "result": {"command_id": "cmd-1", "status": "unknown"},
                     }
                 ),
             ]
@@ -82,10 +82,13 @@ class FleetControllerTest(unittest.TestCase):
             worker_id="delivery-1",
         )
 
-        self.assertEqual("delivered", result["status"])
+        self.assertEqual("unknown", result["status"])
+        self.assertEqual("hook_receipt", result["delivery_scope"])
         self.assertIn("delivery.claim", runner.calls[0][0])
+        self.assertIn("60", runner.calls[0][0])
         self.assertIn("delivery.begin", runner.calls[1][0])
-        self.assertIn("--no-wait", runner.calls[2][0])
+        self.assertIn("--until-started", runner.calls[2][0])
+        self.assertNotIn("--no-wait", runner.calls[2][0])
         self.assertIn("delivery.result", runner.calls[3][0])
 
     def test_dispatch_failure_after_send_begins_is_recorded_as_unknown(self):

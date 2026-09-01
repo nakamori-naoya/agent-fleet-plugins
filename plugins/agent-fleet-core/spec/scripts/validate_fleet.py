@@ -22,6 +22,7 @@ ROLE_REF_PATTERN = re.compile(
 VIEW_PROFILE_REF_PATTERN = re.compile(
     r"^[a-z][a-z0-9-]*(?:/[a-z][a-z0-9-]*)?@[1-9][0-9]*$"
 )
+IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 
 
 def _load_with_ruby(path: Path) -> Any:
@@ -100,6 +101,15 @@ def _string(value: Any, path: str, errors: list[str]) -> None:
         errors.append(f"{path}: must be a non-empty string")
 
 
+def _identifier(value: Any, path: str, errors: list[str]) -> None:
+    _string(value, path, errors)
+    if _non_empty_string(value) and IDENTIFIER_PATTERN.fullmatch(value) is None:
+        errors.append(
+            f"{path}: must be a safe identifier containing lowercase letters, "
+            "digits, and single hyphens"
+        )
+
+
 def _string_list(value: Any, path: str, errors: list[str]) -> None:
     if not isinstance(value, list) or not value:
         errors.append(f"{path}: must be a non-empty list")
@@ -132,6 +142,8 @@ def _members(value: Any, errors: list[str]) -> dict[str, str]:
         for field in ("agent_ref", "role_ref"):
             if field in member:
                 _string(member[field], f"{member_path}.{field}", errors)
+        if "agent_ref" in member:
+            _identifier(member["agent_ref"], f"{member_path}.agent_ref", errors)
         role_ref = member.get("role_ref")
         if _non_empty_string(role_ref) and ROLE_REF_PATTERN.fullmatch(role_ref) is None:
             errors.append(
@@ -187,6 +199,8 @@ def _tasks(value: Any, members_by_ref: dict[str, str], errors: list[str]) -> Non
         for field in ("id", "assignee", "instructions", "expected_output"):
             if field in task:
                 _string(task[field], f"{task_path}.{field}", errors)
+        if "id" in task:
+            _identifier(task["id"], f"{task_path}.id", errors)
         if "completion_criteria" in task:
             _string_list(
                 task["completion_criteria"],
@@ -325,8 +339,8 @@ def _runtime(value: Any, errors: list[str]) -> None:
     if runtime is None:
         return
     _keys(runtime, path, {"provider"}, {"provider"}, errors)
-    if runtime.get("provider") != "herdr":
-        errors.append(f"{path}.provider: must be 'herdr'")
+    if "provider" in runtime:
+        _string(runtime.get("provider"), f"{path}.provider", errors)
 
 
 def _view(value: Any, errors: list[str]) -> None:
@@ -368,7 +382,7 @@ def validate_document(document: Any) -> list[str]:
     if metadata is not None:
         _keys(metadata, "metadata", {"id"}, {"id"}, errors)
         if "id" in metadata:
-            _string(metadata["id"], "metadata.id", errors)
+            _identifier(metadata["id"], "metadata.id", errors)
 
     fleet_spec = _mapping(root.get("spec"), "spec", errors)
     if fleet_spec is None:
@@ -383,8 +397,6 @@ def validate_document(document: Any) -> list[str]:
             "members",
             "tasks",
             "collaboration",
-            "runtime",
-            "view",
         },
         {
             "objective",
@@ -409,8 +421,10 @@ def validate_document(document: Any) -> list[str]:
     members_by_ref = _members(fleet_spec.get("members"), errors)
     _tasks(fleet_spec.get("tasks"), members_by_ref, errors)
     _collaboration(fleet_spec.get("collaboration"), members_by_ref, errors)
-    _runtime(fleet_spec.get("runtime"), errors)
-    _view(fleet_spec.get("view"), errors)
+    if "runtime" in fleet_spec:
+        _runtime(fleet_spec.get("runtime"), errors)
+    if "view" in fleet_spec:
+        _view(fleet_spec.get("view"), errors)
     return errors
 
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -140,6 +142,14 @@ CREATE TABLE IF NOT EXISTS task_contexts (
     PRIMARY KEY (fleet_id, task_id),
     FOREIGN KEY (fleet_id, task_id) REFERENCES tasks(fleet_id, task_id)
 );
+CREATE TABLE IF NOT EXISTS task_dependencies (
+    fleet_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    dependency_task_id TEXT NOT NULL,
+    PRIMARY KEY (fleet_id, task_id, dependency_task_id),
+    FOREIGN KEY (fleet_id, task_id) REFERENCES tasks(fleet_id, task_id),
+    FOREIGN KEY (fleet_id, dependency_task_id) REFERENCES tasks(fleet_id, task_id)
+);
 CREATE TABLE IF NOT EXISTS task_reports (
     fleet_id TEXT NOT NULL,
     report_id TEXT NOT NULL,
@@ -169,14 +179,27 @@ CREATE TABLE IF NOT EXISTS outbox (
     next_attempt_at TEXT,
     result_detail TEXT,
     delivered_at TEXT,
+    activation_consumed_at TEXT,
+    activation_session_id TEXT,
+    activation_runtime_product TEXT,
     PRIMARY KEY (fleet_id, command_id),
     FOREIGN KEY (fleet_id, sender_ref) REFERENCES members(fleet_id, agent_ref),
     FOREIGN KEY (fleet_id, target_agent_ref) REFERENCES members(fleet_id, agent_ref)
+);
+CREATE TABLE IF NOT EXISTS operations (
+    fleet_id TEXT NOT NULL REFERENCES fleets(fleet_id),
+    operation_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (fleet_id, operation_id)
 );
 CREATE INDEX IF NOT EXISTS idx_events_fleet_event ON events(fleet_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_task_reports_task_created
     ON task_reports(fleet_id, task_id, created_at, report_id);
 CREATE INDEX IF NOT EXISTS idx_outbox_target_status ON outbox(fleet_id, target_agent_ref, status);
+CREATE INDEX IF NOT EXISTS idx_task_dependencies_dependency
+    ON task_dependencies(fleet_id, dependency_task_id, task_id);
 """
 
 
@@ -184,14 +207,26 @@ class FleetStore:
     def __init__(self, db_path: Path | str):
         self.db_path = str(db_path)
         if self.db_path != ":memory:":
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            if Path(self.db_path).is_symlink():
+                raise FleetError("Core state database must not be a symbolic link")
+            parent = Path(self.db_path).parent
+            parent_existed = parent.exists()
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not parent_existed:
+                parent.chmod(0o700)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.db_path)
+        if self.db_path != ":memory:":
+            try:
+                os.chmod(self.db_path, 0o600)
+            except OSError:
+                pass
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("PRAGMA journal_mode = WAL")
         try:
             yield connection
             connection.commit()
@@ -232,11 +267,11 @@ class FleetStore:
         if not isinstance(tasks, Sequence) or isinstance(tasks, (str, bytes)):
             raise FleetError("tasks must be a sequence")
         view = spec.get("view")
-        if not isinstance(view, Mapping):
-            raise FleetError("normalized spec.view is required")
-        profile_ref = str(view.get("profile_ref") or "").strip()
-        if not profile_ref:
-            raise FleetError("normalized spec.view.profile_ref is required")
+        profile_ref = (
+            str(view.get("profile_ref") or "").strip()
+            if isinstance(view, Mapping)
+            else ""
+        )
         config_hash = hashlib.sha256(
             json.dumps(
                 config,
@@ -268,6 +303,16 @@ class FleetStore:
                     "ALTER TABLE member_context_state ADD COLUMN "
                     "confirmed_revision INTEGER NOT NULL DEFAULT 0"
                 )
+            outbox_columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(outbox)")
+            }
+            for name in (
+                "activation_consumed_at",
+                "activation_session_id",
+                "activation_runtime_product",
+            ):
+                if name not in outbox_columns:
+                    db.execute(f"ALTER TABLE outbox ADD COLUMN {name} TEXT")
             existing = db.execute(
                 "SELECT config_hash FROM fleets WHERE fleet_id=?", (fleet_id,)
             ).fetchone()
@@ -353,6 +398,14 @@ class FleetStore:
                         created_at,
                     ),
                 )
+            for item in tasks:
+                task_id = str(item.get("task_id") or item.get("id") or "").strip()
+                for dependency in item.get("depends_on") or []:
+                    db.execute(
+                        "INSERT INTO task_dependencies(fleet_id,task_id,dependency_task_id) "
+                        "VALUES(?,?,?)",
+                        (fleet_id, task_id, str(dependency)),
+                    )
                 expected_output = str(item.get("expected_output") or "").strip()
                 task_completion = item.get("completion_criteria")
                 if not expected_output:
@@ -375,12 +428,100 @@ class FleetStore:
         return {"fleet_id": fleet_id, "members": len(members), "tasks": len(tasks)}
 
     @staticmethod
-    def _bump_context(db: sqlite3.Connection, fleet_id: str, agent_ref: str) -> None:
+    def _enqueue_context_sync(
+        db: sqlite3.Connection,
+        fleet_id: str,
+        agent_ref: str,
+        revision: int,
+        reason: str,
+    ) -> str:
+        manager = db.execute(
+            "SELECT manager_ref FROM fleet_contexts WHERE fleet_id=?", (fleet_id,)
+        ).fetchone()
+        if manager is None:
+            raise FleetError(f"unknown fleet: {fleet_id}")
+        command_id = f"context-sync:{fleet_id}:{agent_ref}:revision:{revision}"
+        existing = db.execute(
+            "SELECT command_id FROM outbox WHERE fleet_id=? AND command_id=?",
+            (fleet_id, command_id),
+        ).fetchone()
+        if existing is not None:
+            return command_id
         db.execute(
+            "UPDATE outbox SET status='abandoned',result_detail=? "
+            "WHERE fleet_id=? AND target_agent_ref=? AND command_type='context.sync' "
+            "AND status IN ('pending','retry')",
+            ("superseded by a newer context revision", fleet_id, agent_ref),
+        )
+        previous = db.execute(
+            "SELECT payload_json FROM outbox WHERE fleet_id=? AND target_agent_ref=? "
+            "AND command_type='context.sync' ORDER BY created_at DESC,command_id DESC LIMIT 1",
+            (fleet_id, agent_ref),
+        ).fetchone()
+        previous_payload = json.loads(previous["payload_json"]) if previous else {}
+        previous_control = previous_payload.get("control")
+        control = (
+            dict(previous_control)
+            if isinstance(previous_control, Mapping)
+            else {
+                "fleet_id": fleet_id,
+                "reporting": {
+                    "progress_action": "task.progress",
+                    "state_action": "task.report",
+                    "required_identity": agent_ref,
+                    "manager_ref": manager["manager_ref"],
+                },
+            }
+        )
+        payload = {
+            "reason": reason,
+            "context_revision": revision,
+            "activation_token": secrets.token_urlsafe(32),
+            "control": control,
+        }
+        db.execute(
+            "INSERT INTO outbox(command_id,fleet_id,sender_ref,target_agent_ref,command_type,"
+            "payload_json,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                command_id,
+                fleet_id,
+                manager["manager_ref"],
+                agent_ref,
+                "context.sync",
+                json.dumps(payload, sort_keys=True),
+                "pending",
+                utc_now(),
+            ),
+        )
+        FleetStore._append_event(
+            db,
+            fleet_id,
+            "system",
+            command_id,
+            "command.enqueued",
+            {"command_type": "context.sync", "target_agent_ref": agent_ref},
+        )
+        return command_id
+
+    @staticmethod
+    def _bump_context(
+        db: sqlite3.Connection, fleet_id: str, agent_ref: str, reason: str
+    ) -> int:
+        changed = db.execute(
             "UPDATE member_context_state SET context_revision=context_revision+1 "
             "WHERE fleet_id=? AND agent_ref=?",
             (fleet_id, agent_ref),
         )
+        if changed.rowcount != 1:
+            raise FleetError(f"unknown agent_ref: {agent_ref}")
+        row = db.execute(
+            "SELECT context_revision FROM member_context_state "
+            "WHERE fleet_id=? AND agent_ref=?",
+            (fleet_id, agent_ref),
+        ).fetchone()
+        revision = int(row["context_revision"])
+        FleetStore._enqueue_context_sync(db, fleet_id, agent_ref, revision, reason)
+        return revision
 
     @staticmethod
     def _context_capsule(
@@ -404,9 +545,9 @@ class FleetStore:
             "SELECT t.task_id,t.status,t.description,tc.expected_output,"
             "tc.completion_criteria_json FROM tasks t JOIN task_contexts tc "
             "ON tc.fleet_id=t.fleet_id AND tc.task_id=t.task_id WHERE t.fleet_id=? "
-            "AND (t.assignee_ref=? OR (t.assignee_ref IS NULL AND t.planned_assignee_ref=?)) "
+            "AND t.assignee_ref=? AND t.status IN ('assigned','running','blocked','reported') "
             "ORDER BY t.task_id",
-            (fleet_id, agent_ref, agent_ref),
+            (fleet_id, agent_ref),
         ):
             assignments.append(
                 {
@@ -472,6 +613,403 @@ class FleetStore:
             "status": "confirmed",
         }
 
+    def consume_context_activation(
+        self,
+        fleet_id: str,
+        command_id: str,
+        activation_token: str,
+        session_id: str,
+        runtime_product: str,
+    ) -> dict[str, Any]:
+        """Consume one Core-issued context activation and return authoritative context."""
+
+        if not session_id.strip():
+            raise FleetError("session_id is required")
+        if runtime_product not in {"claude", "codex"}:
+            raise FleetError("runtime_product must be claude or codex")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            command = db.execute(
+                "SELECT sender_ref,target_agent_ref,command_type,payload_json,status,"
+                "activation_consumed_at,activation_session_id,activation_runtime_product "
+                "FROM outbox WHERE fleet_id=? AND command_id=?",
+                (fleet_id, command_id),
+            ).fetchone()
+            if command is None or command["command_type"] != "context.sync":
+                raise FleetError("context activation is invalid")
+            manager = db.execute(
+                "SELECT manager_ref FROM fleet_contexts WHERE fleet_id=?", (fleet_id,)
+            ).fetchone()
+            if manager is None or command["sender_ref"] != manager["manager_ref"]:
+                raise FleetError("context activation source is invalid")
+            payload = json.loads(command["payload_json"])
+            expected_token = payload.get("activation_token")
+            if (
+                not isinstance(expected_token, str)
+                or not secrets.compare_digest(expected_token, activation_token)
+            ):
+                raise FleetError("context activation token is invalid")
+            already_consumed = command["activation_consumed_at"] is not None
+            if already_consumed and (
+                command["activation_session_id"] != session_id
+                or command["activation_runtime_product"] != runtime_product
+            ):
+                raise FleetError("context activation was already consumed")
+            if command["status"] not in {
+                "processing",
+                "sending",
+                "delivered",
+                "unknown",
+            }:
+                raise FleetError("context activation is not being delivered")
+            context = self._context_capsule(
+                db, fleet_id, command["target_agent_ref"]
+            )
+            control = payload.get("control")
+            safe_control = dict(control) if isinstance(control, Mapping) else {}
+            if len(
+                json.dumps(
+                    {"context": context, "control": safe_control},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            ) > 3_000:
+                raise FleetError("context activation exceeds the safe hook size limit")
+            expected_revision = payload.get("context_revision")
+            if (
+                not isinstance(expected_revision, int)
+                or isinstance(expected_revision, bool)
+                or expected_revision != context["context_revision"]
+            ):
+                raise FleetError("context activation revision is invalid")
+            if not already_consumed:
+                consumed_at = utc_now()
+                db.execute(
+                    "UPDATE outbox SET activation_consumed_at=?,activation_session_id=?,"
+                    "activation_runtime_product=? WHERE fleet_id=? AND command_id=?",
+                    (
+                        consumed_at,
+                        session_id,
+                        runtime_product,
+                        fleet_id,
+                        command_id,
+                    ),
+                )
+                db.execute(
+                    "UPDATE member_context_state SET confirmed_revision=? "
+                    "WHERE fleet_id=? AND agent_ref=?",
+                    (
+                        context["context_revision"],
+                        fleet_id,
+                        command["target_agent_ref"],
+                    ),
+                )
+                db.execute(
+                    "UPDATE outbox SET status='abandoned',result_detail=? "
+                    "WHERE fleet_id=? AND target_agent_ref=? AND command_type='context.sync' "
+                    "AND command_id<>? AND status IN ('pending','retry')",
+                    (
+                        "superseded by confirmed current context",
+                        fleet_id,
+                        command["target_agent_ref"],
+                        command_id,
+                    ),
+                )
+                self._append_event(
+                    db,
+                    fleet_id,
+                    "member",
+                    command["target_agent_ref"],
+                    "context.confirmed",
+                    {
+                        "command_id": command_id,
+                        "context_revision": context["context_revision"],
+                        "runtime_product": runtime_product,
+                        "session_id": session_id,
+                    },
+                )
+                if command["status"] in {"sending", "unknown"}:
+                    db.execute(
+                        "UPDATE outbox SET status='delivered',result_detail=?,delivered_at=?,"
+                        "lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL "
+                        "WHERE fleet_id=? AND command_id=?",
+                        ("confirmed by Agent Fleet hook", consumed_at, fleet_id, command_id),
+                    )
+                    self._append_event(
+                        db,
+                        fleet_id,
+                        "system",
+                        command_id,
+                        "delivery.delivered",
+                        {"detail": "confirmed by Agent Fleet hook"},
+                    )
+        return {
+            "fleet_id": fleet_id,
+            "agent_ref": command["target_agent_ref"],
+            "context": context,
+            "control": safe_control,
+            "status": "confirmed",
+            "idempotent": already_consumed,
+        }
+
+    def _session_activation_payload(
+        self,
+        db: sqlite3.Connection,
+        fleet_id: str,
+        agent_ref: str,
+        session_id: str,
+        runtime_product: str,
+        context_revision: int,
+    ) -> dict[str, Any]:
+        activation = db.execute(
+            "SELECT payload_json FROM outbox WHERE fleet_id=? AND target_agent_ref=? "
+            "AND command_type='context.sync' AND activation_session_id=? "
+            "AND activation_runtime_product=? AND activation_consumed_at IS NOT NULL "
+            "ORDER BY activation_consumed_at DESC,command_id DESC LIMIT 1",
+            (fleet_id, agent_ref, session_id, runtime_product),
+        ).fetchone()
+        if activation is None:
+            raise FleetError("session is not bound to this fleet member")
+        payload = json.loads(activation["payload_json"])
+        if payload.get("context_revision") != context_revision:
+            raise FleetError("session context is not current")
+        return payload
+
+    def current_session_context(
+        self,
+        fleet_id: str,
+        agent_ref: str,
+        session_id: str,
+        runtime_product: str,
+    ) -> dict[str, Any]:
+        """Return current context only for a Core-confirmed agent session."""
+
+        if not session_id.strip():
+            raise FleetError("session_id is required")
+        if runtime_product not in {"claude", "codex"}:
+            raise FleetError("runtime_product must be claude or codex")
+        with self.connect() as db:
+            state = db.execute(
+                "SELECT context_revision,confirmed_revision FROM member_context_state "
+                "WHERE fleet_id=? AND agent_ref=?",
+                (fleet_id, agent_ref),
+            ).fetchone()
+            if state is None:
+                raise FleetError("unknown fleet member")
+            if state["confirmed_revision"] != state["context_revision"]:
+                raise FleetError("session context is not current")
+            payload = self._session_activation_payload(
+                db,
+                fleet_id,
+                agent_ref,
+                session_id,
+                runtime_product,
+                state["context_revision"],
+            )
+            control = payload.get("control")
+            safe_control = dict(control) if isinstance(control, Mapping) else {}
+            context = self._context_capsule(db, fleet_id, agent_ref)
+        return {
+            "fleet_id": fleet_id,
+            "agent_ref": agent_ref,
+            "context": context,
+            "control": safe_control,
+            "status": "current",
+        }
+
+    def invalidate_contexts(self, fleet_id: str) -> dict[str, Any]:
+        """Close normal-command delivery until every new session confirms context."""
+
+        with self.connect() as db:
+            fleet = db.execute(
+                "SELECT 1 FROM fleets WHERE fleet_id=?", (fleet_id,)
+            ).fetchone()
+            if fleet is None:
+                raise FleetError(f"unknown fleet: {fleet_id}")
+            updated = db.execute(
+                "UPDATE member_context_state SET context_revision=context_revision+1,"
+                "confirmed_revision=0 WHERE fleet_id=?",
+                (fleet_id,),
+            )
+            db.execute(
+                "UPDATE outbox SET status='abandoned',result_detail=? "
+                "WHERE fleet_id=? AND command_type='context.sync' "
+                "AND status IN ('pending','retry')",
+                ("invalidated before a new runtime session", fleet_id),
+            )
+            self._append_event(
+                db,
+                fleet_id,
+                "system",
+                fleet_id,
+                "context.invalidated",
+                {"member_count": updated.rowcount},
+            )
+        return {"fleet_id": fleet_id, "status": "invalidated"}
+
+    def _verify_command_receipt(
+        self,
+        db: sqlite3.Connection,
+        fleet_id: str,
+        command_id: str,
+        command_document: Mapping[str, Any],
+        session_id: str,
+        runtime_product: str,
+    ) -> tuple[sqlite3.Row, dict[str, Any], dict[str, Any], bool]:
+        if not session_id.strip():
+            raise FleetError("session_id is required")
+        if runtime_product not in {"claude", "codex"}:
+            raise FleetError("runtime_product must be claude or codex")
+        command = db.execute(
+            "SELECT command_id,fleet_id,sender_ref,target_agent_ref,command_type,"
+            "payload_json,status,created_at,activation_consumed_at,"
+            "activation_session_id,activation_runtime_product FROM outbox "
+            "WHERE fleet_id=? AND command_id=?",
+            (fleet_id, command_id),
+        ).fetchone()
+        if command is None or command["command_type"] == "context.sync":
+            raise FleetError("command receipt is invalid")
+        expected = self._command_document(db, command)
+        expected["spec"].pop("context", None)
+        received = json.loads(
+            json.dumps(command_document, ensure_ascii=False, sort_keys=True)
+        )
+        received_spec = received.get("spec")
+        if not isinstance(received_spec, dict):
+            raise FleetError("command receipt contract is invalid")
+        received_spec.pop("context", None)
+        if received != expected:
+            raise FleetError("command receipt content does not match Core")
+        already_consumed = command["activation_consumed_at"] is not None
+        if already_consumed and (
+            command["activation_session_id"] != session_id
+            or command["activation_runtime_product"] != runtime_product
+        ):
+            raise FleetError("command was already consumed by another session")
+        if command["status"] not in {"sending", "delivered", "unknown"}:
+            raise FleetError("command is not being delivered")
+        state = db.execute(
+            "SELECT context_revision,confirmed_revision FROM member_context_state "
+            "WHERE fleet_id=? AND agent_ref=?",
+            (fleet_id, command["target_agent_ref"]),
+        ).fetchone()
+        if state is None or state["context_revision"] != state["confirmed_revision"]:
+            raise FleetError("command target context is not current")
+        self._session_activation_payload(
+            db,
+            fleet_id,
+            command["target_agent_ref"],
+            session_id,
+            runtime_product,
+            state["context_revision"],
+        )
+        control_row = db.execute(
+            "SELECT payload_json FROM outbox WHERE fleet_id=? AND target_agent_ref=? "
+            "AND command_type='context.sync' ORDER BY created_at DESC,command_id DESC LIMIT 1",
+            (fleet_id, command["target_agent_ref"]),
+        ).fetchone()
+        control_payload = (
+            json.loads(control_row["payload_json"])
+            if control_row is not None
+            else {}
+        )
+        control = control_payload.get("control")
+        safe_control = dict(control) if isinstance(control, Mapping) else {}
+        context = self._context_capsule(db, fleet_id, command["target_agent_ref"])
+        return command, context, safe_control, already_consumed
+
+    def prepare_command(
+        self,
+        fleet_id: str,
+        command_id: str,
+        command_document: Mapping[str, Any],
+        session_id: str,
+        runtime_product: str,
+    ) -> dict[str, Any]:
+        """Validate a command without confirming delivery."""
+
+        with self.connect() as db:
+            command, context, control, already_consumed = self._verify_command_receipt(
+                db,
+                fleet_id,
+                command_id,
+                command_document,
+                session_id,
+                runtime_product,
+            )
+        return {
+            "fleet_id": fleet_id,
+            "agent_ref": command["target_agent_ref"],
+            "context": context,
+            "control": control,
+            "status": "prepared",
+            "idempotent": already_consumed,
+        }
+
+    def consume_command(
+        self,
+        fleet_id: str,
+        command_id: str,
+        command_document: Mapping[str, Any],
+        session_id: str,
+        runtime_product: str,
+    ) -> dict[str, Any]:
+        """Confirm a locally persisted command receipt for one session."""
+
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            command, context, safe_control, already_consumed = self._verify_command_receipt(
+                db,
+                fleet_id,
+                command_id,
+                command_document,
+                session_id,
+                runtime_product,
+            )
+            if not already_consumed:
+                consumed_at = utc_now()
+                db.execute(
+                    "UPDATE outbox SET activation_consumed_at=?,activation_session_id=?,"
+                    "activation_runtime_product=? WHERE fleet_id=? AND command_id=?",
+                    (consumed_at, session_id, runtime_product, fleet_id, command_id),
+                )
+                self._append_event(
+                    db,
+                    fleet_id,
+                    "member",
+                    command["target_agent_ref"],
+                    "command.received",
+                    {
+                        "command_id": command_id,
+                        "command_type": command["command_type"],
+                        "runtime_product": runtime_product,
+                        "session_id": session_id,
+                    },
+                )
+                if command["status"] in {"sending", "unknown"}:
+                    db.execute(
+                        "UPDATE outbox SET status='delivered',result_detail=?,delivered_at=?,"
+                        "lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL "
+                        "WHERE fleet_id=? AND command_id=?",
+                        ("confirmed by Agent Fleet hook", consumed_at, fleet_id, command_id),
+                    )
+                    self._append_event(
+                        db,
+                        fleet_id,
+                        "system",
+                        command_id,
+                        "delivery.delivered",
+                        {"detail": "confirmed by Agent Fleet hook"},
+                    )
+        return {
+            "fleet_id": fleet_id,
+            "agent_ref": command["target_agent_ref"],
+            "context": context,
+            "control": safe_control,
+            "status": "received",
+            "idempotent": already_consumed,
+        }
+
     @staticmethod
     def _append_event(
         db: sqlite3.Connection,
@@ -500,6 +1038,69 @@ class FleetStore:
     ) -> int:
         with self.connect() as db:
             return self._append_event(db, fleet_id, entity_type, entity_id, event_type, payload)
+
+    @staticmethod
+    def _assign_pending_in_tx(
+        db: sqlite3.Connection,
+        fleet_id: str,
+        task_id: str,
+        agent_ref: str,
+        manager_ref: str,
+        command_id: str,
+    ) -> None:
+        task = db.execute(
+            "SELECT status,planned_assignee_ref,title,description FROM tasks "
+            "WHERE fleet_id=? AND task_id=?",
+            (fleet_id, task_id),
+        ).fetchone()
+        if task is None:
+            raise FleetError(f"unknown task: {task_id}")
+        if task["status"] != "pending":
+            raise FleetError(f"task {task_id!r} is not pending")
+        if task["planned_assignee_ref"] != agent_ref:
+            raise FleetError(
+                f"task {task_id!r} is declared for agent_ref "
+                f"{task['planned_assignee_ref']!r}"
+            )
+        now = utc_now()
+        db.execute(
+            "UPDATE tasks SET status='assigned',assignee_ref=?,updated_at=? "
+            "WHERE fleet_id=? AND task_id=?",
+            (agent_ref, now, fleet_id, task_id),
+        )
+        FleetStore._bump_context(db, fleet_id, agent_ref, "task_assigned")
+        FleetStore._append_event(
+            db, fleet_id, "task", task_id, "task.assigned", {"agent_ref": agent_ref}
+        )
+        db.execute(
+            "INSERT INTO outbox(command_id,fleet_id,sender_ref,target_agent_ref,command_type,"
+            "payload_json,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                command_id,
+                fleet_id,
+                manager_ref,
+                agent_ref,
+                "task.assign",
+                json.dumps(
+                    {
+                        "task_id": task_id,
+                        "title": task["title"],
+                        "description": task["description"],
+                    },
+                    sort_keys=True,
+                ),
+                "pending",
+                now,
+            ),
+        )
+        FleetStore._append_event(
+            db,
+            fleet_id,
+            "system",
+            command_id,
+            "command.enqueued",
+            {"command_type": "task.assign", "target_agent_ref": agent_ref},
+        )
 
     def assign(
         self,
@@ -553,48 +1154,8 @@ class FleetStore:
                         "idempotent": True,
                     }
             self._require_transition(str(task["status"]), "assigned")
-            db.execute(
-                "UPDATE tasks SET status='assigned',assignee_ref=?,updated_at=? "
-                "WHERE fleet_id=? AND task_id=?",
-                (agent_ref, utc_now(), fleet_id, task_id),
-            )
-            self._bump_context(db, fleet_id, agent_ref)
-            self._append_event(
-                db,
-                fleet_id,
-                "task",
-                task_id,
-                "task.assigned",
-                {"agent_ref": agent_ref},
-            )
-            db.execute(
-                "INSERT INTO outbox(command_id,fleet_id,sender_ref,target_agent_ref,command_type,"
-                "payload_json,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (
-                    command_id,
-                    fleet_id,
-                    manager_ref,
-                    agent_ref,
-                    "task.assign",
-                    json.dumps(
-                        {
-                            "task_id": task_id,
-                            "title": task["title"],
-                            "description": task["description"],
-                        },
-                        sort_keys=True,
-                    ),
-                    "pending",
-                    utc_now(),
-                ),
-            )
-            self._append_event(
-                db,
-                fleet_id,
-                "system",
-                command_id,
-                "command.enqueued",
-                {"command_type": "task.assign", "target_agent_ref": agent_ref},
+            self._assign_pending_in_tx(
+                db, fleet_id, task_id, agent_ref, manager_ref, command_id
             )
         return {
             "task_id": task_id,
@@ -615,6 +1176,7 @@ class FleetStore:
         target: str,
         agent_ref: str,
         report: Mapping[str, Any] | None = None,
+        operation_id: str | None = None,
     ) -> dict[str, Any]:
         if target == "completed":
             target = "reported"
@@ -623,6 +1185,29 @@ class FleetStore:
         if target in {"reported", "failed", "blocked"} and report is None:
             raise FleetError(f"task.report payload is required for {target}")
         with self.connect() as db:
+            fingerprint = json.dumps(
+                {
+                    "action": "task.report",
+                    "task_id": task_id,
+                    "target": target,
+                    "agent_ref": agent_ref,
+                    "report": report,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if operation_id:
+                existing_operation = db.execute(
+                    "SELECT fingerprint,result_json FROM operations "
+                    "WHERE fleet_id=? AND operation_id=?",
+                    (fleet_id, operation_id),
+                ).fetchone()
+                if existing_operation is not None:
+                    if existing_operation["fingerprint"] != fingerprint:
+                        raise FleetError("operation_id already has different content")
+                    result = json.loads(existing_operation["result_json"])
+                    result["idempotent"] = True
+                    return result
             task = db.execute(
                 "SELECT status,assignee_ref FROM tasks WHERE fleet_id=? AND task_id=?",
                 (fleet_id, task_id),
@@ -637,13 +1222,98 @@ class FleetStore:
                 "UPDATE tasks SET status=?,updated_at=? WHERE fleet_id=? AND task_id=?",
                 (target, utc_now(), fleet_id, task_id),
             )
-            self._bump_context(db, fleet_id, agent_ref)
+            self._bump_context(db, fleet_id, agent_ref, f"task_{target}")
             payload = {"from": current, "to": target, "report": report or {}}
             self._append_event(db, fleet_id, "task", task_id, "task.reported", payload)
-        return {"task_id": task_id, "status": target, "assignee_ref": task["assignee_ref"]}
+            if target in {"reported", "blocked", "failed"}:
+                manager = db.execute(
+                    "SELECT manager_ref FROM fleet_contexts WHERE fleet_id=?",
+                    (fleet_id,),
+                ).fetchone()
+                if manager is None:
+                    raise FleetError(f"unknown fleet: {fleet_id}")
+                command_id = f"task-report:{fleet_id}:{task_id}:{uuid.uuid4()}"
+                db.execute(
+                    "INSERT INTO outbox(command_id,fleet_id,sender_ref,target_agent_ref,"
+                    "command_type,payload_json,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        command_id,
+                        fleet_id,
+                        agent_ref,
+                        manager["manager_ref"],
+                        "task.report",
+                        json.dumps(
+                            {
+                                "task_id": task_id,
+                                "status": target,
+                                "report": report or {},
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        "pending",
+                        utc_now(),
+                    ),
+                )
+                self._append_event(
+                    db,
+                    fleet_id,
+                    "system",
+                    command_id,
+                    "command.enqueued",
+                    {
+                        "command_type": "task.report",
+                        "target_agent_ref": manager["manager_ref"],
+                    },
+                )
+            result = {
+                "task_id": task_id,
+                "status": target,
+                "assignee_ref": task["assignee_ref"],
+            }
+            if operation_id:
+                db.execute(
+                    "INSERT INTO operations(fleet_id,operation_id,fingerprint,result_json,created_at) "
+                    "VALUES(?,?,?,?,?)",
+                    (
+                        fleet_id,
+                        operation_id,
+                        fingerprint,
+                        json.dumps(result, sort_keys=True),
+                        utc_now(),
+                    ),
+                )
+        return result
 
-    def accept_task(self, fleet_id: str, task_id: str, manager_ref: str) -> dict[str, Any]:
+    def accept_task(
+        self,
+        fleet_id: str,
+        task_id: str,
+        manager_ref: str,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
         with self.connect() as db:
+            fingerprint = json.dumps(
+                {
+                    "action": "task.accept",
+                    "task_id": task_id,
+                    "manager_ref": manager_ref,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if operation_id:
+                existing_operation = db.execute(
+                    "SELECT fingerprint,result_json FROM operations "
+                    "WHERE fleet_id=? AND operation_id=?",
+                    (fleet_id, operation_id),
+                ).fetchone()
+                if existing_operation is not None:
+                    if existing_operation["fingerprint"] != fingerprint:
+                        raise FleetError("operation_id already has different content")
+                    result = json.loads(existing_operation["result_json"])
+                    result["idempotent"] = True
+                    return result
             manager = db.execute(
                 "SELECT is_manager FROM members WHERE fleet_id=? AND agent_ref=?",
                 (fleet_id, manager_ref),
@@ -661,6 +1331,10 @@ class FleetStore:
                 "UPDATE tasks SET status='accepted',updated_at=? WHERE fleet_id=? AND task_id=?",
                 (utc_now(), fleet_id, task_id),
             )
+            if task["assignee_ref"]:
+                self._bump_context(
+                    db, fleet_id, task["assignee_ref"], "task_accepted"
+                )
             self._append_event(
                 db,
                 fleet_id,
@@ -669,12 +1343,57 @@ class FleetStore:
                 "task.accepted",
                 {"manager_ref": manager_ref},
             )
-        return {
+            ready = list(
+                db.execute(
+                    "SELECT t.task_id,t.planned_assignee_ref FROM tasks t "
+                    "WHERE t.fleet_id=? AND t.status='pending' "
+                    "AND EXISTS (SELECT 1 FROM task_dependencies changed "
+                    "WHERE changed.fleet_id=t.fleet_id AND changed.task_id=t.task_id "
+                    "AND changed.dependency_task_id=?) "
+                    "AND NOT EXISTS (SELECT 1 FROM task_dependencies d "
+                    "JOIN tasks dependency ON dependency.fleet_id=d.fleet_id "
+                    "AND dependency.task_id=d.dependency_task_id "
+                    "WHERE d.fleet_id=t.fleet_id AND d.task_id=t.task_id "
+                    "AND dependency.status<>'accepted') ORDER BY t.task_id",
+                    (fleet_id, task_id),
+                )
+            )
+            released_tasks: list[str] = []
+            for successor in ready:
+                assignee = successor["planned_assignee_ref"]
+                if not assignee:
+                    raise FleetError(
+                        f"task {successor['task_id']!r} has no planned assignee"
+                    )
+                self._assign_pending_in_tx(
+                    db,
+                    fleet_id,
+                    successor["task_id"],
+                    assignee,
+                    manager_ref,
+                    f"task-assign:{fleet_id}:{successor['task_id']}:dependency-release",
+                )
+                released_tasks.append(successor["task_id"])
+            result = {
             "task_id": task_id,
             "status": "accepted",
             "assignee_ref": task["assignee_ref"],
             "accepted_by": manager_ref,
-        }
+            "released_tasks": released_tasks,
+            }
+            if operation_id:
+                db.execute(
+                    "INSERT INTO operations(fleet_id,operation_id,fingerprint,result_json,created_at) "
+                    "VALUES(?,?,?,?,?)",
+                    (
+                        fleet_id,
+                        operation_id,
+                        fingerprint,
+                        json.dumps(result, sort_keys=True),
+                        utc_now(),
+                    ),
+                )
+        return result
 
     def report_progress(
         self,
@@ -820,18 +1539,27 @@ class FleetStore:
             ).fetchone()
             if target is None:
                 raise FleetError(f"unknown target agent_ref: {target_agent_ref}")
-            encoded_payload = json.dumps(payload, sort_keys=True)
             existing = db.execute(
                 "SELECT sender_ref,target_agent_ref,command_type,payload_json,status "
                 "FROM outbox WHERE fleet_id=? AND command_id=?",
                 (fleet_id, command_id),
             ).fetchone()
             if existing is not None:
+                existing_payload = json.loads(existing["payload_json"])
+                comparable_existing = dict(existing_payload)
+                comparable_existing.pop("activation_token", None)
+                comparable_existing.pop("context_revision", None)
                 if (
                     existing["sender_ref"] == sender_ref
                     and existing["target_agent_ref"] == target_agent_ref
                     and existing["command_type"] == command_type
-                    and existing["payload_json"] == encoded_payload
+                    and (
+                        existing_payload == dict(payload)
+                        or (
+                            command_type == "context.sync"
+                            and comparable_existing == dict(payload)
+                        )
+                    )
                 ):
                     return {
                         "command_id": command_id,
@@ -839,6 +1567,29 @@ class FleetStore:
                         "idempotent": True,
                     }
                 raise FleetError(f"command_id {command_id!r} already has different content")
+            stored_payload = dict(payload)
+            if command_type == "context.sync":
+                state = db.execute(
+                    "SELECT context_revision FROM member_context_state "
+                    "WHERE fleet_id=? AND agent_ref=?",
+                    (fleet_id, target_agent_ref),
+                ).fetchone()
+                if state is None:
+                    raise FleetError(f"unknown target agent_ref: {target_agent_ref}")
+                stored_payload.pop("activation_token", None)
+                stored_payload["context_revision"] = int(state["context_revision"])
+                stored_payload["activation_token"] = secrets.token_urlsafe(32)
+                db.execute(
+                    "UPDATE outbox SET status='abandoned',result_detail=? "
+                    "WHERE fleet_id=? AND target_agent_ref=? "
+                    "AND command_type='context.sync' AND status IN ('pending','retry')",
+                    (
+                        "superseded by an explicit current context",
+                        fleet_id,
+                        target_agent_ref,
+                    ),
+                )
+            encoded_payload = json.dumps(stored_payload, sort_keys=True)
             db.execute(
                 "INSERT INTO outbox(command_id,fleet_id,sender_ref,target_agent_ref,command_type,"
                 "payload_json,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -973,7 +1724,8 @@ class FleetStore:
                 "SELECT 1 FROM member_context_state c WHERE c.fleet_id=outbox.fleet_id "
                 "AND c.agent_ref=outbox.target_agent_ref "
                 "AND c.confirmed_revision=c.context_revision)) "
-                "ORDER BY CASE command_type WHEN 'context.sync' THEN 0 ELSE 1 END,"
+                "ORDER BY CASE command_type "
+                "WHEN 'task.report' THEN 0 WHEN 'context.sync' THEN 1 ELSE 2 END,"
                 "created_at,command_id LIMIT 1",
                 (fleet_id, now_value),
             ).fetchone()
@@ -1022,12 +1774,13 @@ class FleetStore:
         fleet_id: str,
         command_id: str,
         lease_token: str,
+        now: str | None = None,
     ) -> dict[str, Any]:
         """Fence the point immediately before the external Herdr send begins."""
 
         with self.connect() as db:
             command = db.execute(
-                "SELECT status,lease_token,attempt_count FROM outbox "
+                "SELECT status,lease_token,lease_expires_at,attempt_count FROM outbox "
                 "WHERE fleet_id=? AND command_id=?",
                 (fleet_id, command_id),
             ).fetchone()
@@ -1035,6 +1788,10 @@ class FleetStore:
                 raise FleetError(f"unknown command: {command_id}")
             if command["status"] != "processing" or command["lease_token"] != lease_token:
                 raise FleetError("delivery lease token is stale or invalid")
+            current_time = self._parse_timestamp(now or utc_now(), "now")
+            expires_at = self._parse_timestamp(command["lease_expires_at"], "lease_expires_at")
+            if expires_at <= current_time:
+                raise FleetError("delivery lease has expired")
             db.execute(
                 "UPDATE outbox SET status='sending' WHERE fleet_id=? AND command_id=?",
                 (fleet_id, command_id),
@@ -1060,22 +1817,39 @@ class FleetStore:
         lease_token: str,
         result: str,
         detail: str | None = None,
+        now: str | None = None,
     ) -> dict[str, Any]:
         if result not in {"delivered", "unknown", "retry", "abandoned"}:
             raise FleetError(f"unsupported delivery result: {result}")
         with self.connect() as db:
             command = db.execute(
-                "SELECT status,lease_token,attempt_count FROM outbox "
+                "SELECT status,lease_token,lease_expires_at,attempt_count,"
+                "activation_consumed_at FROM outbox "
                 "WHERE fleet_id=? AND command_id=?",
                 (fleet_id, command_id),
             ).fetchone()
             if command is None:
                 raise FleetError(f"unknown command: {command_id}")
+            if command["status"] == "delivered" and command["activation_consumed_at"]:
+                return {
+                    "command_id": command_id,
+                    "status": "delivered",
+                    "attempt_count": command["attempt_count"],
+                    "idempotent": True,
+                }
             if command["status"] == "processing" and command["lease_token"] == lease_token:
                 raise FleetError("delivery has not started")
             if command["status"] != "sending" or command["lease_token"] != lease_token:
                 raise FleetError("delivery lease token is stale or invalid")
-            completed_at = utc_now()
+            completed_at = now or utc_now()
+            current_time = self._parse_timestamp(completed_at, "now")
+            expires_at = self._parse_timestamp(command["lease_expires_at"], "lease_expires_at")
+            if expires_at <= current_time:
+                raise FleetError("delivery lease has expired")
+            if result == "delivered" and not command["activation_consumed_at"]:
+                raise FleetError(
+                    "delivery cannot be confirmed without an Agent Fleet hook receipt"
+                )
             next_attempt_at = completed_at if result == "retry" else None
             db.execute(
                 "UPDATE outbox SET status=?,result_detail=?,delivered_at=?,next_attempt_at=?,"
@@ -1183,6 +1957,31 @@ class FleetStore:
             "events": events,
         }
 
+    def remove_fleet(self, fleet_id: str, confirmation: str) -> dict[str, Any]:
+        if confirmation != fleet_id:
+            raise FleetError("fleet removal requires an exact --confirm-fleet value")
+        with self.connect() as db:
+            exists = db.execute(
+                "SELECT 1 FROM fleets WHERE fleet_id=?", (fleet_id,)
+            ).fetchone()
+            if exists is None:
+                return {"fleet_id": fleet_id, "status": "absent", "idempotent": True}
+            for table in (
+                "outbox",
+                "events",
+                "task_reports",
+                "task_dependencies",
+                "task_contexts",
+                "operations",
+                "tasks",
+                "member_context_state",
+                "fleet_contexts",
+                "members",
+                "fleets",
+            ):
+                db.execute(f"DELETE FROM {table} WHERE fleet_id=?", (fleet_id,))
+        return {"fleet_id": fleet_id, "status": "removed"}
+
 
 def _json_object(value: str) -> Mapping[str, Any]:
     parsed = json.loads(value)
@@ -1201,6 +2000,9 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--config", type=Path, required=True)
     status = sub.add_parser("status", aliases=["fleet.reconcile"])
     status.add_argument("--fleet", required=True)
+    remove = sub.add_parser("fleet.remove")
+    remove.add_argument("--fleet", required=True)
+    remove.add_argument("--confirm-fleet", required=True)
     assign = sub.add_parser("assign", aliases=["task.assign"])
     assign.add_argument("--fleet", required=True)
     assign.add_argument("--task", required=True)
@@ -1213,6 +2015,7 @@ def build_parser() -> argparse.ArgumentParser:
     transition.add_argument("--status", required=True, choices=sorted(TASK_TRANSITIONS))
     transition.add_argument("--agent-ref", required=True)
     transition.add_argument("--report", type=_json_object)
+    transition.add_argument("--operation-id")
     progress = sub.add_parser("progress-report", aliases=["task.progress"])
     progress.add_argument("--fleet", required=True)
     progress.add_argument("--task", required=True)
@@ -1224,6 +2027,7 @@ def build_parser() -> argparse.ArgumentParser:
     accept.add_argument("--fleet", required=True)
     accept.add_argument("--task", required=True)
     accept.add_argument("--manager-ref", required=True)
+    accept.add_argument("--operation-id")
     event = sub.add_parser("event")
     event.add_argument("--fleet", required=True)
     event.add_argument("--entity-type", required=True, choices=sorted(EVENT_SOURCE_TYPES))
@@ -1251,6 +2055,39 @@ def build_parser() -> argparse.ArgumentParser:
     context_confirm.add_argument("--fleet", required=True)
     context_confirm.add_argument("--agent-ref", required=True)
     context_confirm.add_argument("--revision", required=True, type=int)
+    context_current = sub.add_parser("context.current")
+    context_current.add_argument("--fleet", required=True)
+    context_current.add_argument("--agent-ref", required=True)
+    context_current.add_argument("--session-id", required=True)
+    context_current.add_argument(
+        "--runtime-product", required=True, choices=["claude", "codex"]
+    )
+    context_invalidate = sub.add_parser("context.invalidate")
+    context_invalidate.add_argument("--fleet", required=True)
+    context_consume = sub.add_parser("context.consume")
+    context_consume.add_argument("--fleet", required=True)
+    context_consume.add_argument("--command-id", required=True)
+    context_consume.add_argument("--activation-token", required=True)
+    context_consume.add_argument("--session-id", required=True)
+    context_consume.add_argument(
+        "--runtime-product", required=True, choices=["claude", "codex"]
+    )
+    command_consume = sub.add_parser("command.consume")
+    command_consume.add_argument("--fleet", required=True)
+    command_consume.add_argument("--command-id", required=True)
+    command_consume.add_argument("--command-json", type=_json_object, required=True)
+    command_consume.add_argument("--session-id", required=True)
+    command_consume.add_argument(
+        "--runtime-product", required=True, choices=["claude", "codex"]
+    )
+    command_prepare = sub.add_parser("command.prepare")
+    command_prepare.add_argument("--fleet", required=True)
+    command_prepare.add_argument("--command-id", required=True)
+    command_prepare.add_argument("--command-json", type=_json_object, required=True)
+    command_prepare.add_argument("--session-id", required=True)
+    command_prepare.add_argument(
+        "--runtime-product", required=True, choices=["claude", "codex"]
+    )
     claim = sub.add_parser("delivery.claim")
     claim.add_argument("--fleet", required=True)
     claim.add_argument("--worker-id", required=True)
@@ -1260,6 +2097,7 @@ def build_parser() -> argparse.ArgumentParser:
     delivery_begin.add_argument("--fleet", required=True)
     delivery_begin.add_argument("--command-id", required=True)
     delivery_begin.add_argument("--lease-token", required=True)
+    delivery_begin.add_argument("--now")
     delivery_result = sub.add_parser("delivery.result")
     delivery_result.add_argument("--fleet", required=True)
     delivery_result.add_argument("--command-id", required=True)
@@ -1268,6 +2106,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--result", required=True, choices=["delivered", "unknown", "retry", "abandoned"]
     )
     delivery_result.add_argument("--detail")
+    delivery_result.add_argument("--now")
     return parser
 
 
@@ -1283,6 +2122,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = store.initialize(load_fleet_config(args.config))
         elif args.action in {"status", "fleet.reconcile"}:
             result = store.status(args.fleet)
+        elif args.action == "fleet.remove":
+            result = store.remove_fleet(args.fleet, args.confirm_fleet)
         elif args.action in {"assign", "task.assign"}:
             result = store.assign(
                 args.fleet,
@@ -1293,7 +2134,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.action in {"task-report", "task.report"}:
             result = store.transition_task(
-                args.fleet, args.task, args.status, args.agent_ref, args.report
+                args.fleet,
+                args.task,
+                args.status,
+                args.agent_ref,
+                args.report,
+                args.operation_id,
             )
         elif args.action in {"progress-report", "task.progress"}:
             result = store.report_progress(
@@ -1305,9 +2151,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.next_report_at,
             )
         elif args.action == "task.accept":
-            result = store.accept_task(args.fleet, args.task, args.manager_ref)
+            result = store.accept_task(
+                args.fleet, args.task, args.manager_ref, args.operation_id
+            )
         elif args.action == "context.confirm":
             result = store.confirm_context(args.fleet, args.agent_ref, args.revision)
+        elif args.action == "context.current":
+            result = store.current_session_context(
+                args.fleet, args.agent_ref, args.session_id, args.runtime_product
+            )
+        elif args.action == "context.invalidate":
+            result = store.invalidate_contexts(args.fleet)
+        elif args.action == "context.consume":
+            result = store.consume_context_activation(
+                args.fleet,
+                args.command_id,
+                args.activation_token,
+                args.session_id,
+                args.runtime_product,
+            )
+        elif args.action == "command.consume":
+            result = store.consume_command(
+                args.fleet,
+                args.command_id,
+                args.command_json,
+                args.session_id,
+                args.runtime_product,
+            )
+        elif args.action == "command.prepare":
+            result = store.prepare_command(
+                args.fleet,
+                args.command_id,
+                args.command_json,
+                args.session_id,
+                args.runtime_product,
+            )
         elif args.action == "event":
             result = {"event_id": store.append_event(
                 args.fleet, args.entity_type, args.entity_id, args.type, args.payload
@@ -1327,7 +2205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.action == "delivery.begin":
             result = store.begin_delivery(
-                args.fleet, args.command_id, args.lease_token
+                args.fleet, args.command_id, args.lease_token, args.now
             )
         elif args.action == "delivery.result":
             result = store.record_delivery_result(
@@ -1336,6 +2214,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.lease_token,
                 args.result,
                 args.detail,
+                args.now,
             )
         else:
             result = store.acknowledge(args.fleet, args.command_id, args.agent_ref)

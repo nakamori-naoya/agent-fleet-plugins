@@ -12,7 +12,7 @@ from pathlib import Path
 
 SPEC_DIR = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = SPEC_DIR / "scripts" / "validate_fleet.py"
-EXAMPLE_PATH = SPEC_DIR / "examples" / "fleet.example.yml"
+EXAMPLE_PATH = SPEC_DIR.parents[2] / "configs" / "fleets" / "release-readiness.yml"
 
 module_spec = importlib.util.spec_from_file_location("validate_fleet", VALIDATOR_PATH)
 assert module_spec is not None and module_spec.loader is not None
@@ -239,7 +239,7 @@ class FleetValidatorTest(unittest.TestCase):
             mismatch_errors,
         )
 
-    def test_rejects_unsupported_runtime_fields_and_values(self) -> None:
+    def test_runtime_is_adapter_neutral_but_rejects_unknown_fields(self) -> None:
         def add_state(doc):
             doc["spec"]["runtime"]["status"] = "running"
 
@@ -247,7 +247,14 @@ class FleetValidatorTest(unittest.TestCase):
         provider_errors = self.errors_for(
             lambda doc: doc["spec"]["runtime"].__setitem__("provider", "unknown")
         )
-        self.assertIn("spec.runtime.provider: must be 'herdr'", provider_errors)
+        self.assertEqual([], provider_errors)
+
+    def test_headless_core_fleet_does_not_require_runtime_or_view(self) -> None:
+        def mutate(doc):
+            doc["spec"].pop("runtime")
+            doc["spec"].pop("view")
+
+        self.assertEqual([], self.errors_for(mutate))
 
     def test_rejects_concrete_pane_id(self) -> None:
         errors = self.errors_for(
@@ -290,6 +297,21 @@ class FleetValidatorTest(unittest.TestCase):
         errors = self.errors_for(mutate)
         self.assertIn("spec.members[0].role_definition: is not allowed", errors)
         self.assertIn("spec.tasks[0].status: is not allowed", errors)
+
+    def test_path_like_identifiers_are_rejected(self) -> None:
+        mutations = (
+            lambda doc: doc["metadata"].__setitem__("id", "../outside"),
+            lambda doc: doc["spec"]["members"][0].__setitem__(
+                "agent_ref", "manager/../../outside"
+            ),
+            lambda doc: doc["spec"]["tasks"][0].__setitem__("id", "task/one"),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                errors = self.errors_for(mutate)
+                self.assertTrue(
+                    any("safe identifier" in error for error in errors), errors
+                )
 
 
 if __name__ == "__main__":

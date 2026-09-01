@@ -1,10 +1,12 @@
 import importlib.util
 import copy
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import sqlite3
 import stat
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
 
@@ -67,7 +69,7 @@ class FleetStoreTest(unittest.TestCase):
         self.temp.cleanup()
 
     def test_init_creates_logical_core_without_pane_identifiers(self):
-        with sqlite3.connect(self.db) as db:
+        with closing(sqlite3.connect(self.db)) as db:
             columns = {
                 row[1]
                 for table in ("fleets", "members", "tasks", "events", "outbox")
@@ -78,6 +80,8 @@ class FleetStoreTest(unittest.TestCase):
         self.assertEqual(
             "local/test-deck@1", self.store.status("demo")["fleet"]["profile_ref"]
         )
+        self.assertEqual(0o600, stat.S_IMODE(self.db.stat().st_mode))
+        self.assertEqual(0o700, stat.S_IMODE(self.root.stat().st_mode))
 
     def test_same_fleet_config_initialization_is_idempotent(self):
         result = self.store.initialize(NORMALIZED)
@@ -112,6 +116,17 @@ class FleetStoreTest(unittest.TestCase):
             "demo", "task-1", "completed", "worker-1", {"summary": "done"}
         )
         self.assertEqual("reported", result["status"])
+
+    def test_task_transition_operation_id_makes_lost_response_retry_idempotent(self):
+        self.store.assign("demo", "task-1", "worker-1", "manager")
+        first = self.store.transition_task(
+            "demo", "task-1", "running", "worker-1", operation_id="run-task-1"
+        )
+        second = self.store.transition_task(
+            "demo", "task-1", "running", "worker-1", operation_id="run-task-1"
+        )
+        self.assertEqual("running", first["status"])
+        self.assertTrue(second["idempotent"])
 
     def test_invalid_task_transition_is_rejected(self):
         self.store.assign("demo", "task-1", "worker-1", "manager")
@@ -167,19 +182,15 @@ class FleetStoreTest(unittest.TestCase):
 
     def test_work_command_waits_until_current_role_context_is_confirmed(self):
         self.store.assign("demo", "task-1", "worker-1", "manager", "assignment:wait")
-        self.assertIsNone(self.store.claim_delivery("demo", "controller"))
-        self.store.enqueue_command(
-            "demo",
-            "manager",
-            "worker-1",
-            "context.sync",
-            {"reason": "activate"},
-            "context:confirm",
-        )
         activation = self.store.claim_delivery("demo", "controller")
         self.assertEqual("context.sync", activation["command"]["spec"]["type"])
-        revision = activation["command"]["spec"]["context"]["context_revision"]
-        self.store.confirm_context("demo", "worker-1", revision)
+        self.store.consume_context_activation(
+            "demo",
+            activation["command"]["metadata"]["id"],
+            activation["command"]["spec"]["payload"]["activation_token"],
+            "session-wait",
+            "codex",
+        )
         self.store.begin_delivery(
             "demo", activation["command"]["metadata"]["id"], activation["delivery"]["lease_token"]
         )
@@ -197,6 +208,409 @@ class FleetStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(fleet_control.FleetError, "not current"):
             self.store.confirm_context("demo", "worker-1", 1)
 
+    def test_every_context_change_enqueues_one_current_context_sync(self):
+        self.store.assign(
+            "demo", "task-1", "worker-1", "manager", "assignment:context"
+        )
+        first = self.store.claim_delivery("demo", "controller")
+        self.assertEqual("context.sync", first["command"]["spec"]["type"])
+        revision = first["command"]["spec"]["context"]["context_revision"]
+        self.assertEqual(2, revision)
+        self.store.consume_context_activation(
+            "demo",
+            first["command"]["metadata"]["id"],
+            first["command"]["spec"]["payload"]["activation_token"],
+            "session-1",
+            "codex",
+        )
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        second = self.store.claim_delivery("demo", "controller")
+        self.assertEqual("context.sync", second["command"]["spec"]["type"])
+        self.assertEqual(
+            3, second["command"]["spec"]["context"]["context_revision"]
+        )
+
+    def test_terminal_worker_report_enqueues_manager_review_command(self):
+        self.store.assign(
+            "demo", "task-1", "worker-1", "manager", "assignment:review"
+        )
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+
+        self.store.transition_task(
+            "demo",
+            "task-1",
+            "reported",
+            "worker-1",
+            {"summary": "verified result"},
+        )
+
+        pending = self.store.status("demo")["outbox"]
+        review = next(
+            command
+            for command in pending
+            if command["spec"]["type"] == "task.report"
+        )
+        self.assertEqual("worker-1", review["spec"]["source"]["ref"])
+        self.assertEqual("manager", review["spec"]["target"]["ref"])
+        self.assertEqual("task-1", review["spec"]["payload"]["task_id"])
+        self.assertEqual("verified result", review["spec"]["payload"]["report"]["summary"])
+
+    def test_manager_review_does_not_wait_for_worker_context_refresh(self):
+        self.store.assign(
+            "demo", "task-1", "worker-1", "manager", "assignment:fast-review"
+        )
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        self.store.transition_task(
+            "demo",
+            "task-1",
+            "reported",
+            "worker-1",
+            {"summary": "ready for review"},
+        )
+
+        claimed = self.store.claim_delivery("demo", "controller")
+
+        self.assertEqual("task.report", claimed["command"]["spec"]["type"])
+        self.assertEqual("manager", claimed["command"]["spec"]["target"]["ref"])
+
+    def test_context_activation_is_authoritative_one_use_and_session_bound(self):
+        self.store.assign(
+            "demo", "task-1", "worker-1", "manager", "assignment:activation"
+        )
+        claimed = self.store.claim_delivery("demo", "controller")
+        command = claimed["command"]
+        token = command["spec"]["payload"]["activation_token"]
+        activated = self.store.consume_context_activation(
+            "demo", command["metadata"]["id"], token, "session-1", "codex"
+        )
+        self.assertEqual("worker-1", activated["context"]["agent"]["agent_ref"])
+        with self.assertRaisesRegex(fleet_control.FleetError, "already consumed"):
+            self.store.consume_context_activation(
+                "demo", command["metadata"]["id"], token, "session-2", "codex"
+            )
+        with self.assertRaisesRegex(fleet_control.FleetError, "invalid"):
+            self.store.consume_context_activation(
+                "demo", command["metadata"]["id"], "forged", "session-1", "codex"
+            )
+
+    def test_non_activation_command_is_core_verified_and_session_bound(self):
+        self.store.assign(
+            "demo", "task-1", "worker-1", "manager", "assignment:receipt"
+        )
+        context_delivery = self.store.claim_delivery("demo", "controller")
+        context_command = context_delivery["command"]
+        self.store.begin_delivery(
+            "demo",
+            context_command["metadata"]["id"],
+            context_delivery["delivery"]["lease_token"],
+        )
+        self.store.consume_context_activation(
+            "demo",
+            context_command["metadata"]["id"],
+            context_command["spec"]["payload"]["activation_token"],
+            "session-1",
+            "codex",
+        )
+        self.store.record_delivery_result(
+            "demo",
+            context_command["metadata"]["id"],
+            context_delivery["delivery"]["lease_token"],
+            "delivered",
+        )
+        task_delivery = self.store.claim_delivery("demo", "controller")
+        task_command = task_delivery["command"]
+        self.store.begin_delivery(
+            "demo",
+            task_command["metadata"]["id"],
+            task_delivery["delivery"]["lease_token"],
+        )
+
+        prepared = self.store.prepare_command(
+            "demo",
+            task_command["metadata"]["id"],
+            task_command,
+            "session-1",
+            "codex",
+        )
+        self.assertEqual("prepared", prepared["status"])
+        with self.store.connect() as db:
+            before_confirm = db.execute(
+                "SELECT status,activation_consumed_at FROM outbox "
+                "WHERE fleet_id='demo' AND command_id=?",
+                (task_command["metadata"]["id"],),
+            ).fetchone()
+        self.assertEqual("sending", before_confirm["status"])
+        self.assertIsNone(before_confirm["activation_consumed_at"])
+
+        receipt = self.store.consume_command(
+            "demo",
+            task_command["metadata"]["id"],
+            task_command,
+            "session-1",
+            "codex",
+        )
+
+        self.assertEqual("received", receipt["status"])
+        self.assertEqual("worker-1", receipt["agent_ref"])
+        late_result = self.store.record_delivery_result(
+            "demo",
+            task_command["metadata"]["id"],
+            task_delivery["delivery"]["lease_token"],
+            "unknown",
+        )
+        self.assertEqual("delivered", late_result["status"])
+        self.assertTrue(late_result["idempotent"])
+        with self.assertRaisesRegex(fleet_control.FleetError, "another session"):
+            self.store.consume_command(
+                "demo",
+                task_command["metadata"]["id"],
+                task_command,
+                "session-2",
+                "codex",
+            )
+        forged = copy.deepcopy(task_command)
+        forged["spec"]["payload"]["task_id"] = "forged"
+        with self.assertRaisesRegex(fleet_control.FleetError, "does not match"):
+            self.store.consume_command(
+                "demo",
+                task_command["metadata"]["id"],
+                forged,
+                "session-1",
+                "codex",
+            )
+
+    def test_late_hook_receipt_corrects_unknown_delivery(self):
+        self.store.enqueue_command(
+            "demo", "manager", "worker-1", "message.send", {"text": "hello"}, "late"
+        )
+        self.store.enqueue_command(
+            "demo",
+            "manager",
+            "worker-1",
+            "context.sync",
+            {"reason": "bind receipt session"},
+            "late-context",
+        )
+        activation = self.store.claim_delivery("demo", "context-controller")
+        self.store.begin_delivery(
+            "demo", "late-context", activation["delivery"]["lease_token"]
+        )
+        self.store.consume_context_activation(
+            "demo",
+            "late-context",
+            activation["command"]["spec"]["payload"]["activation_token"],
+            "session-1",
+            "codex",
+        )
+        claimed = self.store.claim_delivery("demo", "controller")
+        command = claimed["command"]
+        self.store.begin_delivery(
+            "demo", "late", claimed["delivery"]["lease_token"]
+        )
+        self.store.record_delivery_result(
+            "demo", "late", claimed["delivery"]["lease_token"], "unknown"
+        )
+
+        receipt = self.store.consume_command(
+            "demo", "late", command, "session-1", "codex"
+        )
+
+        self.assertEqual("received", receipt["status"])
+        self.assertEqual(2, self.store.status("demo")["delivery_counts"]["delivered"])
+
+    def test_current_session_context_rejects_stale_or_unbound_sessions(self):
+        self.store.assign(
+            "demo", "task-1", "worker-1", "manager", "assignment:current"
+        )
+        activation = self.store.claim_delivery("demo", "controller")
+        command = activation["command"]
+        self.store.begin_delivery(
+            "demo", command["metadata"]["id"], activation["delivery"]["lease_token"]
+        )
+        self.store.consume_context_activation(
+            "demo",
+            command["metadata"]["id"],
+            command["spec"]["payload"]["activation_token"],
+            "session-1",
+            "codex",
+        )
+        current = self.store.current_session_context(
+            "demo", "worker-1", "session-1", "codex"
+        )
+        self.assertEqual(2, current["context"]["context_revision"])
+        with self.assertRaisesRegex(fleet_control.FleetError, "not bound"):
+            self.store.current_session_context(
+                "demo", "worker-1", "other-session", "codex"
+            )
+
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        with self.assertRaisesRegex(fleet_control.FleetError, "not current"):
+            self.store.current_session_context(
+                "demo", "worker-1", "session-1", "codex"
+            )
+
+    def test_context_invalidation_closes_delivery_gate(self):
+        self.store.enqueue_command(
+            "demo", "manager", "worker-1", "message.send", {"text": "hello"}, "cmd"
+        )
+        self.store.invalidate_contexts("demo")
+
+        self.assertIsNone(self.store.claim_delivery("demo", "controller"))
+
+    def test_context_invalidation_rejects_an_activation_from_the_old_runtime(self):
+        self.store.assign(
+            "demo", "task-1", "worker-1", "manager", "assignment:old-runtime"
+        )
+        activation = self.store.claim_delivery("demo", "controller")
+        command = activation["command"]
+        self.store.begin_delivery(
+            "demo", command["metadata"]["id"], activation["delivery"]["lease_token"]
+        )
+        self.store.invalidate_contexts("demo")
+
+        with self.assertRaisesRegex(fleet_control.FleetError, "revision is invalid"):
+            self.store.consume_context_activation(
+                "demo",
+                command["metadata"]["id"],
+                command["spec"]["payload"]["activation_token"],
+                "old-session",
+                "codex",
+            )
+
+    def test_new_runtime_confirmation_does_not_reactivate_old_session(self):
+        self.store.assign(
+            "demo", "task-1", "worker-1", "manager", "assignment:new-runtime"
+        )
+        old = self.store.claim_delivery("demo", "controller")
+        self.store.begin_delivery(
+            "demo", old["command"]["metadata"]["id"], old["delivery"]["lease_token"]
+        )
+        self.store.consume_context_activation(
+            "demo",
+            old["command"]["metadata"]["id"],
+            old["command"]["spec"]["payload"]["activation_token"],
+            "old-session",
+            "codex",
+        )
+        self.store.invalidate_contexts("demo")
+        self.store.enqueue_command(
+            "demo",
+            "manager",
+            "worker-1",
+            "context.sync",
+            {"reason": "new runtime"},
+            "new-runtime-context",
+        )
+        new = self.store.claim_delivery("demo", "controller-2")
+        self.store.begin_delivery(
+            "demo", new["command"]["metadata"]["id"], new["delivery"]["lease_token"]
+        )
+        self.store.consume_context_activation(
+            "demo",
+            new["command"]["metadata"]["id"],
+            new["command"]["spec"]["payload"]["activation_token"],
+            "new-session",
+            "codex",
+        )
+
+        with self.assertRaisesRegex(fleet_control.FleetError, "not current"):
+            self.store.current_session_context(
+                "demo", "worker-1", "old-session", "codex"
+            )
+        current = self.store.current_session_context(
+            "demo", "worker-1", "new-session", "codex"
+        )
+        self.assertEqual("current", current["status"])
+
+    def test_delayed_command_cannot_reactivate_an_old_runtime_session(self):
+        self.store.assign(
+            "demo", "task-1", "worker-1", "manager", "assignment:delayed"
+        )
+        old_context = self.store.claim_delivery("demo", "controller-old-context")
+        self.store.begin_delivery(
+            "demo",
+            old_context["command"]["metadata"]["id"],
+            old_context["delivery"]["lease_token"],
+        )
+        self.store.consume_context_activation(
+            "demo",
+            old_context["command"]["metadata"]["id"],
+            old_context["command"]["spec"]["payload"]["activation_token"],
+            "old-session",
+            "codex",
+        )
+        delayed = self.store.claim_delivery("demo", "controller-delayed")
+        self.store.begin_delivery(
+            "demo",
+            delayed["command"]["metadata"]["id"],
+            delayed["delivery"]["lease_token"],
+        )
+
+        self.store.invalidate_contexts("demo")
+        self.store.enqueue_command(
+            "demo",
+            "manager",
+            "worker-1",
+            "context.sync",
+            {"reason": "new runtime"},
+            "new-runtime-delayed-context",
+        )
+        new_context = self.store.claim_delivery("demo", "controller-new-context")
+        self.store.begin_delivery(
+            "demo",
+            new_context["command"]["metadata"]["id"],
+            new_context["delivery"]["lease_token"],
+        )
+        self.store.consume_context_activation(
+            "demo",
+            new_context["command"]["metadata"]["id"],
+            new_context["command"]["spec"]["payload"]["activation_token"],
+            "new-session",
+            "codex",
+        )
+
+        with self.assertRaisesRegex(fleet_control.FleetError, "session context is not current"):
+            self.store.prepare_command(
+                "demo",
+                delayed["command"]["metadata"]["id"],
+                delayed["command"],
+                "old-session",
+                "codex",
+            )
+
+    def test_accepting_task_releases_newly_unblocked_dependents(self):
+        config = copy.deepcopy(NORMALIZED)
+        config["metadata"]["id"] = "dependent"
+        config["spec"]["tasks"].append(
+            {
+                "id": "task-2",
+                "assignee": "worker-1",
+                "depends_on": ["task-1"],
+                "instructions": "Do the second task.",
+                "expected_output": "A second verified result.",
+                "completion_criteria": ["The second result includes evidence."],
+            }
+        )
+        self.store.initialize(config)
+        self.store.confirm_context("dependent", "worker-1", 1)
+        self.store.assign(
+            "dependent", "task-1", "worker-1", "manager", "dependent:first"
+        )
+        self.store.transition_task(
+            "dependent", "task-1", "running", "worker-1"
+        )
+        self.store.transition_task(
+            "dependent",
+            "task-1",
+            "reported",
+            "worker-1",
+            {"summary": "done"},
+        )
+        result = self.store.accept_task("dependent", "task-1", "manager")
+        self.assertEqual(["task-2"], result["released_tasks"])
+        tasks = {item["task_id"]: item for item in self.store.status("dependent")["tasks"]}
+        self.assertEqual("assigned", tasks["task-2"]["status"])
+
     def test_blocked_task_can_resume_running(self):
         self.store.assign("demo", "task-1", "worker-1", "manager")
         self.store.transition_task("demo", "task-1", "running", "worker-1")
@@ -212,7 +626,7 @@ class FleetStoreTest(unittest.TestCase):
             self.store.transition_task("demo", "task-1", "running", "manager")
 
     def test_member_schema_and_status_use_role_ref(self):
-        with sqlite3.connect(self.db) as db:
+        with closing(sqlite3.connect(self.db)) as db:
             columns = {row[1] for row in db.execute("PRAGMA table_info(members)")}
         self.assertIn("role_ref", columns)
         self.assertNotIn("role", columns)
@@ -252,11 +666,7 @@ class FleetStoreTest(unittest.TestCase):
         self.assertEqual("worker@1", context["agent"]["role_ref"])
         self.assertEqual("Complete the demo safely.", context["fleet"]["objective"])
         self.assertEqual("manager", context["reporting"]["manager_ref"])
-        self.assertEqual("task-1", context["assignments"][0]["task_id"])
-        self.assertEqual(
-            ["The result includes test evidence."],
-            context["assignments"][0]["completion_criteria"],
-        )
+        self.assertEqual([], context["assignments"])
 
     def test_status_exposes_events_with_frozen_api_version(self):
         event = self.store.status("demo")["events"][0]
@@ -315,7 +725,7 @@ class FleetStoreTest(unittest.TestCase):
         self.assertEqual("running", status["tasks"][0]["status"])
         self.assertEqual("report-1", status["tasks"][0]["latest_report"]["report_id"])
         self.assertEqual("2026-09-01T12:10:00+00:00", status["tasks"][0]["next_report_at"])
-        with sqlite3.connect(self.db) as db:
+        with closing(sqlite3.connect(self.db)) as db:
             self.assertEqual(1, db.execute("SELECT count(*) FROM task_reports").fetchone()[0])
             self.assertEqual(
                 1,
@@ -460,6 +870,34 @@ class FleetStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(fleet_control.FleetError, "delivery has not started"):
             self.store.record_delivery_result(
                 "demo", "cmd-1", claimed["delivery"]["lease_token"], "delivered"
+            )
+
+    def test_delivery_result_cannot_claim_hook_receipt(self):
+        self.store.enqueue_command(
+            "demo", "manager", "worker-1", "message.send", {"text": "hello"}, "cmd-1"
+        )
+        claimed = self.store.claim_delivery("demo", "delivery-1")
+        self.store.begin_delivery(
+            "demo", "cmd-1", claimed["delivery"]["lease_token"]
+        )
+
+        with self.assertRaisesRegex(fleet_control.FleetError, "hook receipt"):
+            self.store.record_delivery_result(
+                "demo", "cmd-1", claimed["delivery"]["lease_token"], "delivered"
+            )
+
+    def test_expired_lease_cannot_begin_or_record_a_result(self):
+        self.store.enqueue_command(
+            "demo", "manager", "worker-1", "message.send", {"text": "hello"}, "late"
+        )
+        now = datetime.now(timezone.utc)
+        claimed = self.store.claim_delivery(
+            "demo", "delivery-1", now.isoformat(), 1
+        )
+        expired = (now + timedelta(seconds=2)).isoformat()
+        with self.assertRaisesRegex(fleet_control.FleetError, "expired"):
+            self.store.begin_delivery(
+                "demo", "late", claimed["delivery"]["lease_token"], now=expired
             )
 
 

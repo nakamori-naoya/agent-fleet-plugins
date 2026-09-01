@@ -8,11 +8,15 @@ Core SQLite schema.  Commands are always built as argv and execution is opt-in.
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
+import os
 import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -75,6 +79,19 @@ CREATE TABLE IF NOT EXISTS view_placements (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (fleet_id, agent_ref)
 );
+CREATE TABLE IF NOT EXISTS provisioning_journal (
+    fleet_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    tab_id TEXT NOT NULL,
+    root_pane_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('workspace_created','complete')),
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workspace_intents (
+    fleet_id TEXT PRIMARY KEY,
+    workspace_label TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -136,7 +153,15 @@ class AdapterState:
                 raise HerdrAdapterError(f"Herdr adapter state database not found: {self.db_path}")
             return
         if self.db_path != ":memory:":
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            if Path(self.db_path).is_symlink():
+                raise HerdrAdapterError(
+                    "Herdr adapter state database must not be a symbolic link"
+                )
+            parent = Path(self.db_path).parent
+            parent_existed = parent.exists()
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not parent_existed:
+                parent.chmod(0o700)
         with self.connect() as db:
             db.executescript(ADAPTER_SCHEMA)
             placement_columns = {
@@ -155,8 +180,15 @@ class AdapterState:
             db = sqlite3.connect(database_uri, uri=True)
         else:
             db = sqlite3.connect(self.db_path)
+            if self.db_path != ":memory:":
+                try:
+                    os.chmod(self.db_path, 0o600)
+                except OSError:
+                    pass
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout = 5000")
+        if not self.read_only:
+            db.execute("PRAGMA journal_mode = WAL")
         try:
             yield db
             db.commit()
@@ -165,6 +197,28 @@ class AdapterState:
             raise
         finally:
             db.close()
+
+    @contextmanager
+    def fleet_lock(self, fleet_id: str) -> Iterator[None]:
+        """同じadapter stateに対する一艦隊一操作をプロセス間で保証する。"""
+
+        safe_token(fleet_id, "fleet_id")
+        if self.db_path == ":memory:":
+            yield
+            return
+        lock_dir = Path(self.db_path).parent / ".locks"
+        lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_dir.chmod(0o700)
+        lock_name = hashlib.sha256(fleet_id.encode("utf-8")).hexdigest() + ".lock"
+        lock_path = lock_dir / lock_name
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     def bind(
         self,
@@ -329,6 +383,88 @@ class AdapterState:
                         now,
                     ),
                 )
+            db.execute(
+                "UPDATE provisioning_journal SET state='complete',updated_at=? "
+                "WHERE fleet_id=?",
+                (now, bindings[0].fleet_id),
+            )
+
+    def save_workspace_journal(
+        self,
+        fleet_id: str,
+        workspace_id: str,
+        tab_id: str,
+        root_pane_id: str,
+    ) -> None:
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO provisioning_journal(fleet_id,workspace_id,tab_id,root_pane_id,"
+                "state,updated_at) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(fleet_id) DO UPDATE SET workspace_id=excluded.workspace_id,"
+                "tab_id=excluded.tab_id,root_pane_id=excluded.root_pane_id,"
+                "state=excluded.state,updated_at=excluded.updated_at",
+                (
+                    fleet_id,
+                    workspace_id,
+                    tab_id,
+                    root_pane_id,
+                    "workspace_created",
+                    utc_now(),
+                ),
+            )
+            db.execute("DELETE FROM workspace_intents WHERE fleet_id=?", (fleet_id,))
+
+    def save_workspace_intent(self, fleet_id: str, workspace_label: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO workspace_intents(fleet_id,workspace_label,updated_at) "
+                "VALUES(?,?,?) ON CONFLICT(fleet_id) DO UPDATE SET "
+                "workspace_label=excluded.workspace_label,updated_at=excluded.updated_at",
+                (
+                    safe_token(fleet_id, "fleet_id"),
+                    safe_token(workspace_label, "workspace_label"),
+                    utc_now(),
+                ),
+            )
+
+    def provisioning_intent(self, fleet_id: str) -> dict[str, Any] | None:
+        try:
+            with self.connect() as db:
+                row = db.execute(
+                    "SELECT fleet_id,workspace_label,updated_at FROM workspace_intents "
+                    "WHERE fleet_id=?",
+                    (fleet_id,),
+                ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            return None
+        return dict(row) if row is not None else None
+
+    def clear_workspace_intent(self, fleet_id: str) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM workspace_intents WHERE fleet_id=?", (fleet_id,))
+
+    def provisioning_journal(self, fleet_id: str) -> dict[str, Any] | None:
+        try:
+            with self.connect() as db:
+                row = db.execute(
+                    "SELECT fleet_id,workspace_id,tab_id,root_pane_id,state,updated_at "
+                    "FROM provisioning_journal WHERE fleet_id=?",
+                    (fleet_id,),
+                ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            return None
+        return dict(row) if row is not None else None
+
+    def clear_fleet(self, fleet_id: str) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM runtime_bindings WHERE fleet_id=?", (fleet_id,))
+            db.execute("DELETE FROM view_placements WHERE fleet_id=?", (fleet_id,))
+            db.execute("DELETE FROM provisioning_journal WHERE fleet_id=?", (fleet_id,))
+            db.execute("DELETE FROM workspace_intents WHERE fleet_id=?", (fleet_id,))
 
 
 class Herdr08Commands:
@@ -337,8 +473,23 @@ class Herdr08Commands:
     def __init__(self, binary: str = "herdr"):
         self.binary = safe_token(binary, "Herdr binary")
 
-    def workspace_create(self, cwd: str, label: str) -> list[str]:
-        return [
+    @staticmethod
+    def _append_environment(argv: list[str], environment: Mapping[str, str]) -> None:
+        allowed = {"AGENT_FLEET_CORE_COMMAND", "AGENT_FLEET_CORE_DB"}
+        unknown = set(environment) - allowed
+        if unknown:
+            raise HerdrAdapterError(
+                "unsupported agent environment: " + ", ".join(sorted(unknown))
+            )
+        for key in sorted(environment):
+            argv.extend(
+                ["--env", safe_token(f"{key}={environment[key]}", "agent environment")]
+            )
+
+    def workspace_create(
+        self, cwd: str, label: str, environment: Mapping[str, str] | None = None
+    ) -> list[str]:
+        argv = [
             self.binary,
             "workspace",
             "create",
@@ -346,8 +497,21 @@ class Herdr08Commands:
             safe_token(cwd, "cwd"),
             "--label",
             safe_token(label, "label"),
-            "--no-focus",
         ]
+        self._append_environment(argv, environment or {})
+        argv.append("--no-focus")
+        return argv
+
+    def workspace_close(self, workspace_id: str) -> list[str]:
+        return [
+            self.binary,
+            "workspace",
+            "close",
+            safe_token(workspace_id, "workspace_id"),
+        ]
+
+    def workspace_list(self) -> list[str]:
+        return [self.binary, "workspace", "list"]
 
     def tab_create(self, workspace_id: str, cwd: str, label: str) -> list[str]:
         return [
@@ -364,7 +528,12 @@ class Herdr08Commands:
         ]
 
     def pane_split(
-        self, pane_id: str, direction: str, cwd: str, ratio: float | None = None
+        self,
+        pane_id: str,
+        direction: str,
+        cwd: str,
+        ratio: float | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> list[str]:
         if direction not in {"right", "down"}:
             raise HerdrAdapterError("pane split direction must be right or down")
@@ -382,6 +551,7 @@ class Herdr08Commands:
             if not 0 < ratio < 1:
                 raise HerdrAdapterError("pane split ratio must be between zero and one")
             argv.extend(["--ratio", str(ratio)])
+        self._append_environment(argv, environment or {})
         argv.append("--no-focus")
         return argv
 
@@ -405,7 +575,13 @@ class Herdr08Commands:
         return [self.binary, "pane", "get", safe_token(pane_id, "pane_id")]
 
     def agent_prompt(
-        self, pane_id: str, prompt: str, timeout_ms: int, *, wait: bool = True
+        self,
+        pane_id: str,
+        prompt: str,
+        timeout_ms: int,
+        *,
+        wait: bool = True,
+        until_started: bool = False,
     ) -> list[str]:
         if timeout_ms <= 0:
             raise HerdrAdapterError("timeout_ms must be positive")
@@ -417,7 +593,19 @@ class Herdr08Commands:
             safe_token(prompt, "prompt"),
         ]
         if wait:
-            argv.extend(["--wait", "--timeout", str(timeout_ms)])
+            argv.append("--wait")
+            if until_started:
+                argv.extend(
+                    [
+                        "--until",
+                        "working",
+                        "--until",
+                        "done",
+                        "--until",
+                        "blocked",
+                    ]
+                )
+            argv.extend(["--timeout", str(timeout_ms)])
         return argv
 
 
@@ -440,7 +628,7 @@ class HerdrAdapter:
     @staticmethod
     def _fleet_parts(
         fleet: Mapping[str, Any]
-    ) -> tuple[str, str, tuple[str, ...], str]:
+    ) -> tuple[str, str, tuple[str, ...], str, Mapping[str, str]]:
         if fleet.get("apiVersion") != "fleet.harness/v1" or fleet.get("kind") != "Fleet":
             raise HerdrAdapterError("provision requires a fleet.harness/v1 Fleet document")
         metadata = fleet.get("metadata")
@@ -468,6 +656,7 @@ class HerdrAdapter:
             raise HerdrAdapterError("Fleet spec.collaboration.manager must be an agent_ref")
 
         refs: list[str] = []
+        models: dict[str, str] = {}
         for index, member in enumerate(members):
             if not isinstance(member, Mapping):
                 raise HerdrAdapterError(f"Fleet spec.members[{index}] must be a JSON object")
@@ -480,10 +669,17 @@ class HerdrAdapter:
             if agent_ref in refs:
                 raise HerdrAdapterError(f"duplicate Fleet member agent_ref: {agent_ref}")
             refs.append(agent_ref)
+            model = member.get("model")
+            if model is not None:
+                if not isinstance(model, str) or not model.strip():
+                    raise HerdrAdapterError(
+                        f"Fleet spec.members[{index}].model must be a non-empty string"
+                    )
+                models[agent_ref] = model
         if refs.count(manager_ref) != 1:
             raise HerdrAdapterError("Fleet must contain exactly one declared manager member")
         workers = tuple(agent_ref for agent_ref in refs if agent_ref != manager_ref)
-        return fleet_id, manager_ref, workers, profile_ref
+        return fleet_id, manager_ref, workers, profile_ref, models
 
     def plan_provision(
         self,
@@ -491,8 +687,17 @@ class HerdrAdapter:
         cwd: str,
         agent_kind: str,
         view_profile: Mapping[str, Any],
+        agent_environment: Mapping[str, str] | None = None,
     ) -> ProvisionPlan:
-        fleet_id, manager_ref, workers, profile_ref = self._fleet_parts(fleet)
+        fleet_id, manager_ref, workers, profile_ref, models = self._fleet_parts(fleet)
+        if models and agent_kind not in {"claude", "codex"}:
+            raise HerdrAdapterError(
+                f"per-member model selection is not supported for agent kind {agent_kind!r}"
+            )
+
+        def model_args(agent_ref: str) -> tuple[str, ...]:
+            model = models.get(agent_ref)
+            return ("--model", model) if model else ()
         profile_errors = validate_document(view_profile)
         if profile_errors:
             raise HerdrAdapterError("invalid View Profile: " + "; ".join(profile_errors))
@@ -521,15 +726,20 @@ class HerdrAdapter:
         safe_token(cwd, "cwd")
         safe_token(agent_kind, "agent_kind")
         root_pane = "$workspace.root_pane"
+        workspace_label = f"agent-fleet:{fleet_id}:<operation-id>"
         operations: list[Mapping[str, Any]] = [
             {
                 "id": "workspace.create",
-                "argv": self.commands.workspace_create(cwd, fleet_id),
+                "argv": self.commands.workspace_create(
+                    cwd, workspace_label, agent_environment
+                ),
                 "produces": ["workspace_id", "tab_id", "root_pane_id"],
             },
             {
                 "id": f"agent.start:{manager_ref}",
-                "argv": self.commands.agent_start(manager_ref, agent_kind, root_pane),
+                "argv": self.commands.agent_start(
+                    manager_ref, agent_kind, root_pane, model_args(manager_ref)
+                ),
             },
         ]
         placements: list[Mapping[str, Any]] = [
@@ -565,6 +775,7 @@ class HerdrAdapter:
                             if index == 1
                             else (len(workers) - index + 1) / (len(workers) - index + 2)
                         ),
+                        agent_environment,
                     ),
                     "produces": [pane_ref],
                 }
@@ -572,7 +783,9 @@ class HerdrAdapter:
             operations.append(
                 {
                     "id": f"agent.start:{worker_ref}",
-                    "argv": self.commands.agent_start(worker_ref, agent_kind, pane_ref),
+                    "argv": self.commands.agent_start(
+                        worker_ref, agent_kind, pane_ref, model_args(worker_ref)
+                    ),
                 }
             )
             placements.append(
@@ -654,6 +867,49 @@ class HerdrAdapter:
             safe_token(pane_id, "root pane_id"),
         )
 
+    def _workspace_ids_for_label(self, stdout: str, label: str) -> list[str]:
+        value = self._json_value(stdout, "herdr workspace list")
+        workspaces = value
+        if isinstance(value, Mapping):
+            result = value.get("result")
+            if isinstance(result, Mapping):
+                workspaces = result.get("workspaces")
+            else:
+                workspaces = value.get("workspaces")
+        if not isinstance(workspaces, list):
+            raise HerdrAdapterError(
+                "herdr workspace list output did not contain a workspace list"
+            )
+        matches: list[str] = []
+        for workspace in workspaces:
+            if not isinstance(workspace, Mapping) or workspace.get("label") != label:
+                continue
+            workspace_id = workspace.get("workspace_id")
+            if not isinstance(workspace_id, str) or not workspace_id:
+                raise HerdrAdapterError(
+                    "matching Herdr workspace did not contain a workspace_id"
+                )
+            matches.append(safe_token(workspace_id, "workspace_id"))
+        return matches
+
+    def _recover_workspace_intent(self, fleet_id: str, label: str) -> str | None:
+        listed = self._execute_argv(
+            self.commands.workspace_list(), "list Herdr workspaces for recovery"
+        )
+        workspace_ids = self._workspace_ids_for_label(listed.stdout, label)
+        if len(workspace_ids) > 1:
+            raise HerdrAdapterError(
+                f"multiple Herdr workspaces use recovery label {label!r}; "
+                "manual recovery required"
+            )
+        if workspace_ids:
+            self._execute_argv(
+                self.commands.workspace_close(workspace_ids[0]),
+                "close unrecorded Herdr workspace",
+            )
+        self.state.clear_workspace_intent(fleet_id)
+        return workspace_ids[0] if workspace_ids else None
+
     def _split_pane_id(self, stdout: str) -> str:
         value = self._json_value(stdout, "herdr pane split")
         if isinstance(value, str):
@@ -721,8 +977,47 @@ class HerdrAdapter:
         view_profile: Mapping[str, Any],
         *,
         execute: bool = False,
+        agent_environment: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        plan = self.plan_provision(fleet, cwd, agent_kind, view_profile)
+        plan = self.plan_provision(
+            fleet, cwd, agent_kind, view_profile, agent_environment
+        )
+        with self.state.fleet_lock(plan.fleet_id):
+            return self._provision_locked(plan, execute=execute)
+
+    def _provision_locked(
+        self, plan: ProvisionPlan, *, execute: bool
+    ) -> dict[str, Any]:
+        interrupted = (
+            self.state.provisioning_journal(plan.fleet_id)
+            if self.state.db_path != ":memory:"
+            else None
+        )
+        if interrupted is not None and interrupted["state"] == "workspace_created":
+            if not execute:
+                raise HerdrAdapterError(
+                    f"fleet {plan.fleet_id!r} has an interrupted provision; "
+                    "run provision --execute to recover"
+                )
+            self._execute_argv(
+                self.commands.workspace_close(interrupted["workspace_id"]),
+                "close interrupted Herdr workspace",
+            )
+            self.state.clear_fleet(plan.fleet_id)
+        intent = (
+            self.state.provisioning_intent(plan.fleet_id)
+            if self.state.db_path != ":memory:"
+            else None
+        )
+        if intent is not None:
+            if not execute:
+                raise HerdrAdapterError(
+                    f"fleet {plan.fleet_id!r} has an interrupted workspace creation; "
+                    "run provision --execute to recover"
+                )
+            self._recover_workspace_intent(
+                plan.fleet_id, intent["workspace_label"]
+            )
         observed = (
             self.state.status(plan.fleet_id)
             if self.state.db_path != ":memory:"
@@ -761,10 +1056,17 @@ class HerdrAdapter:
             return {"mode": "dry-run", "status": "planned", "plan": plan.as_dict()}
 
         workspace_op = plan.operations[0]
+        workspace_label = f"agent-fleet:{plan.fleet_id}:{uuid.uuid4().hex}"
+        self.state.save_workspace_intent(plan.fleet_id, workspace_label)
+        workspace_argv = list(workspace_op["argv"])
+        workspace_argv[workspace_argv.index("--label") + 1] = workspace_label
         workspace_result = self._execute_argv(
-            workspace_op["argv"], "herdr workspace create"
+            workspace_argv, "herdr workspace create"
         )
         workspace_id, tab_id, root_pane_id = self._workspace_ids(workspace_result.stdout)
+        self.state.save_workspace_journal(
+            plan.fleet_id, workspace_id, tab_id, root_pane_id
+        )
         pane_ids: dict[str, str] = {"$workspace.root_pane": root_pane_id}
         binding_panes: dict[str, str] = {plan.manager_ref: root_pane_id}
 
@@ -774,10 +1076,7 @@ class HerdrAdapter:
             completed = self._execute_argv(
                 argv,
                 f"herdr {operation_id}",
-                retry_new_pane_busy=(
-                    operation_id.startswith("agent.start:")
-                    and operation_id.split(":", 1)[1] in plan.worker_refs
-                ),
+                retry_new_pane_busy=operation_id.startswith("agent.start:"),
             )
             if operation_id.startswith("pane.split:"):
                 worker_ref = operation_id.split(":", 1)[1]
@@ -809,6 +1108,73 @@ class HerdrAdapter:
             "plan": plan.as_dict(),
         }
 
+    def deprovision(self, fleet_id: str, *, execute: bool = False) -> dict[str, Any]:
+        safe_token(fleet_id, "fleet_id")
+        with self.state.fleet_lock(fleet_id):
+            return self._deprovision_locked(fleet_id, execute=execute)
+
+    def _deprovision_locked(
+        self, fleet_id: str, *, execute: bool
+    ) -> dict[str, Any]:
+        observed = self.state.status(fleet_id)
+        journal = self.state.provisioning_journal(fleet_id)
+        intent = self.state.provisioning_intent(fleet_id)
+        workspace_ids = {
+            item["workspace_id"] for item in observed["bindings"]
+        }
+        if journal is not None:
+            workspace_ids.add(journal["workspace_id"])
+        if not workspace_ids and intent is not None:
+            if not execute:
+                return {
+                    "mode": "dry-run",
+                    "status": "planned",
+                    "fleet_id": fleet_id,
+                    "workspace_label": intent["workspace_label"],
+                }
+            recovered_workspace_id = self._recover_workspace_intent(
+                fleet_id, intent["workspace_label"]
+            )
+            self.state.clear_fleet(fleet_id)
+            return {
+                "mode": "execute",
+                "status": "deprovisioned",
+                "fleet_id": fleet_id,
+                "workspace_id": recovered_workspace_id,
+            }
+        if not workspace_ids:
+            return {
+                "mode": "execute" if execute else "dry-run",
+                "status": "inactive",
+                "fleet_id": fleet_id,
+            }
+        if len(workspace_ids) != 1:
+            raise HerdrAdapterError(
+                f"fleet {fleet_id!r} references multiple workspaces; manual recovery required"
+            )
+        workspace_id = next(iter(workspace_ids))
+        if not execute:
+            return {
+                "mode": "dry-run",
+                "status": "planned",
+                "fleet_id": fleet_id,
+                "workspace_id": workspace_id,
+            }
+        try:
+            self._execute_argv(
+                self.commands.workspace_close(workspace_id), "Herdr workspace close"
+            )
+        except HerdrAdapterError as exc:
+            if "workspace_not_found" not in str(exc):
+                raise
+        self.state.clear_fleet(fleet_id)
+        return {
+            "mode": "execute",
+            "status": "deprovisioned",
+            "fleet_id": fleet_id,
+            "workspace_id": workspace_id,
+        }
+
     def plan_command(
         self,
         agent_ref: str,
@@ -819,6 +1185,7 @@ class HerdrAdapter:
         request_envelope: Mapping[str, Any] | None = None,
         fleet_id: str = "default",
         wait_for_response: bool = True,
+        wait_until_started: bool = False,
     ) -> CommandPlan:
         if command_type not in COMMAND_TYPES:
             raise HerdrAdapterError(f"unsupported command type: {command_type}")
@@ -835,7 +1202,11 @@ class HerdrAdapter:
             tuple(self.commands.pane_get(binding.pane_id)),
             tuple(
                 self.commands.agent_prompt(
-                    binding.pane_id, prompt, timeout_ms, wait=wait_for_response
+                    binding.pane_id,
+                    prompt,
+                    timeout_ms,
+                    wait=wait_for_response,
+                    until_started=wait_until_started,
                 )
             ),
             agent_ref,
@@ -855,6 +1226,7 @@ class HerdrAdapter:
         request_envelope: Mapping[str, Any] | None = None,
         fleet_id: str = "default",
         wait_for_response: bool = True,
+        wait_until_started: bool = False,
     ) -> dict[str, Any]:
         plan = self.plan_command(
             agent_ref,
@@ -865,6 +1237,7 @@ class HerdrAdapter:
             request_envelope,
             fleet_id,
             wait_for_response,
+            wait_until_started,
         )
         if not execute:
             return {"mode": "dry-run", "status": "planned", "plan": plan.as_dict()}
@@ -949,7 +1322,12 @@ def build_parser() -> argparse.ArgumentParser:
     provision.add_argument("--view-profile-json", type=json_object, required=True)
     provision.add_argument("--cwd", required=True)
     provision.add_argument("--agent-kind", required=True)
+    provision.add_argument("--agent-core-command")
+    provision.add_argument("--agent-core-db")
     provision.add_argument("--execute", action="store_true")
+    deprovision = sub.add_parser("deprovision")
+    deprovision.add_argument("--fleet", required=True)
+    deprovision.add_argument("--execute", action="store_true")
     bind = sub.add_parser("bind", aliases=["rebind"])
     bind.add_argument("--agent-ref", required=True)
     bind.add_argument("--fleet", default="default")
@@ -983,13 +1361,14 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--timeout-ms", type=int, default=30_000)
     dispatch.add_argument("--execute", action="store_true")
     dispatch.add_argument("--no-wait", action="store_true")
+    dispatch.add_argument("--until-started", action="store_true")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if args.action == "provision" and not args.execute:
+        if args.action in {"provision", "deprovision"} and not args.execute:
             state = (
                 AdapterState(args.state_db, initialize=False)
                 if args.state_db.is_file()
@@ -1001,13 +1380,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             state = AdapterState(args.state_db)
         adapter = HerdrAdapter(state, Herdr08Commands(args.herdr_binary))
         if args.action == "provision":
+            if bool(args.agent_core_command) != bool(args.agent_core_db):
+                raise HerdrAdapterError(
+                    "--agent-core-command and --agent-core-db must be provided together"
+                )
+            agent_environment = (
+                {
+                    "AGENT_FLEET_CORE_COMMAND": args.agent_core_command,
+                    "AGENT_FLEET_CORE_DB": args.agent_core_db,
+                }
+                if args.agent_core_command
+                else {}
+            )
             result = adapter.provision(
                 args.fleet_json,
                 args.cwd,
                 args.agent_kind,
                 args.view_profile_json,
                 execute=args.execute,
+                agent_environment=agent_environment,
             )
+        elif args.action == "deprovision":
+            result = adapter.deprovision(args.fleet, execute=args.execute)
         elif args.action in {"bind", "rebind"}:
             result = state.bind(
                 args.agent_ref,
@@ -1081,6 +1475,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 request_envelope=request_envelope,
                 fleet_id=fleet_id,
                 wait_for_response=not args.no_wait,
+                wait_until_started=args.until_started,
             )
     except (HerdrAdapterError, sqlite3.Error, OSError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr)

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -53,7 +55,7 @@ class FleetController:
         herdr_db: str,
         fleet_id: str,
         worker_id: str,
-        lease_seconds: int = 30,
+        lease_seconds: int = 60,
     ) -> dict[str, Any]:
         claim = self._run_json(
             [
@@ -109,7 +111,7 @@ class FleetController:
             "dispatch",
             "--request-json",
             json.dumps(command, ensure_ascii=False, sort_keys=True),
-            "--no-wait",
+            "--until-started",
             "--execute",
         ]
         try:
@@ -118,8 +120,11 @@ class FleetController:
                 raise FleetControllerError("Herdr dispatch result must be an object")
             dispatch_status = dispatched.get("status")
             if dispatch_status == "submitted":
-                delivery_result = "delivered"
-                detail = "Herdr accepted the prompt"
+                delivery_result = "unknown"
+                detail = (
+                    "Herdr submitted the prompt, but only the Agent Fleet hook can "
+                    "confirm receipt"
+                )
             elif dispatch_status == "unknown":
                 delivery_result = "unknown"
                 detail = str(dispatched.get("reason") or "Herdr delivery result is unknown")
@@ -151,13 +156,15 @@ class FleetController:
         ).get("result")
         if not isinstance(recorded, Mapping):
             raise FleetControllerError("Core delivery result must be an object")
-        return dict(recorded)
+        return {**dict(recorded), "delivery_scope": "hook_receipt"}
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fleet-controller")
     adapter_root = Path(__file__).resolve().parent
-    core_default = adapter_root.parents[1] / "agent-fleet-core" / "core" / "scripts" / "fleet-control"
+    core_default = os.environ.get("AGENT_FLEET_CORE_COMMAND") or shutil.which(
+        "fleet-control"
+    ) or "fleet-control"
     herdr_default = adapter_root / "scripts" / "fleet-herdr"
     parser.add_argument("--core-command", default=str(core_default))
     parser.add_argument("--core-db", required=True)
@@ -165,7 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--herdr-db", required=True)
     parser.add_argument("--fleet", required=True)
     parser.add_argument("--worker-id", required=True)
-    parser.add_argument("--lease-seconds", type=int, default=30)
+    parser.add_argument("--lease-seconds", type=int, default=60)
     parser.add_argument("--execute", action="store_true")
     return parser
 

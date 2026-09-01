@@ -11,11 +11,11 @@ failed=0
 for manifest in \
   "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json" \
   "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.1.0" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.2.6" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
 done
-jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact|fork"' \
+jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact|fork" and .hooks.SessionStart[0].hooks[0].timeout==12' \
   "$HERDR/hooks/claude-hooks.json" >/dev/null || failed=1
-jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact"' \
+jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact" and .hooks.SessionStart[0].hooks[0].timeout==12' \
   "$HERDR/hooks/codex-hooks.json" >/dev/null || failed=1
 jq -e '.hooks=="./hooks/claude-hooks.json"' "$HERDR/.claude-plugin/plugin.json" >/dev/null || failed=1
 jq -e '.hooks=="./hooks/codex-hooks.json"' "$HERDR/.codex-plugin/plugin.json" >/dev/null || failed=1
@@ -23,12 +23,13 @@ test ! -e "$HERDR/view-profiles" || failed=1
 if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
   failed=1
 fi
-jq -e '.name=="agent-fleet" and (.plugins|length==2) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr"] and all(.plugins[]; .version=="0.1.0")' \
+jq -e '.name=="agent-fleet" and (.plugins|length==2) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr"] and all(.plugins[]; .version=="0.2.6")' \
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \
   "$HERDR/adapter/schema/view-profile.schema.yml" \
   "$ROOT/configs/fleets/development-squad.yml" "$ROOT/configs/fleets/quick-review.yml" \
+  "$ROOT/configs/fleets/release-readiness.yml" \
   "$ROOT/configs/view-profiles/development-focus.v1.yml" \
   "$ROOT/configs/view-profiles/review-grid.v1.yml"; do
   yq -e '.' "$config" >/dev/null || failed=1
@@ -63,6 +64,29 @@ if [ -n "${fleet_json:-}" ]; then
   jq -e '.ok==true and .result.command.spec.type=="message.send"' \
     "$TMP_ROOT/confirmed-claim.json" >/dev/null || failed=1
 
+  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" outbox \
+    --fleet development-squad --sender-ref manager --target-agent-ref manager \
+    --type context.sync --command-id validation-context \
+    --payload '{"reason":"subprocess integration"}' >/dev/null || failed=1
+  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" delivery.claim \
+    --fleet development-squad --worker-id validation-hook \
+    > "$TMP_ROOT/context-claim.json" || failed=1
+  context_command=$(jq -c '.result.command' "$TMP_ROOT/context-claim.json") || failed=1
+  context_lease=$(jq -r '.result.delivery.lease_token' "$TMP_ROOT/context-claim.json") || failed=1
+  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" delivery.begin \
+    --fleet development-squad --command-id validation-context \
+    --lease-token "$context_lease" >/dev/null || failed=1
+  context_prompt=$(printf 'AGENT_FLEET_COMMAND_V1\n%s' "$context_command")
+  jq -n --arg prompt "$context_prompt" \
+    '{hook_event_name:"UserPromptSubmit",session_id:"validation-session",prompt:$prompt}' \
+    | env AGENT_FLEET_CORE_COMMAND="$CORE/core/scripts/fleet-control" \
+      AGENT_FLEET_CORE_DB="$TMP_ROOT/core.sqlite3" \
+      AGENT_FLEET_SESSION_CONTEXT_DB="$TMP_ROOT/session-context.sqlite3" \
+      python3 "$HERDR/hooks/role_context.py" --runtime-product codex \
+      > "$TMP_ROOT/hook-result.json" || failed=1
+  jq -e '.hookSpecificOutput.additionalContext | contains("development-squad")' \
+    "$TMP_ROOT/hook-result.json" >/dev/null || failed=1
+
   "$HERDR/adapter/scripts/fleet-herdr" --state-db "$TMP_ROOT/herdr.sqlite3" \
     provision --fleet-json "$fleet_json" --view-profile-json "$view_profile_json" \
     --cwd "$ROOT" --agent-kind codex \
@@ -72,12 +96,14 @@ if [ -n "${fleet_json:-}" ]; then
 fi
 
 "$HERDR/adapter/scripts/fleet-runtime" list \
+  --core-command "$CORE/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
   --profile-dir "$ROOT/configs/view-profiles" \
   --state-dir "$TMP_ROOT/runtime-state" > "$TMP_ROOT/fleet-list.json" || failed=1
-jq -e '.ok==true and (.result|length)==2 and all(.result[]; .profile_resolved==true)' \
+jq -e '.ok==true and (.result|length)==3 and all(.result[]; .profile_resolved==true)' \
   "$TMP_ROOT/fleet-list.json" >/dev/null || failed=1
 "$HERDR/adapter/scripts/fleet-runtime" plan development-squad \
+  --core-command "$CORE/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
   --profile-dir "$ROOT/configs/view-profiles" \
   --state-dir "$TMP_ROOT/runtime-state" --cwd "$ROOT" --agent-kind codex \
@@ -85,6 +111,17 @@ jq -e '.ok==true and (.result|length)==2 and all(.result[]; .profile_resolved==t
 jq -e '.ok==true and .result.status=="planned" and .result.profile_ref=="local/development-focus@1" and (.result.herdr.plan.placements|length)==5' \
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
 test ! -e "$TMP_ROOT/runtime-state" || failed=1
+
+mkdir -p "$TMP_ROOT/separate/core" "$TMP_ROOT/separate/herdr"
+cp -R "$CORE/." "$TMP_ROOT/separate/core/"
+cp -R "$HERDR/." "$TMP_ROOT/separate/herdr/"
+"$TMP_ROOT/separate/herdr/adapter/scripts/fleet-runtime" list \
+  --core-command "$TMP_ROOT/separate/core/core/scripts/fleet-control" \
+  --fleet-dir "$ROOT/configs/fleets" \
+  --profile-dir "$ROOT/configs/view-profiles" \
+  --state-dir "$TMP_ROOT/separate-state" > "$TMP_ROOT/separate-list.json" || failed=1
+jq -e '.ok==true and (.result|length)==3' "$TMP_ROOT/separate-list.json" >/dev/null || failed=1
+test ! -e "$TMP_ROOT/separate-state" || failed=1
 
 bash -n "$CORE/core/scripts/fleet-control" || failed=1
 bash -n "$HERDR/adapter/scripts/fleet-herdr" || failed=1

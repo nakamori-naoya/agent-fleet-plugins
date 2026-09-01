@@ -48,4 +48,4 @@ spec:
   runtime:
     provider: herdr
   view:
-    profile_ref: local/release-readiness@1
+    profile_ref: local/review-grid@1

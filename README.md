@@ -23,7 +23,7 @@ role catalogは別marketplaceの`agent-roles`を使う。Coreだけを使う場�
 
 ## 依存関係
 
-外部pluginは`plugin@marketplace`のidentityで指定する。install commandではversionを固定しない。現在のFleet pluginは0.1.0であり、`roles.harness/v1`のcatalog version 1とHerdr 0.8.xのCLI surfaceを前提とする。
+外部pluginは`plugin@marketplace`のidentityで指定する。install commandではversionを固定しない。現在のFleet pluginは0.2.6であり、`roles.harness/v1`のcatalog version 1とHerdr 0.8.xのCLI surfaceを前提とする。
 
 | 依存 | 必須度 | 用途 |
 |---|---|---|
@@ -73,7 +73,7 @@ claude plugin install agent-fleet-herdr@agent-fleet
 
 Coreだけを利用する場合、Herdr CLIと`agent-fleet-herdr`は不要である。Adapterのdry-runはHerdrを実行しないが、`--execute`を使う前に`herdr --version`が0.8.xであることを確認する。
 
-Fleet YAMLの形式例は[manager 1・worker 2のFleet Spec](plugins/agent-fleet-core/spec/examples/fleet.example.yml)にある。最初にCore validatorでnormalized JSONへ変換し、Herdr Adapterの`provision`へ渡す。`provision`はdry-runが既定であり、`--execute`を付けない限りHerdrを変更しない。
+Fleet YAMLの形式例は[manager 1・worker 2の利用者設定](configs/fleets/release-readiness.yml)にある。最初にCore validatorでnormalized JSONへ変換し、Herdr Adapterの`provision`へ渡す。`provision`はdry-runが既定であり、`--execute`を付けない限りHerdrを変更しない。
 
 艦隊編成とpane配置の正本はplugin外の利用者設定である。既定では`~/.config/agent-fleet/fleets`と`~/.config/agent-fleet/view-profiles`を読む。repositoryの[艦隊設定例](configs/fleets/development-squad.yml)と[表示設定例](configs/view-profiles/development-focus.v1.yml)は手元へ複製して編集するための例であり、pluginは自動読込しない。実行時SQLiteもrepository外のstate directoryへ保存する。
 

@@ -5,4 +5,4 @@ description: Agent Fleetのlogical agent_refとHerdr 0.8 runtimeをbindし、dry
 
 # Fleet Herdr
 
-`${CLAUDE_PLUGIN_ROOT}/adapters/herdr/SKILL.md` の安全契約を読み、`${CLAUDE_PLUGIN_ROOT}/adapters/herdr/scripts/fleet-herdr` を使う。`--execute` は実行を明示した場合だけ指定する。
+plugin rootの`adapter/SKILL.md`の安全契約を読み、`adapter/scripts/fleet-herdr`を使う。plugin rootが実行環境から渡されない場合は、このSKILL.mdの2階層上をrootとして解決する。`--execute`は実行を明示した場合だけ指定する。

@@ -4,14 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -125,11 +129,27 @@ class FleetRuntime:
         self.runner = runner
         self.sleeper = sleeper
 
+    def _agent_core_command(self) -> str:
+        argv = list(self.core_command)
+        executable = Path(argv[0])
+        if executable.is_file():
+            argv[0] = str(executable.resolve())
+        else:
+            discovered = shutil.which(argv[0])
+            if discovered:
+                argv[0] = discovered
+        return shlex.join(argv)
+
     def _run_json(
-        self, argv: Sequence[str], context: str, *, timeout: int = 60
+        self,
+        argv: Sequence[str],
+        context: str,
+        *,
+        timeout: int = 60,
+        env: Mapping[str, str] | None = None,
     ) -> Mapping[str, Any]:
         completed = self.runner(
-            list(argv), capture_output=True, text=True, timeout=timeout
+            list(argv), capture_output=True, text=True, timeout=timeout, env=env
         )
         if completed.returncode != 0:
             raise FleetRuntimeError(
@@ -265,6 +285,26 @@ class FleetRuntime:
         for fleet_id, (path, fleet) in sorted(fleets.items()):
             spec = fleet["spec"]
             profile_ref = spec["view"]["profile_ref"]
+            resolved_profile = profiles.get(profile_ref)
+            if resolved_profile is not None:
+                _, profile = resolved_profile
+                self._run_json(
+                    [
+                        *self.herdr_command,
+                        "--state-db",
+                        str(state_dir / ".list-does-not-write.sqlite3"),
+                        "provision",
+                        "--fleet-json",
+                        json.dumps(fleet, ensure_ascii=False, sort_keys=True),
+                        "--view-profile-json",
+                        json.dumps(profile, ensure_ascii=False, sort_keys=True),
+                        "--cwd",
+                        str(path.parent),
+                        "--agent-kind",
+                        "codex",
+                    ],
+                    f"ViewProfile validation ({profile_ref})",
+                )
             rows.append(
                 {
                     "fleet_id": fleet_id,
@@ -272,7 +312,7 @@ class FleetRuntime:
                     "objective": spec["objective"],
                     "members": len(spec["members"]),
                     "profile_ref": profile_ref,
-                    "profile_resolved": profile_ref in profiles,
+                    "profile_resolved": resolved_profile is not None,
                     "start_command": f"fleet-runtime start {fleet_id} --execute",
                 }
             )
@@ -318,11 +358,26 @@ class FleetRuntime:
 
     @staticmethod
     def _manifest_path(state_dir: Path, fleet_id: str) -> Path:
-        return state_dir / "runtimes" / f"{fleet_id}.json"
+        root = (state_dir / "runtimes").resolve()
+        path = (root / f"{fleet_id}.json").resolve()
+        if path.parent != root:
+            raise FleetRuntimeError("Fleet identity escapes the runtime state directory")
+        return path
+
+    @staticmethod
+    def _fleet_state_dir(state_dir: Path, fleet_id: str) -> Path:
+        root = (state_dir / "fleets").resolve()
+        path = (root / fleet_id).resolve()
+        if path.parent != root:
+            raise FleetRuntimeError("Fleet identity escapes the fleet state directory")
+        return path
 
     @staticmethod
     def _write_manifest(path: Path, desired: Mapping[str, Any], phase: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.parent.chmod(0o700)
+        if path.is_symlink():
+            raise FleetRuntimeError("runtime manifest must not be a symbolic link")
         temporary = path.with_suffix(".tmp")
         temporary.write_text(
             json.dumps(
@@ -335,6 +390,7 @@ class FleetRuntime:
             encoding="utf-8",
         )
         temporary.replace(path)
+        path.chmod(0o600)
 
     def start(
         self,
@@ -347,13 +403,52 @@ class FleetRuntime:
         *,
         execute: bool = False,
         once: bool = False,
-        poll_seconds: float = 0.05,
+        poll_seconds: float = 0.25,
+    ) -> dict[str, Any]:
+        if not execute:
+            return self.plan(
+                fleet_name, fleet_dirs, profile_dirs, state_dir, cwd, agent_kind
+            )
+        resolved = self.resolve(fleet_name, fleet_dirs, profile_dirs, state_dir)
+        lock_root = state_dir / "locks"
+        lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_root.chmod(0o700)
+        lock_name = hashlib.sha256(resolved.fleet_id.encode("utf-8")).hexdigest()
+        lock_path = lock_root / f"{lock_name}.lock"
+        with lock_path.open("a+", encoding="utf-8") as lock:
+            lock_path.chmod(0o600)
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise FleetRuntimeError(
+                    f"Fleet {fleet_name!r} already has an active runtime process"
+                ) from exc
+            return self._start_locked(
+                fleet_name,
+                fleet_dirs,
+                profile_dirs,
+                state_dir,
+                cwd,
+                agent_kind,
+                once=once,
+                poll_seconds=poll_seconds,
+            )
+
+    def _start_locked(
+        self,
+        fleet_name: str,
+        fleet_dirs: Sequence[Path],
+        profile_dirs: Sequence[Path],
+        state_dir: Path,
+        cwd: str,
+        agent_kind: str,
+        *,
+        once: bool = False,
+        poll_seconds: float = 0.25,
     ) -> dict[str, Any]:
         planned = self.plan(
             fleet_name, fleet_dirs, profile_dirs, state_dir, cwd, agent_kind
         )
-        if not execute:
-            return planned
         resolved = self.resolve(fleet_name, fleet_dirs, profile_dirs, state_dir)
         manifest_path = self._manifest_path(state_dir, resolved.fleet_id)
         desired = {
@@ -367,6 +462,8 @@ class FleetRuntime:
             "agent_kind": agent_kind,
         }
         phase = "planned"
+        runtime_generation = uuid.uuid4().hex
+        restarting = False
         if manifest_path.exists():
             current = _load_document(manifest_path)
             if not all(current.get(key) == value for key, value in desired.items()):
@@ -374,6 +471,9 @@ class FleetRuntime:
                     "configuration conflict: stop the active Fleet before changing its config"
                 )
             phase = str(current.get("phase") or "active")
+            runtime_generation = str(
+                current.get("runtime_generation") or runtime_generation
+            )
             if phase == "active":
                 monitor = self.monitor(
                     resolved.fleet_id,
@@ -382,10 +482,20 @@ class FleetRuntime:
                     poll_seconds=poll_seconds,
                 )
                 return {**desired, "status": "resumed", "monitor": monitor}
+            if phase == "stopped":
+                phase = "core_provisioned"
+                runtime_generation = uuid.uuid4().hex
+                restarting = True
         else:
-            self._write_manifest(manifest_path, desired, phase)
-        core_db = state_dir / "core.sqlite3"
-        herdr_db = state_dir / "herdr.sqlite3"
+            self._write_manifest(
+                manifest_path,
+                {**desired, "runtime_generation": runtime_generation},
+                phase,
+            )
+        runtime_manifest = {**desired, "runtime_generation": runtime_generation}
+        fleet_state_dir = self._fleet_state_dir(state_dir, resolved.fleet_id)
+        core_db = fleet_state_dir / "core.sqlite3"
+        herdr_db = fleet_state_dir / "herdr.sqlite3"
         phases = ["planned", "core_provisioned", "herdr_provisioned", "active"]
         if phase not in phases:
             raise FleetRuntimeError(f"unknown runtime phase: {phase}")
@@ -402,7 +512,19 @@ class FleetRuntime:
                 "Core fleet provision",
             )
             phase = "core_provisioned"
-            self._write_manifest(manifest_path, desired, phase)
+            self._write_manifest(manifest_path, runtime_manifest, phase)
+        if restarting:
+            self._run_json(
+                [
+                    *self.core_command,
+                    "--db",
+                    str(core_db),
+                    "context.invalidate",
+                    "--fleet",
+                    resolved.fleet_id,
+                ],
+                "Core context invalidation",
+            )
         provisioned: Mapping[str, Any] = {"status": "already_provisioned"}
         if phases.index(phase) < phases.index("herdr_provisioned"):
             provisioned = self._run_json(
@@ -419,13 +541,22 @@ class FleetRuntime:
                     cwd,
                     "--agent-kind",
                     agent_kind,
+                    "--agent-core-command",
+                    self._agent_core_command(),
+                    "--agent-core-db",
+                    str(core_db),
                     "--execute",
                 ],
                 "Herdr fleet provision",
                 timeout=180,
+                env={
+                    **os.environ,
+                    "AGENT_FLEET_CORE_COMMAND": self._agent_core_command(),
+                    "AGENT_FLEET_CORE_DB": str(core_db),
+                },
             )
             phase = "herdr_provisioned"
-            self._write_manifest(manifest_path, desired, phase)
+            self._write_manifest(manifest_path, runtime_manifest, phase)
         spec = resolved.fleet["spec"]
         manager_ref = spec["collaboration"]["manager"]
         for task in spec["tasks"]:
@@ -453,30 +584,12 @@ class FleetRuntime:
         for member in spec["members"]:
             agent_ref = member["agent_ref"]
             control = {
-                "core_command": list(self.core_command),
-                "core_db": str(core_db),
                 "fleet_id": resolved.fleet_id,
-                "status_argv": [
-                    *self.core_command,
-                    "--db",
-                    str(core_db),
-                    "status",
-                    "--fleet",
-                    resolved.fleet_id,
-                ],
-                "context_confirm_argv": [
-                    *self.core_command,
-                    "--db",
-                    str(core_db),
-                    "context.confirm",
-                    "--fleet",
-                    resolved.fleet_id,
-                    "--agent-ref",
-                    agent_ref,
-                ],
+                "core_command": self._agent_core_command(),
+                "core_db": str(core_db),
                 "reporting": {
-                    "progress_action": "progress-report",
-                    "state_action": "task-report",
+                    "progress_action": "task.progress",
+                    "state_action": "task.report",
                     "required_identity": agent_ref,
                     "manager_ref": manager_ref,
                 },
@@ -496,7 +609,7 @@ class FleetRuntime:
                     "--type",
                     "context.sync",
                     "--command-id",
-                    f"context-sync:{resolved.fleet_id}:{agent_ref}:startup",
+                    f"context-sync:{resolved.fleet_id}:{agent_ref}:{runtime_generation}",
                     "--payload",
                     json.dumps(
                         {"reason": "fleet_start", "control": control},
@@ -506,7 +619,7 @@ class FleetRuntime:
                 ],
                 f"Context activation ({agent_ref})",
             )
-        self._write_manifest(manifest_path, desired, "active")
+        self._write_manifest(manifest_path, runtime_manifest, "active")
         monitor = self.monitor(
             resolved.fleet_id,
             state_dir,
@@ -514,11 +627,168 @@ class FleetRuntime:
             poll_seconds=poll_seconds,
         )
         return {
-            **desired,
+            **runtime_manifest,
             "status": "started",
             "herdr": dict(provisioned),
             "monitor": monitor,
         }
+
+    def stop(
+        self, fleet_id: str, state_dir: Path, *, execute: bool = False
+    ) -> dict[str, Any]:
+        manifest_path = self._manifest_path(state_dir, fleet_id)
+        if not manifest_path.exists():
+            return {"fleet_id": fleet_id, "status": "inactive"}
+        manifest = _load_document(manifest_path)
+        if not execute:
+            return {
+                "fleet_id": fleet_id,
+                "status": "planned",
+                "action": "stop",
+            }
+        self._write_manifest(manifest_path, manifest, "stopping")
+        lock_root = state_dir / "locks"
+        lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_name = hashlib.sha256(fleet_id.encode("utf-8")).hexdigest()
+        lock_path = lock_root / f"{lock_name}.lock"
+        with lock_path.open("a+", encoding="utf-8") as lock:
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise FleetRuntimeError(
+                            f"Fleet {fleet_id!r} controller did not stop within 30 seconds"
+                        ) from exc
+                    self.sleeper(0.05)
+            fleet_state = self._fleet_state_dir(state_dir, fleet_id)
+            core_db = fleet_state / "core.sqlite3"
+            if core_db.exists():
+                self._run_json(
+                    [
+                        *self.core_command,
+                        "--db",
+                        str(core_db),
+                        "context.invalidate",
+                        "--fleet",
+                        fleet_id,
+                    ],
+                    "Core context invalidation",
+                )
+            herdr = self._run_json(
+                [
+                    *self.herdr_command,
+                    "--state-db",
+                    str(fleet_state / "herdr.sqlite3"),
+                    "deprovision",
+                    "--fleet",
+                    fleet_id,
+                    "--execute",
+                ],
+                "Herdr fleet deprovision",
+            )
+            self._write_manifest(manifest_path, manifest, "stopped")
+        return {"fleet_id": fleet_id, "status": "stopped", "herdr": dict(herdr)}
+
+    def remove(
+        self, fleet_id: str, state_dir: Path, *, execute: bool = False
+    ) -> dict[str, Any]:
+        manifest_path = self._manifest_path(state_dir, fleet_id)
+        if not execute:
+            return {
+                "fleet_id": fleet_id,
+                "status": "planned",
+                "action": "remove",
+            }
+        stopped = self.stop(fleet_id, state_dir, execute=True)
+        core = self._run_json(
+            [
+                *self.core_command,
+                "--db",
+                str(self._fleet_state_dir(state_dir, fleet_id) / "core.sqlite3"),
+                "fleet.remove",
+                "--fleet",
+                fleet_id,
+                "--confirm-fleet",
+                fleet_id,
+            ],
+            "Core fleet removal",
+        )
+        if manifest_path.exists():
+            manifest_path.unlink()
+        return {
+            "fleet_id": fleet_id,
+            "status": "removed",
+            "stop": stopped,
+            "core": dict(core),
+        }
+
+    def initialize_user_config(
+        self,
+        fleet_dirs: Sequence[Path],
+        profile_dirs: Sequence[Path],
+        state_dir: Path,
+    ) -> dict[str, Any]:
+        created: list[str] = []
+        for path in [*fleet_dirs, *profile_dirs, state_dir]:
+            path_existed = path.exists()
+            if not path_existed:
+                created.append(str(path))
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not path_existed:
+                path.chmod(0o700)
+        return {"status": "initialized", "created": created}
+
+    def doctor(
+        self,
+        fleet_dirs: Sequence[Path],
+        profile_dirs: Sequence[Path],
+        state_dir: Path,
+    ) -> dict[str, Any]:
+        checks: list[dict[str, Any]] = []
+        for label, paths in (("fleet_dirs", fleet_dirs), ("profile_dirs", profile_dirs)):
+            checks.append(
+                {
+                    "check": label,
+                    "ok": all(path.is_dir() for path in paths),
+                    "paths": [str(path) for path in paths],
+                }
+            )
+        executable = self.core_command[0]
+        core_found = Path(executable).is_file() or shutil.which(executable) is not None
+        checks.append({"check": "fleet-control", "ok": core_found, "value": executable})
+        herdr_found = shutil.which("herdr") is not None
+        herdr_check: dict[str, Any] = {"check": "herdr", "ok": False}
+        if herdr_found:
+            try:
+                completed = self.runner(
+                    ["herdr", "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                version = completed.stdout.strip()
+                compatible = completed.returncode == 0 and bool(
+                    re.fullmatch(r"herdr 0\.8\.\d+", version)
+                )
+                herdr_check.update({"ok": compatible, "version": version})
+                if not compatible:
+                    herdr_check["reason"] = "Herdr 0.8.x is required"
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                herdr_check["reason"] = str(exc)
+        else:
+            herdr_check["reason"] = "herdr was not found on PATH"
+        checks.append(herdr_check)
+        checks.append(
+            {
+                "check": "state_dir",
+                "ok": state_dir.is_dir(),
+                "path": str(state_dir),
+            }
+        )
+        return {"status": "healthy" if all(c["ok"] for c in checks) else "issues", "checks": checks}
 
     def monitor(
         self,
@@ -531,6 +801,9 @@ class FleetRuntime:
         if poll_seconds <= 0:
             raise FleetRuntimeError("poll_seconds must be positive")
         processed = 0
+        idle_rounds = 0
+        transient_errors = 0
+        last_error: str | None = None
         stopping = False
 
         def stop(_signum: int, _frame: Any) -> None:
@@ -541,40 +814,75 @@ class FleetRuntime:
         previous_term = signal.signal(signal.SIGTERM, stop)
         try:
             while not stopping:
-                result = self._run_json(
-                    [
-                        *self.controller_command,
-                        "--core-db",
-                        str(state_dir / "core.sqlite3"),
-                        "--herdr-db",
-                        str(state_dir / "herdr.sqlite3"),
-                        "--fleet",
-                        fleet_id,
-                        "--worker-id",
-                        f"controller:{os.getpid()}",
-                        "--execute",
-                    ],
-                    "Fleet controller",
-                )
+                manifest_path = self._manifest_path(state_dir, fleet_id)
+                if manifest_path.exists():
+                    phase = _load_document(manifest_path).get("phase")
+                    if phase in {"stopping", "stopped"}:
+                        stopping = True
+                        break
+                try:
+                    result = self._run_json(
+                        [
+                            *self.controller_command,
+                            "--core-command",
+                            self.core_command[0],
+                            "--herdr-command",
+                            self.herdr_command[0],
+                            "--core-db",
+                            str(self._fleet_state_dir(state_dir, fleet_id) / "core.sqlite3"),
+                            "--herdr-db",
+                            str(self._fleet_state_dir(state_dir, fleet_id) / "herdr.sqlite3"),
+                            "--fleet",
+                            fleet_id,
+                            "--worker-id",
+                            f"controller:{os.getpid()}",
+                            "--execute",
+                        ],
+                        "Fleet controller",
+                    )
+                except FleetRuntimeError as exc:
+                    if once:
+                        raise
+                    transient_errors += 1
+                    last_error = str(exc)
+                    self.sleeper(min(poll_seconds * (2 ** min(transient_errors, 5)), 5.0))
+                    continue
+                transient_errors = 0
+                last_error = None
                 status = result.get("status")
                 if status == "idle":
                     if once:
                         break
-                    self.sleeper(poll_seconds)
+                    idle_rounds += 1
+                    self.sleeper(
+                        min(poll_seconds * (2 ** min(idle_rounds - 1, 2)), 1.0)
+                    )
                 else:
                     processed += 1
+                    idle_rounds = 0
                     if once:
                         break
         finally:
             signal.signal(signal.SIGINT, previous_int)
             signal.signal(signal.SIGTERM, previous_term)
-        return {"status": "stopped" if stopping else "idle", "processed": processed}
+        return {
+            "status": "stopped" if stopping else "idle",
+            "processed": processed,
+            "transient_errors": transient_errors,
+            "last_error": last_error,
+        }
 
     def status(self, fleet_id: str, state_dir: Path) -> dict[str, Any]:
         manifest_path = self._manifest_path(state_dir, fleet_id)
         if not manifest_path.exists():
             return {"fleet_id": fleet_id, "status": "inactive"}
         manifest = _load_document(manifest_path)
+        if manifest.get("phase") == "stopped":
+            return {
+                "fleet_id": fleet_id,
+                "status": "stopped",
+                "configuration": dict(manifest),
+            }
         drift = False
         for path_key, hash_key in (
             ("fleet_path", "fleet_hash"),
@@ -591,7 +899,7 @@ class FleetRuntime:
             [
                 *self.core_command,
                 "--db",
-                str(state_dir / "core.sqlite3"),
+                str(self._fleet_state_dir(state_dir, fleet_id) / "core.sqlite3"),
                 "status",
                 "--fleet",
                 fleet_id,
@@ -602,7 +910,7 @@ class FleetRuntime:
             [
                 *self.herdr_command,
                 "--state-db",
-                str(state_dir / "herdr.sqlite3"),
+                str(self._fleet_state_dir(state_dir, fleet_id) / "herdr.sqlite3"),
                 "status",
                 "--fleet",
                 fleet_id,
@@ -625,10 +933,9 @@ def _default_state_dir() -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     adapter_root = Path(__file__).resolve().parent
-    plugin_root = adapter_root.parent
-    core_default = shutil.which("fleet-control") or str(
-        plugin_root.parent / "agent-fleet-core" / "core" / "scripts" / "fleet-control"
-    )
+    core_default = os.environ.get("AGENT_FLEET_CORE_COMMAND") or shutil.which(
+        "fleet-control"
+    ) or "fleet-control"
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--fleet-dir", type=Path, action="append")
     common.add_argument("--profile-dir", type=Path, action="append", default=[])
@@ -642,6 +949,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser = argparse.ArgumentParser(prog="fleet-runtime")
     sub = parser.add_subparsers(dest="action", required=True)
+    sub.add_parser("init", parents=[common])
+    sub.add_parser("doctor", parents=[common])
     sub.add_parser("list", parents=[common])
     plan = sub.add_parser("plan", parents=[common])
     plan.add_argument("fleet")
@@ -653,9 +962,15 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--agent-kind", choices=["codex", "claude"], default="codex")
     start.add_argument("--execute", action="store_true")
     start.add_argument("--once", action="store_true")
-    start.add_argument("--poll-seconds", type=float, default=0.05)
+    start.add_argument("--poll-seconds", type=float, default=0.25)
     status = sub.add_parser("status", parents=[common])
     status.add_argument("fleet")
+    stop = sub.add_parser("stop", parents=[common])
+    stop.add_argument("fleet")
+    stop.add_argument("--execute", action="store_true")
+    remove = sub.add_parser("remove", parents=[common])
+    remove.add_argument("fleet")
+    remove.add_argument("--execute", action="store_true")
     return parser
 
 
@@ -668,7 +983,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         [args.core_command], [args.herdr_command], [args.controller_command]
     )
     try:
-        if args.action == "list":
+        if args.action == "init":
+            result = runtime.initialize_user_config(
+                fleet_dirs, profile_dirs, args.state_dir
+            )
+        elif args.action == "doctor":
+            result = runtime.doctor(fleet_dirs, profile_dirs, args.state_dir)
+        elif args.action == "list":
             result: Any = runtime.list_configs(
                 fleet_dirs, profile_dirs, args.state_dir
             )
@@ -693,8 +1014,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 once=args.once,
                 poll_seconds=args.poll_seconds,
             )
-        else:
+        elif args.action == "status":
             result = runtime.status(args.fleet, args.state_dir)
+        elif args.action == "stop":
+            result = runtime.stop(args.fleet, args.state_dir, execute=args.execute)
+        else:
+            result = runtime.remove(args.fleet, args.state_dir, execute=args.execute)
     except (FleetRuntimeError, OSError, subprocess.SubprocessError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2

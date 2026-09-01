@@ -76,6 +76,8 @@ class FakeRunner:
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, "herdr 0.8.0\n", "")
         if "spec.validate" in argv:
             payload = {"ok": True, "result": FLEET}
         elif "provision" in argv:
@@ -193,10 +195,17 @@ class FleetRuntimeTest(unittest.TestCase):
         self.assertEqual(1, sum("task.assign" in call for call in runner.calls))
         activation = next(call for call in runner.calls if "context.sync" in call)
         payload = json.loads(activation[activation.index("--payload") + 1])
-        self.assertEqual(str(self.state / "core.sqlite3"), payload["control"]["core_db"])
+        self.assertEqual(
+            str((self.state / "fleets/review/core.sqlite3").resolve()),
+            payload["control"]["core_db"],
+        )
+        self.assertNotIn("context_confirm_argv", payload["control"])
         self.assertEqual("manager", payload["control"]["reporting"]["manager_ref"])
         controller = next(call for call in runner.calls if call[0] == "fleet-controller")
         self.assertIn("--execute", controller)
+        self.assertEqual(
+            "fleet-control", controller[controller.index("--core-command") + 1]
+        )
         self.assertTrue((self.state / "runtimes/review.json").is_file())
 
         repeat = runtime.start(
@@ -210,6 +219,70 @@ class FleetRuntimeTest(unittest.TestCase):
             once=True,
         )
         self.assertEqual("resumed", repeat["status"])
+
+        stopped = runtime.stop("review", self.state, execute=True)
+        self.assertEqual("stopped", stopped["status"])
+        manifest = json.loads((self.state / "runtimes/review.json").read_text())
+        self.assertEqual("stopped", manifest["phase"])
+        self.assertTrue(any("deprovision" in call for call in runner.calls))
+
+        first_activation_ids = {
+            call[call.index("--command-id") + 1]
+            for call in runner.calls
+            if "context.sync" in call
+        }
+        restarted = runtime.start(
+            "review",
+            [self.fleets],
+            [self.profiles],
+            self.state,
+            str(self.root),
+            "codex",
+            execute=True,
+            once=True,
+        )
+        self.assertEqual("started", restarted["status"])
+        all_activation_ids = {
+            call[call.index("--command-id") + 1]
+            for call in runner.calls
+            if "context.sync" in call
+        }
+        self.assertTrue(all_activation_ids - first_activation_ids)
+
+        removed = runtime.remove("review", self.state, execute=True)
+        self.assertEqual("removed", removed["status"])
+        self.assertFalse((self.state / "runtimes/review.json").exists())
+
+    def test_init_and_doctor_keep_configuration_outside_the_plugin(self):
+        runtime = fleet_runtime.FleetRuntime(
+            [str(Path(__file__))], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
+        )
+        fleets = self.root / "user-config/fleets"
+        profiles = self.root / "user-config/view-profiles"
+        state = self.root / "user-state"
+        initialized = runtime.initialize_user_config([fleets], [profiles], state)
+        self.assertEqual("initialized", initialized["status"])
+        self.assertTrue(fleets.is_dir())
+        self.assertTrue(profiles.is_dir())
+        diagnosis = runtime.doctor([fleets], [profiles], state)
+        self.assertIn(diagnosis["status"], {"healthy", "issues"})
+        self.assertNotIn("plugins/agent-fleet", " ".join(initialized["created"]))
+
+    def test_doctor_rejects_incompatible_herdr_version(self):
+        runner = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["herdr", "--version"], 0, "herdr 0.9.0\n", ""
+            )
+        )
+        runtime = fleet_runtime.FleetRuntime(
+            [str(Path(__file__))], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        with mock.patch.object(fleet_runtime.shutil, "which", return_value="/bin/herdr"):
+            diagnosis = runtime.doctor([self.fleets], [self.profiles], self.state)
+
+        herdr = next(check for check in diagnosis["checks"] if check["check"] == "herdr")
+        self.assertFalse(herdr["ok"])
+        self.assertEqual("Herdr 0.8.x is required", herdr["reason"])
 
 
 if __name__ == "__main__":
