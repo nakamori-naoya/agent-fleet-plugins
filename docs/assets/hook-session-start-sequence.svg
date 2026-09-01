@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="650" viewBox="0 0 1280 650" role="img" aria-labelledby="title desc">
+  <title id="title">SessionStart Hookの処理順序</title>
+  <desc id="desc">Claude CodeまたはCodex、役割Hook、Hook用SQLite、Fleet Coreの間で役割文脈を復元する順序。</desc>
+  <defs>
+    <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path class="arrowhead" d="M0 0 L10 5 L0 10z"/></marker>
+    <style>
+      .canvas { fill:#f7f9fc; }
+      text { font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif; fill:#172033; }
+      .head { fill:#edf2f8; stroke:#7890ad; stroke-width:2; rx:12; }
+      .life { stroke:#7890ad; stroke-width:2; stroke-dasharray:7 7; }
+      .msg { stroke:#245f9e; stroke-width:3; marker-end:url(#arrow2); }
+      .reply { stroke:#7890ad; stroke-width:3; stroke-dasharray:8 5; marker-end:url(#arrow2); }
+      .arrowhead { fill:#7890ad; }
+      .branch { fill:#fff7e8; stroke:#7890ad; }
+      .label { font-size:17px; }
+      .center { font-size:20px; font-weight:700; text-anchor:middle; }
+      @media (prefers-color-scheme: dark) {
+        .canvas { fill:#060c17; }
+        text { fill:#e8eef7; }
+        .head { fill:#0d1828; stroke:#6f8db4; }
+        .life, .reply { stroke:#6f8db4; }
+        .msg { stroke:#82c3ff; }
+        .arrowhead { fill:#6f8db4; }
+        .branch { fill:#1d2e48; stroke:#6f8db4; }
+      }
+    </style>
+  </defs>
+  <rect class="canvas" width="1280" height="650"/>
+  <text x="60" y="48" font-size="27" font-weight="700">セッション開始時はCoreから現在文脈を取り直す</text>
+  <g><rect class="head" x="55" y="80" width="240" height="62"/><text class="center" x="175" y="119">Claude Code / Codex</text><line class="life" x1="175" y1="142" x2="175" y2="610"/></g>
+  <g><rect class="head" x="365" y="80" width="210" height="62"/><text class="center" x="470" y="119">役割Hook</text><line class="life" x1="470" y1="142" x2="470" y2="610"/></g>
+  <g><rect class="head" x="665" y="80" width="210" height="62"/><text class="center" x="770" y="119">Hook用SQLite</text><line class="life" x1="770" y1="142" x2="770" y2="610"/></g>
+  <g><rect class="head" x="965" y="80" width="250" height="62"/><text class="center" x="1090" y="119">Fleet Core</text><line class="life" x1="1090" y1="142" x2="1090" y2="610"/></g>
+  <line class="msg" x1="175" y1="190" x2="470" y2="190"/><text class="label" x="205" y="177">1. SessionStart</text>
+  <line class="msg" x1="470" y1="245" x2="770" y2="245"/><text class="label" x="510" y="232">2. 会話との関連を確認</text>
+  <rect class="branch" x="335" y="278" width="780" height="78" stroke-width="2" rx="12"/>
+  <text x="365" y="309" font-size="18" font-weight="700">分岐</text><text x="365" y="338" class="label">関連なし → 何も追加しない ／ Claude Codeのfork → 未関連状態へ戻す</text>
+  <line class="msg" x1="470" y1="405" x2="1090" y2="405"/><text class="label" x="625" y="391">3. 関連済みなら現在の役割文脈を要求</text>
+  <line class="reply" x1="1090" y1="460" x2="470" y2="460"/><text class="label" x="630" y="447">4. 役割・担当・報告先・改訂番号</text>
+  <line class="msg" x1="470" y1="515" x2="770" y2="515"/><text class="label" x="505" y="502">5. 現在の関連を保存</text>
+  <line class="reply" x1="470" y1="570" x2="175" y2="570"/><text class="label" x="215" y="557">6. 現在の役割文脈を追加</text>
+</svg>

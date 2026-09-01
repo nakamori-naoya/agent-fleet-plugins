@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="430" viewBox="0 0 1280 430" role="img" aria-labelledby="title desc">
+  <title id="title">役割Hookが動く二つの位置</title>
+  <desc id="desc">セッション開始時に役割文脈を復元し、各prompt送信時に現在の役割と指示を検査する流れ。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="arrowhead" d="M 0 0 L 10 5 L 0 10 z"/></marker>
+    <marker id="stopArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path class="stop-arrowhead" d="M 0 0 L 10 5 L 0 10 z"/></marker>
+    <style>
+      .canvas { fill:#f7f9fc; }
+      text { font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif; fill:#172033; }
+      .muted, .sub, .muted-text { fill:#5c6c82; }
+      .muted { font-size:18px; }
+      .node { fill:#edf2f8; stroke:#7890ad; stroke-width:2; rx:16; }
+      .hook { stroke:#245f9e; stroke-width:4; }
+      .label { font-size:22px; font-weight:700; text-anchor:middle; }
+      .sub { font-size:17px; text-anchor:middle; }
+      .arrow, .stop-line { fill:none; stroke:#7890ad; stroke-width:3; marker-end:url(#arrow); }
+      .arrowhead { fill:#7890ad; }
+      .stop-line { stroke:#a64343; marker-end:url(#stopArrow); }
+      .stop-arrowhead { fill:#a64343; }
+      .stop-text { fill:#a64343; }
+      @media (prefers-color-scheme: dark) {
+        .canvas { fill:#060c17; }
+        text { fill:#e8eef7; }
+        .muted, .sub, .muted-text { fill:#a9b9cf; }
+        .node { fill:#0d1828; stroke:#6f8db4; }
+        .hook { stroke:#82c3ff; }
+        .arrow { stroke:#6f8db4; }
+        .arrowhead { fill:#6f8db4; }
+        .stop-line { stroke:#ff9090; }
+        .stop-arrowhead { fill:#ff9090; }
+        .stop-text { fill:#ff9090; }
+      }
+    </style>
+  </defs>
+  <rect class="canvas" width="1280" height="430"/>
+  <text x="70" y="58" font-size="27" font-weight="700">一つの会話で役割Hookが動く位置</text>
+  <text class="muted" x="70" y="91">Hookは常駐せず、製品イベントの発生時だけ一回実行する</text>
+  <rect class="node" x="60" y="155" width="190" height="100"/>
+  <text class="label" x="155" y="198">セッション開始</text><text class="sub" x="155" y="229">起動・再開・圧縮</text>
+  <rect class="node hook" x="310" y="145" width="230" height="120"/>
+  <text class="label" x="425" y="190">SessionStart</text><text class="sub" x="425" y="222">役割文脈を復元</text>
+  <rect class="node" x="600" y="155" width="180" height="100"/>
+  <text class="label" x="690" y="198">prompt</text><text class="sub" x="690" y="229">利用者 / Herdr</text>
+  <rect class="node hook" x="840" y="145" width="250" height="120"/>
+  <text class="label" x="965" y="190">UserPromptSubmit</text><text class="sub" x="965" y="222">役割と指示を検査</text>
+  <rect class="node" x="1140" y="155" width="110" height="100"/>
+  <text class="label" x="1195" y="197">モデル</text><text class="sub" x="1195" y="228">処理</text>
+  <path class="arrow" d="M250 205 H310"/><path class="arrow" d="M540 205 H600"/><path class="arrow" d="M780 205 H840"/><path class="arrow" d="M1090 205 H1140"/>
+  <path class="arrow" d="M1195 255 V337 H690 V260"/>
+  <text class="muted-text" x="880" y="370" font-size="18">次のpromptでも直前検査を繰り返す</text>
+  <path class="stop-line" d="M965 265 V320"/>
+  <text class="stop-text" x="985" y="307" font-size="17">失敗時はpromptを拒否</text>
+</svg>
