@@ -173,9 +173,49 @@ class HerdrAdapterTest(unittest.TestCase):
             if operation["id"] == "agent.start:manager-1"
         )
         self.assertEqual(
-            ["--", "--dangerously-bypass-hook-trust", "--model", "gpt-5.6-sol"],
-            manager_start["argv"][-4:],
+            [
+                "--",
+                "--config",
+                "plugins.agent-fleet-session-hooks@agent-fleet.enabled=true",
+                "--dangerously-bypass-hook-trust",
+                "--model",
+                "gpt-5.6-sol",
+            ],
+            manager_start["argv"][-6:],
         )
+
+    def test_fleet_agents_enable_session_only_hook_plugin(self):
+        adapter = herdr_adapter.HerdrAdapter(self.state)
+
+        codex_plan = adapter.plan_provision(
+            FLEET, "/repo", "codex", VIEW_PROFILE
+        )
+        claude_plan = adapter.plan_provision(
+            FLEET, "/repo", "claude", VIEW_PROFILE
+        )
+
+        codex_starts = [
+            operation["argv"]
+            for operation in codex_plan.operations
+            if operation["id"].startswith("agent.start:")
+        ]
+        for argv in codex_starts:
+            self.assertIn("--config", argv)
+            self.assertIn(
+                "plugins.agent-fleet-session-hooks@agent-fleet.enabled=true", argv
+            )
+
+        hook_plugin_root = str(
+            Path(herdr_adapter.__file__).parents[1] / "session-hooks-plugin"
+        )
+        claude_starts = [
+            operation["argv"]
+            for operation in claude_plan.operations
+            if operation["id"].startswith("agent.start:")
+        ]
+        for argv in claude_starts:
+            self.assertIn("--plugin-dir", argv)
+            self.assertIn(hook_plugin_root, argv)
 
     def test_codex_fleet_preapproves_hook_trust_without_bypassing_other_approvals(self):
         plan = herdr_adapter.HerdrAdapter(self.state).plan_provision(
@@ -188,7 +228,15 @@ class HerdrAdapterTest(unittest.TestCase):
             if operation["id"].startswith("agent.start:")
         ]
         for argv in starts:
-            self.assertEqual(["--", "--dangerously-bypass-hook-trust"], argv[-2:])
+            self.assertEqual(
+                [
+                    "--",
+                    "--config",
+                    "plugins.agent-fleet-session-hooks@agent-fleet.enabled=true",
+                    "--dangerously-bypass-hook-trust",
+                ],
+                argv[-4:],
+            )
             self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
             self.assertNotIn("--approve-for-me", argv)
 
@@ -332,6 +380,8 @@ class HerdrAdapterTest(unittest.TestCase):
                 "--pane",
                 "p-manager",
                 "--",
+                "--config",
+                "plugins.agent-fleet-session-hooks@agent-fleet.enabled=true",
                 "--dangerously-bypass-hook-trust",
             ],
             runner.calls[1][0],

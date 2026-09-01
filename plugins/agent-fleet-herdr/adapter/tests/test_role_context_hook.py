@@ -747,17 +747,32 @@ class RoleContextHookTest(unittest.TestCase):
 
     def test_product_manifests_use_product_specific_hook_configs(self):
         plugin_root = MODULE_PATH.parents[1]
+        hook_plugin_root = plugin_root / "session-hooks-plugin"
         claude_manifest = json.loads(
             (plugin_root / ".claude-plugin" / "plugin.json").read_text()
         )
         codex_manifest = json.loads(
             (plugin_root / ".codex-plugin" / "plugin.json").read_text()
         )
-        claude_hooks = json.loads((plugin_root / "hooks" / "claude-hooks.json").read_text())
-        codex_hooks = json.loads((plugin_root / "hooks" / "codex-hooks.json").read_text())
+        hook_claude_manifest = json.loads(
+            (hook_plugin_root / ".claude-plugin" / "plugin.json").read_text()
+        )
+        hook_codex_manifest = json.loads(
+            (hook_plugin_root / ".codex-plugin" / "plugin.json").read_text()
+        )
+        claude_hooks = json.loads(
+            (hook_plugin_root / "hooks" / "claude-hooks.json").read_text()
+        )
+        codex_hooks = json.loads(
+            (hook_plugin_root / "hooks" / "codex-hooks.json").read_text()
+        )
 
-        self.assertEqual("./hooks/claude-hooks.json", claude_manifest["hooks"])
-        self.assertEqual("./hooks/codex-hooks.json", codex_manifest["hooks"])
+        self.assertNotIn("hooks", claude_manifest)
+        self.assertNotIn("hooks", codex_manifest)
+        self.assertEqual(
+            "./hooks/claude-hooks.json", hook_claude_manifest["hooks"]
+        )
+        self.assertEqual("./hooks/codex-hooks.json", hook_codex_manifest["hooks"])
         self.assertEqual(
             "startup|resume|clear|compact|fork",
             claude_hooks["hooks"]["SessionStart"][0]["matcher"],

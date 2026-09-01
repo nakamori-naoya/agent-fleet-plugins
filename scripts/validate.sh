@@ -4,6 +4,7 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CORE="$ROOT/plugins/agent-fleet-core"
 HERDR="$ROOT/plugins/agent-fleet-herdr"
+HOOK_PLUGIN="$HERDR/session-hooks-plugin"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agent-fleet-validation.XXXXXX") || exit 2
 trap 'rm -rf "$TMP_ROOT"' EXIT
 failed=0
@@ -11,25 +12,29 @@ failed=0
 for manifest in \
   "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json" \
   "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.2.8" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.2.9" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
+done
+for manifest in "$HOOK_PLUGIN/.codex-plugin/plugin.json" "$HOOK_PLUGIN/.claude-plugin/plugin.json"; do
+  jq -e '.version=="0.2.9" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
 done
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact|fork" and .hooks.SessionStart[0].hooks[0].timeout==12' \
-  "$HERDR/hooks/claude-hooks.json" >/dev/null || failed=1
+  "$HOOK_PLUGIN/hooks/claude-hooks.json" >/dev/null || failed=1
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact" and .hooks.SessionStart[0].hooks[0].timeout==12' \
-  "$HERDR/hooks/codex-hooks.json" >/dev/null || failed=1
+  "$HOOK_PLUGIN/hooks/codex-hooks.json" >/dev/null || failed=1
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].command=="sh" and .hooks.UserPromptSubmit[0].hooks[0].args[0]=="-c" and (.hooks.UserPromptSubmit[0].hooks[0].args[1] | contains("AGENT_FLEET_HOOK_RUNTIME") and contains("--runtime-product claude") and (contains("python3 -c")|not) and (contains("PLUGIN_ROOT")|not)) and .hooks.UserPromptSubmit[0].hooks[0].args==.hooks.SessionStart[0].hooks[0].args' \
-  "$HERDR/hooks/claude-hooks.json" >/dev/null || failed=1
+  "$HOOK_PLUGIN/hooks/claude-hooks.json" >/dev/null || failed=1
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].command | contains("AGENT_FLEET_HOOK_RUNTIME") and contains("--runtime-product codex") and (contains("python3 -c")|not) and (contains("PLUGIN_ROOT")|not)' \
-  "$HERDR/hooks/codex-hooks.json" >/dev/null || failed=1
+  "$HOOK_PLUGIN/hooks/codex-hooks.json" >/dev/null || failed=1
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].command==.hooks.SessionStart[0].hooks[0].command' \
-  "$HERDR/hooks/codex-hooks.json" >/dev/null || failed=1
-jq -e '.hooks=="./hooks/claude-hooks.json"' "$HERDR/.claude-plugin/plugin.json" >/dev/null || failed=1
-jq -e '.hooks=="./hooks/codex-hooks.json"' "$HERDR/.codex-plugin/plugin.json" >/dev/null || failed=1
+  "$HOOK_PLUGIN/hooks/codex-hooks.json" >/dev/null || failed=1
+jq -e 'has("hooks")|not' "$HERDR/.claude-plugin/plugin.json" "$HERDR/.codex-plugin/plugin.json" >/dev/null || failed=1
+jq -e '.hooks=="./hooks/claude-hooks.json"' "$HOOK_PLUGIN/.claude-plugin/plugin.json" >/dev/null || failed=1
+jq -e '.hooks=="./hooks/codex-hooks.json"' "$HOOK_PLUGIN/.codex-plugin/plugin.json" >/dev/null || failed=1
 test ! -e "$HERDR/view-profiles" || failed=1
 if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
   failed=1
 fi
-jq -e '.name=="agent-fleet" and (.plugins|length==2) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr"] and all(.plugins[]; .version=="0.2.8")' \
+jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.2.9")' \
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \
@@ -115,6 +120,8 @@ jq -e '.ok==true and (.result|length)==3 and all(.result[]; .profile_resolved==t
   --state-dir "$TMP_ROOT/runtime-state" --cwd "$ROOT" --agent-kind codex \
   > "$TMP_ROOT/fleet-plan.json" || failed=1
 jq -e '.ok==true and .result.status=="planned" and .result.profile_ref=="local/development-focus@1" and (.result.herdr.plan.placements|length)==5' \
+  "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
+jq -e 'all(.result.herdr.plan.operations[] | select(.id|startswith("agent.start:")); (.argv|index("plugins.agent-fleet-session-hooks@agent-fleet.enabled=true")) != null)' \
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
 test ! -e "$TMP_ROOT/runtime-state" || failed=1
 

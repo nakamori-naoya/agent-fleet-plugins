@@ -1,12 +1,11 @@
 {
   "name": "agent-fleet-herdr",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Agent FleetのRuntime/View操作をHerdr 0.8へ変換するadapter",
   "author": {
     "name": "NaoyaNakamori"
   },
   "skills": "./skills/",
-  "hooks": "./hooks/codex-hooks.json",
   "interface": {
     "displayName": "Agent Fleet Herdr",
     "shortDescription": "Agent fleetをHerdr paneへ配置・bindする",

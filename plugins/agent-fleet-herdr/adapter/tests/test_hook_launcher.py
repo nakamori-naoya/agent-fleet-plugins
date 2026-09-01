@@ -8,8 +8,9 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).parents[2]
 ROLE_CONTEXT = PLUGIN_ROOT / "hooks" / "role_context.py"
-CODEX_HOOKS = PLUGIN_ROOT / "hooks" / "codex-hooks.json"
-CLAUDE_HOOKS = PLUGIN_ROOT / "hooks" / "claude-hooks.json"
+HOOK_PLUGIN_ROOT = PLUGIN_ROOT / "session-hooks-plugin"
+CODEX_HOOKS = HOOK_PLUGIN_ROOT / "hooks" / "codex-hooks.json"
+CLAUDE_HOOKS = HOOK_PLUGIN_ROOT / "hooks" / "claude-hooks.json"
 
 
 class HookLauncherTest(unittest.TestCase):

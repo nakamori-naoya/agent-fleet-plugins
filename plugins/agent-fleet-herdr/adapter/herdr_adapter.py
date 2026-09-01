@@ -38,6 +38,10 @@ COMMAND_TYPES = frozenset(
 )
 NEW_PANE_START_ATTEMPTS = 3
 NEW_PANE_START_RETRY_DELAY_SECONDS = 1.0
+SESSION_HOOK_PLUGIN_ROOT = Path(__file__).parents[1] / "session-hooks-plugin"
+CODEX_SESSION_HOOK_PLUGIN_CONFIG = (
+    "plugins.agent-fleet-session-hooks@agent-fleet.enabled=true"
+)
 
 
 class HerdrAdapterError(RuntimeError):
@@ -715,10 +719,14 @@ class HerdrAdapter:
         if agent_kind == "codex":
             provision_environment["AGENT_FLEET_CODEX_HOOK_TRUST"] = hook_trust
 
-        def model_args(agent_ref: str) -> tuple[str, ...]:
+        def session_args(agent_ref: str) -> tuple[str, ...]:
             args: list[str] = []
-            if agent_kind == "codex" and hook_trust == "preapproved":
-                args.append("--dangerously-bypass-hook-trust")
+            if agent_kind == "codex":
+                args.extend(["--config", CODEX_SESSION_HOOK_PLUGIN_CONFIG])
+                if hook_trust == "preapproved":
+                    args.append("--dangerously-bypass-hook-trust")
+            elif agent_kind == "claude":
+                args.extend(["--plugin-dir", str(SESSION_HOOK_PLUGIN_ROOT)])
             model = models.get(agent_ref)
             if model:
                 args.extend(["--model", model])
@@ -763,7 +771,7 @@ class HerdrAdapter:
             {
                 "id": f"agent.start:{manager_ref}",
                 "argv": self.commands.agent_start(
-                    manager_ref, agent_kind, root_pane, model_args(manager_ref)
+                    manager_ref, agent_kind, root_pane, session_args(manager_ref)
                 ),
             },
         ]
@@ -809,7 +817,7 @@ class HerdrAdapter:
                 {
                     "id": f"agent.start:{worker_ref}",
                     "argv": self.commands.agent_start(
-                        worker_ref, agent_kind, pane_ref, model_args(worker_ref)
+                        worker_ref, agent_kind, pane_ref, session_args(worker_ref)
                     ),
                 }
             )

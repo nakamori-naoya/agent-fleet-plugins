@@ -1,0 +1,17 @@
+{
+  "name": "agent-fleet-session-hooks",
+  "version": "0.2.9",
+  "description": "艦隊agent sessionだけで役割文脈Hookを有効にする",
+  "author": {
+    "name": "NaoyaNakamori"
+  },
+  "hooks": "./hooks/codex-hooks.json",
+  "interface": {
+    "displayName": "Agent Fleet Session Hooks",
+    "shortDescription": "艦隊agent sessionへ役割文脈を注入する",
+    "longDescription": "Agent Fleetから起動されたCodex sessionだけで、固定配置済みの役割文脈Hookを実行する。通常sessionでは無効のまま使う。",
+    "developerName": "NaoyaNakamori",
+    "category": "Productivity",
+    "capabilities": ["Hooks"]
+  }
+}

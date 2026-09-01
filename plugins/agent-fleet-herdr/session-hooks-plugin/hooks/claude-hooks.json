@@ -1,5 +1,5 @@
 {
-  "description": "Agent Fleetの役割文脈をClaude Code sessionへ再注入する",
+  "description": "Agent Fleetの役割文脈をClaude Code fleet sessionへ再注入する",
   "hooks": {
     "UserPromptSubmit": [
       {
