@@ -49,7 +49,7 @@ FLEET = {
             {"agent_ref": "worker-2", "role_ref": "worker@1"},
         ],
         "collaboration": {"manager": "manager-1"},
-        "runtime": {"provider": "herdr"},
+        "runtime": {"provider": "herdr", "codex_hook_trust": "preapproved"},
         "view": {"profile_ref": "local/test-deck@1"},
     },
 }
@@ -117,7 +117,8 @@ class HerdrAdapterTest(unittest.TestCase):
         self.assertEqual(
             [
                 "herdr", "workspace", "create", "--cwd", "/repo",
-                "--label", "agent-fleet:demo-fleet:<operation-id>", "--no-focus",
+                "--label", "agent-fleet:demo-fleet:<operation-id>",
+                "--env", "AGENT_FLEET_CODEX_HOOK_TRUST=preapproved", "--no-focus",
             ],
             operations[0]["argv"],
         )
@@ -153,6 +154,7 @@ class HerdrAdapterTest(unittest.TestCase):
                 "AGENT_FLEET_CORE_COMMAND=/opt/agent-fleet/fleet-control", argv
             )
             self.assertIn("AGENT_FLEET_CORE_DB=/state/demo/core.sqlite3", argv)
+            self.assertIn("AGENT_FLEET_CODEX_HOOK_TRUST=preapproved", argv)
 
     def test_member_model_is_forwarded_to_supported_agent(self):
         fleet = json.loads(json.dumps(FLEET))
@@ -166,7 +168,70 @@ class HerdrAdapterTest(unittest.TestCase):
             operation for operation in plan.operations
             if operation["id"] == "agent.start:manager-1"
         )
-        self.assertEqual(["--", "--model", "gpt-5.6-sol"], manager_start["argv"][-3:])
+        self.assertEqual(
+            ["--", "--dangerously-bypass-hook-trust", "--model", "gpt-5.6-sol"],
+            manager_start["argv"][-4:],
+        )
+
+    def test_codex_fleet_preapproves_hook_trust_without_bypassing_other_approvals(self):
+        plan = herdr_adapter.HerdrAdapter(self.state).plan_provision(
+            FLEET, "/repo", "codex", VIEW_PROFILE
+        )
+
+        starts = [
+            operation["argv"]
+            for operation in plan.operations
+            if operation["id"].startswith("agent.start:")
+        ]
+        for argv in starts:
+            self.assertEqual(["--", "--dangerously-bypass-hook-trust"], argv[-2:])
+            self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
+            self.assertNotIn("--approve-for-me", argv)
+
+    def test_codex_hook_review_can_be_restored_per_fleet(self):
+        fleet = json.loads(json.dumps(FLEET))
+        fleet["spec"]["runtime"]["codex_hook_trust"] = "review"
+
+        plan = herdr_adapter.HerdrAdapter(self.state).plan_provision(
+            fleet, "/repo", "codex", VIEW_PROFILE
+        )
+
+        starts = [
+            operation["argv"]
+            for operation in plan.operations
+            if operation["id"].startswith("agent.start:")
+        ]
+        self.assertTrue(all("--dangerously-bypass-hook-trust" not in argv for argv in starts))
+        shells = [
+            operation["argv"]
+            for operation in plan.operations
+            if operation["id"] == "workspace.create"
+            or operation["id"].startswith("pane.split:")
+        ]
+        self.assertTrue(
+            all("AGENT_FLEET_CODEX_HOOK_TRUST=review" in argv for argv in shells)
+        )
+
+    def test_codex_hook_review_is_the_safe_default(self):
+        fleet = json.loads(json.dumps(FLEET))
+        del fleet["spec"]["runtime"]["codex_hook_trust"]
+
+        plan = herdr_adapter.HerdrAdapter(self.state).plan_provision(
+            fleet, "/repo", "codex", VIEW_PROFILE
+        )
+
+        starts = [
+            operation["argv"]
+            for operation in plan.operations
+            if operation["id"].startswith("agent.start:")
+        ]
+        self.assertTrue(all("--dangerously-bypass-hook-trust" not in argv for argv in starts))
+        workspace = next(
+            operation["argv"]
+            for operation in plan.operations
+            if operation["id"] == "workspace.create"
+        )
+        self.assertIn("AGENT_FLEET_CODEX_HOOK_TRUST=review", workspace)
 
     def test_layout_tree_compiles_equal_three_member_stack_to_sequential_ratios(self):
         fleet = json.loads(json.dumps(FLEET))
@@ -253,7 +318,18 @@ class HerdrAdapterTest(unittest.TestCase):
         self.assertEqual("p-worker-1", self.state.resolve("worker-1", "demo-fleet").pane_id)
         self.assertEqual("p-worker-2", self.state.resolve("worker-2", "demo-fleet").pane_id)
         self.assertEqual(
-            ["herdr", "agent", "start", "manager-1", "--kind", "codex", "--pane", "p-manager"],
+            [
+                "herdr",
+                "agent",
+                "start",
+                "manager-1",
+                "--kind",
+                "codex",
+                "--pane",
+                "p-manager",
+                "--",
+                "--dangerously-bypass-hook-trust",
+            ],
             runner.calls[1][0],
         )
         self.assertEqual("p-worker-1", runner.calls[4][0][3])

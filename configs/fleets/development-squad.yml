@@ -66,5 +66,6 @@ spec:
       include_task_updates: true
   runtime:
     provider: herdr
+    codex_hook_trust: preapproved
   view:
     profile_ref: local/development-focus@1

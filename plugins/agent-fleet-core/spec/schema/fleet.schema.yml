@@ -115,6 +115,10 @@ $defs:
     properties:
       provider:
         $ref: "#/$defs/nonEmptyString"
+      codex_hook_trust:
+        description: Whether Herdr-started Codex members review hooks interactively or use the fleet's preapproved hooks without a prompt.
+        type: string
+        enum: [preapproved, review]
   viewPlacement:
     description: Versioned logical presentation reference, never Herdr geometry or a file path.
     type: object

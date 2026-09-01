@@ -719,8 +719,12 @@ class FleetStoreTest(unittest.TestCase):
             "2026-09-01T12:10:00+00:00",
         )
 
-        self.assertEqual(first, second)
+        self.assertFalse(first["idempotent"])
         self.assertTrue(second["idempotent"])
+        self.assertEqual(
+            {key: value for key, value in first.items() if key != "idempotent"},
+            {key: value for key, value in second.items() if key != "idempotent"},
+        )
         status = self.store.status("demo")
         self.assertEqual("running", status["tasks"][0]["status"])
         self.assertEqual("report-1", status["tasks"][0]["latest_report"]["report_id"])

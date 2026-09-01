@@ -475,7 +475,11 @@ class Herdr08Commands:
 
     @staticmethod
     def _append_environment(argv: list[str], environment: Mapping[str, str]) -> None:
-        allowed = {"AGENT_FLEET_CORE_COMMAND", "AGENT_FLEET_CORE_DB"}
+        allowed = {
+            "AGENT_FLEET_CODEX_HOOK_TRUST",
+            "AGENT_FLEET_CORE_COMMAND",
+            "AGENT_FLEET_CORE_DB",
+        }
         unknown = set(environment) - allowed
         if unknown:
             raise HerdrAdapterError(
@@ -695,9 +699,29 @@ class HerdrAdapter:
                 f"per-member model selection is not supported for agent kind {agent_kind!r}"
             )
 
+        spec = fleet.get("spec")
+        runtime = spec.get("runtime") if isinstance(spec, Mapping) else None
+        hook_trust = (
+            runtime.get("codex_hook_trust", "review")
+            if isinstance(runtime, Mapping)
+            else "review"
+        )
+        if hook_trust not in {"preapproved", "review"}:
+            raise HerdrAdapterError(
+                "Fleet spec.runtime.codex_hook_trust must be preapproved or review"
+            )
+        provision_environment = dict(agent_environment or {})
+        if agent_kind == "codex":
+            provision_environment["AGENT_FLEET_CODEX_HOOK_TRUST"] = hook_trust
+
         def model_args(agent_ref: str) -> tuple[str, ...]:
+            args: list[str] = []
+            if agent_kind == "codex" and hook_trust == "preapproved":
+                args.append("--dangerously-bypass-hook-trust")
             model = models.get(agent_ref)
-            return ("--model", model) if model else ()
+            if model:
+                args.extend(["--model", model])
+            return tuple(args)
         profile_errors = validate_document(view_profile)
         if profile_errors:
             raise HerdrAdapterError("invalid View Profile: " + "; ".join(profile_errors))
@@ -731,7 +755,7 @@ class HerdrAdapter:
             {
                 "id": "workspace.create",
                 "argv": self.commands.workspace_create(
-                    cwd, workspace_label, agent_environment
+                    cwd, workspace_label, provision_environment
                 ),
                 "produces": ["workspace_id", "tab_id", "root_pane_id"],
             },
@@ -775,7 +799,7 @@ class HerdrAdapter:
                             if index == 1
                             else (len(workers) - index + 1) / (len(workers) - index + 2)
                         ),
-                        agent_environment,
+                        provision_environment,
                     ),
                     "produces": [pane_ref],
                 }

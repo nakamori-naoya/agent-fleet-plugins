@@ -338,9 +338,17 @@ def _runtime(value: Any, errors: list[str]) -> None:
     runtime = _mapping(value, path, errors)
     if runtime is None:
         return
-    _keys(runtime, path, {"provider"}, {"provider"}, errors)
+    _keys(runtime, path, {"provider"}, {"provider", "codex_hook_trust"}, errors)
     if "provider" in runtime:
         _string(runtime.get("provider"), f"{path}.provider", errors)
+    hook_trust = runtime.get("codex_hook_trust")
+    if "codex_hook_trust" in runtime and hook_trust not in {
+        "preapproved",
+        "review",
+    }:
+        errors.append(
+            f"{path}.codex_hook_trust: must be 'preapproved' or 'review'"
+        )
 
 
 def _view(value: Any, errors: list[str]) -> None:

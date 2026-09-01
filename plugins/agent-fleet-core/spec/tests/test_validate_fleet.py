@@ -45,6 +45,26 @@ class FleetValidatorTest(unittest.TestCase):
     def test_example_is_valid(self) -> None:
         self.assertEqual([], validator.validate_document(self.valid))
 
+    def test_codex_hook_trust_accepts_only_preapproved_or_review(self) -> None:
+        for value in ("preapproved", "review"):
+            with self.subTest(value=value):
+                errors = self.errors_for(
+                    lambda doc, selected=value: doc["spec"]["runtime"].__setitem__(
+                        "codex_hook_trust", selected
+                    )
+                )
+                self.assertEqual([], errors)
+
+        errors = self.errors_for(
+            lambda doc: doc["spec"]["runtime"].__setitem__(
+                "codex_hook_trust", "bypass-everything"
+            )
+        )
+        self.assertIn(
+            "spec.runtime.codex_hook_trust: must be 'preapproved' or 'review'",
+            errors,
+        )
+
     def test_requires_fleet_and_task_completion_contracts(self) -> None:
         def mutate(doc):
             del doc["spec"]["completion_criteria"]

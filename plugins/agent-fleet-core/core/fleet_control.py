@@ -1511,7 +1511,7 @@ class FleetStore:
             "status": "recorded",
             "notification_id": notification_id,
             "created_at": created_at,
-            "idempotent": True,
+            "idempotent": False,
         }
 
     def enqueue_command(
