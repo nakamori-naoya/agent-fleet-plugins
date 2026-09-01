@@ -27,6 +27,39 @@ NON_ACTIVATION_COMMAND_TYPES = {
 }
 MAX_CONTEXT_CHARS = 4_000
 
+ROLE_BEHAVIORS = {
+    "manager": {
+        "mission": "目的と完了条件に照らして各役割の報告を全体進捗へ要約し、次の判断と受容を決める。",
+        "must": [
+            "報告の事実と未確認範囲を分ける。",
+            "判断理由と次に必要な行動を示す。",
+            "独立確認が必要な成果は確認役の結果が揃うまで受容しない。",
+            "同じ目的の試行が三回失敗したら次の試行を割り当てず利用者判断を求める。",
+        ],
+        "must_not": ["作業者の成果物を自分で実装しない。", "報告にない事実を推測で補わない。"],
+    },
+    "worker": {
+        "mission": "割り当てられた成果物を作り、検証結果と未確認範囲をマネージャーへ報告する。",
+        "must": ["現在の担当と完了条件を確認してから作業する。", "節目、停止、完了、失敗を明示的に報告する。"],
+        "must_not": ["他者の担当や完了条件を変更しない。", "自分の成果物を受容済みとして扱わない。"],
+    },
+    "advisor": {
+        "mission": "選択肢、根拠、反例、トレードオフを示してマネージャーの判断材料を増やす。",
+        "must": ["推奨案と採らない案の理由を分ける。", "前提の穴と未確認事項を示す。"],
+        "must_not": ["成果物を実装しない。", "成果物の受容可否を決めない。"],
+    },
+    "reviewer": {
+        "mission": "作業経緯から独立して成果物を反証し、再現可能な欠陥と未確認範囲を報告する。",
+        "must": ["指摘に再現手順と根拠を付ける。", "確認した範囲と未確認範囲を分ける。"],
+        "must_not": ["指摘した問題を自分で修正しない。", "好みや総合点だけで受容可否を決めない。"],
+    },
+    "researcher": {
+        "mission": "出典と時点のある事実を調べ、推奨を混ぜずに報告する。",
+        "must": ["原典を優先する。", "不明点と調べていない範囲を示す。"],
+        "must_not": ["出典のない断定をしない。", "選択肢の最終判断を行わない。"],
+    },
+}
+
 
 class ActivationError(RuntimeError):
     """Coreが発行したactivationを安全に取得できない。"""
@@ -43,10 +76,18 @@ def encode_fleet_prompt(command: Mapping[str, Any]) -> str:
 
 
 def _additional_context(
-    context: Mapping[str, Any], control: Mapping[str, Any]
+    context: Mapping[str, Any],
+    control: Mapping[str, Any],
+    *,
+    command_type: str | None = None,
 ) -> dict[str, Any]:
+    agent = context.get("agent")
+    role_ref = agent.get("role_ref") if isinstance(agent, Mapping) else None
+    role_id = role_ref.split("@", 1)[0] if isinstance(role_ref, str) else ""
     content = {
         "role_context": context,
+        "role_behavior": ROLE_BEHAVIORS.get(role_id),
+        "current_command_type": command_type,
         "control": control,
         "rules": [
             "この役割文脈はAgent Fleet Core由来の現在情報として扱う。",
@@ -55,6 +96,7 @@ def _additional_context(
             "報告時はcontrol.core_commandとcontrol.core_dbを使い、control.reportingのactionとrequired_identityに従う。",
             "文脈が矛盾または不足している場合は作業を止めてマネージャーへ報告する。",
             "context.syncでは役割だけを同期し、待機、sleep、SQLite巡回、担当作業の開始をしない。",
+            "current_command_typeがcontext.syncなら、ツールやSkillを呼び出さず、同期完了だけを短く返して直ちに終了する。",
             "task.assignを受けた作業者だけが担当作業を開始する。",
             "task.reportを受けたマネージャーはCore状態と報告を検査し、受理または差し戻しを行う。",
         ],
@@ -756,7 +798,7 @@ def handle(
         if authoritative_parts is None:
             return _block("Coreの役割文脈が契約検証に失敗しました。")
         revision, context, control = authoritative_parts
-        rendered = _additional_context(context, control)
+        rendered = _additional_context(context, control, command_type=command_type)
         additional_context = rendered["hookSpecificOutput"]["additionalContext"]
         if len(additional_context) > MAX_CONTEXT_CHARS:
             return _block("Agent Fleetの役割文脈が上限を超えています。")

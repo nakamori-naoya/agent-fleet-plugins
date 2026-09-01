@@ -12,10 +12,10 @@ failed=0
 for manifest in \
   "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json" \
   "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.2.9" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.2.10" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
 done
 for manifest in "$HOOK_PLUGIN/.codex-plugin/plugin.json" "$HOOK_PLUGIN/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.2.9" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.2.10" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
 done
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact|fork" and .hooks.SessionStart[0].hooks[0].timeout==12' \
   "$HOOK_PLUGIN/hooks/claude-hooks.json" >/dev/null || failed=1
@@ -34,7 +34,7 @@ test ! -e "$HERDR/view-profiles" || failed=1
 if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
   failed=1
 fi
-jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.2.9")' \
+jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.2.10")' \
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \
@@ -49,6 +49,7 @@ done
 python3 -m unittest discover -s "$CORE/spec/tests" -p 'test_*.py' >/dev/null || failed=1
 python3 -m unittest discover -s "$CORE/core/tests" -p 'test_*.py' >/dev/null || failed=1
 python3 -m unittest discover -s "$HERDR/adapter/tests" -p 'test_*.py' >/dev/null || failed=1
+python3 -m unittest discover -s "$ROOT/tests" -p 'test_*.py' >/dev/null || failed=1
 
 fleet_json=$(python3 -S "$CORE/spec/scripts/validate_fleet.py" \
   "$ROOT/configs/fleets/development-squad.yml" --output-json) || failed=1
@@ -58,6 +59,36 @@ if [ -n "${fleet_json:-}" ]; then
     fleet.provision --config "$ROOT/configs/fleets/development-squad.yml" \
     > "$TMP_ROOT/core.json" || failed=1
   jq -e '.ok==true and .result.members==5 and .result.tasks==4' "$TMP_ROOT/core.json" >/dev/null || failed=1
+
+  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/deadline.sqlite3" \
+    fleet.provision --config "$ROOT/configs/fleets/development-squad.yml" \
+    >/dev/null || failed=1
+  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/deadline.sqlite3" task.assign \
+    --fleet development-squad --task architecture-advice --agent-ref advisor \
+    --manager-ref manager --command-id validation-architecture-assignment \
+    >/dev/null || failed=1
+  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/deadline.sqlite3" task.report \
+    --fleet development-squad --task architecture-advice --agent-ref advisor \
+    --status running >/dev/null || failed=1
+  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/deadline.sqlite3" task.progress \
+    --fleet development-squad --task architecture-advice --agent-ref advisor \
+    --report-id validation-progress-1 --report '{"summary":"first"}' \
+    --next-report-at '2000-01-01T00:00:00+00:00' >/dev/null || failed=1
+  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/deadline.sqlite3" task.progress \
+    --fleet development-squad --task architecture-advice --agent-ref advisor \
+    --report-id validation-progress-2 --report '{"summary":"second but late"}' \
+    --next-report-at '2000-01-01T00:01:00+00:00' >/dev/null || failed=1
+  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/deadline.sqlite3" progress.check \
+    --fleet development-squad --now '2099-01-01T00:00:00+00:00' \
+    > "$TMP_ROOT/progress-check.json" || failed=1
+  jq -e '.ok==true and .result.tasks[0].consecutive_missed_deadlines==2 and .result.tasks[0].requires_user_decision==true' \
+    "$TMP_ROOT/progress-check.json" >/dev/null || failed=1
+  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/deadline.sqlite3" status \
+    --fleet development-squad > "$TMP_ROOT/progress-status.json" || failed=1
+  jq -e '.result.tasks[] | select(.task_id=="architecture-advice") | .status=="running" and .consecutive_missed_deadlines==2 and .requires_user_decision==true' \
+    "$TMP_ROOT/progress-status.json" >/dev/null || failed=1
+  jq -e '.result.outbox[] | select(.spec.payload.notification_type=="task.progress.user_decision_required") | .spec.target.ref=="manager"' \
+    "$TMP_ROOT/progress-status.json" >/dev/null || failed=1
 
   "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" outbox \
     --fleet development-squad --sender-ref manager --target-agent-ref worker-implementation \

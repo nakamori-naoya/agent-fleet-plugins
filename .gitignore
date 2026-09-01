@@ -12,6 +12,10 @@ __pycache__/
 !/docs/
 !/plugins/
 !/scripts/
+!/tests/
+!/tests/**
+/tests/__pycache__/
+/tests/**/*.pyc
 !/AGENTS.md
 !/README.md
 !/.gitignore

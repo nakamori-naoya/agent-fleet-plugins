@@ -119,6 +119,24 @@ class RoleContextHookTest(unittest.TestCase):
         self.assertIn("worker@1", restored_text)
         self.assertIn("fleet-control task.report", restored_text)
 
+    def test_role_context_includes_role_specific_duties(self):
+        manager_context = copy.deepcopy(self.context)
+        manager_context["agent"] = {"agent_ref": "manager", "role_ref": "manager@1"}
+
+        worker_text = role_context_hook._additional_context(
+            self.context, {}, command_type="context.sync"
+        )["hookSpecificOutput"]["additionalContext"]
+        manager_text = role_context_hook._additional_context(
+            manager_context, {}, command_type="task.report"
+        )["hookSpecificOutput"]["additionalContext"]
+
+        self.assertIn("割り当てられた成果物", worker_text)
+        self.assertIn("ツールやSkillを呼び出さず", worker_text)
+        self.assertIn("全体進捗へ要約", manager_text)
+        self.assertIn("作業者の成果物を自分で実装しない", manager_text)
+        self.assertIn("独立確認が必要な成果", manager_text)
+        self.assertIn("三回失敗", manager_text)
+
     def test_unrelated_prompt_and_unknown_session_receive_no_fleet_context(self):
         self.assertEqual(
             {},

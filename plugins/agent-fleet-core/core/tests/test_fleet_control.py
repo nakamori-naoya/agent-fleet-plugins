@@ -139,6 +139,14 @@ class FleetStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(fleet_control.FleetError, "declared for"):
             self.store.assign("demo", "task-1", "manager", "manager")
 
+    def test_non_manager_cannot_assign_and_pending_task_is_unchanged(self):
+        with self.assertRaisesRegex(fleet_control.FleetError, "only a fleet manager"):
+            self.store.assign("demo", "task-1", "worker-1", "worker-1")
+
+        task = self.store.status("demo")["tasks"][0]
+        self.assertEqual("pending", task["status"])
+        self.assertIsNone(task["assignee_ref"])
+
     def test_deterministic_assignment_and_outbox_commands_are_idempotent(self):
         first = self.store.assign(
             "demo", "task-1", "worker-1", "manager", "assignment:1"
@@ -756,6 +764,174 @@ class FleetStoreTest(unittest.TestCase):
                 "2026-09-01T12:10:00+00:00",
             )
 
+    def test_first_missed_report_deadline_requests_a_status_check_once(self):
+        self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        self.store.report_progress(
+            "demo",
+            "task-1",
+            "worker-1",
+            "report-1",
+            {"summary": "working"},
+            "2026-09-01T12:10:00+00:00",
+        )
+
+        first = self.store.check_report_deadlines(
+            "demo", "2026-09-01T12:10:00.001+00:00"
+        )
+        second = self.store.check_report_deadlines(
+            "demo", "2026-09-01T12:20:00+00:00"
+        )
+
+        self.assertEqual(1, first["tasks"][0]["consecutive_missed_deadlines"])
+        self.assertFalse(first["tasks"][0]["requires_user_decision"])
+        self.assertTrue(second["idempotent"])
+        status = self.store.status("demo")["tasks"][0]
+        self.assertEqual(1, status["consecutive_missed_deadlines"])
+        reminders = [
+            command
+            for command in self.store.status("demo")["outbox"]
+            if command["spec"]["payload"].get("notification_type")
+            == "task.progress.check_required"
+        ]
+        self.assertEqual(1, len(reminders))
+        self.assertEqual("worker-1", reminders[0]["spec"]["target"]["ref"])
+
+    def test_two_consecutive_missed_deadlines_require_user_decision(self):
+        self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        self.store.report_progress(
+            "demo",
+            "task-1",
+            "worker-1",
+            "report-1",
+            {"summary": "first"},
+            "2026-09-01T12:10:00+00:00",
+        )
+        self.store.report_progress(
+            "demo",
+            "task-1",
+            "worker-1",
+            "report-2",
+            {"summary": "second, but late"},
+            "2026-09-01T12:20:00+00:00",
+        )
+        with self.store.connect() as db:
+            db.execute(
+                "UPDATE task_reports SET created_at='2026-09-01T12:00:00+00:00' "
+                "WHERE fleet_id='demo' AND report_id='report-1'"
+            )
+            db.execute(
+                "UPDATE task_reports SET created_at='2026-09-01T12:10:00.001+00:00' "
+                "WHERE fleet_id='demo' AND report_id='report-2'"
+            )
+
+        result = self.store.check_report_deadlines(
+            "demo", "2026-09-01T12:20:00.001+00:00"
+        )
+
+        overdue = result["tasks"][0]
+        self.assertEqual(2, overdue["consecutive_missed_deadlines"])
+        self.assertTrue(overdue["requires_user_decision"])
+        task = self.store.status("demo")["tasks"][0]
+        self.assertEqual("running", task["status"])
+        self.assertEqual(2, task["consecutive_missed_deadlines"])
+        escalations = [
+            command
+            for command in self.store.status("demo")["outbox"]
+            if command["spec"]["payload"].get("notification_type")
+            == "task.progress.user_decision_required"
+        ]
+        self.assertEqual(1, len(escalations))
+        self.assertEqual("manager", escalations[0]["spec"]["target"]["ref"])
+
+    def test_deadline_boundary_and_terminal_task_do_not_escalate(self):
+        self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        self.store.report_progress(
+            "demo",
+            "task-1",
+            "worker-1",
+            "report-1",
+            {"summary": "done at boundary"},
+            "2026-09-01T12:10:00+00:00",
+        )
+
+        boundary = self.store.check_report_deadlines(
+            "demo", "2026-09-01T12:10:00+00:00"
+        )
+        self.assertEqual([], boundary["tasks"])
+
+        self.store.transition_task(
+            "demo", "task-1", "reported", "worker-1", {"summary": "done"}
+        )
+        terminal = self.store.check_report_deadlines(
+            "demo", "2026-09-01T12:10:00.001+00:00"
+        )
+        self.assertEqual([], terminal["tasks"])
+        status = self.store.status("demo")
+        self.assertEqual(0, status["tasks"][0]["consecutive_missed_deadlines"])
+        self.assertFalse(status["tasks"][0]["requires_user_decision"])
+        self.assertFalse(
+            any(
+                item["spec"]["payload"].get("notification_type")
+                == "task.progress.check_required"
+                for item in status["outbox"]
+            )
+        )
+
+    def test_on_time_report_clears_a_previous_missed_deadline(self):
+        self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        self.store.report_progress(
+            "demo", "task-1", "worker-1", "report-1", {"summary": "working"},
+            "2026-09-01T12:10:00+00:00",
+        )
+        self.store.check_report_deadlines("demo", "2026-09-01T12:10:00.001+00:00")
+
+        self.store.report_progress(
+            "demo", "task-1", "worker-1", "report-2", {"summary": "recovered"},
+            "2026-09-01T12:30:00+00:00",
+        )
+        result = self.store.check_report_deadlines("demo", "2026-09-01T12:20:00+00:00")
+
+        self.assertEqual([], result["tasks"])
+        task = self.store.status("demo")["tasks"][0]
+        self.assertEqual(0, task["consecutive_missed_deadlines"])
+        self.assertFalse(task["requires_user_decision"])
+
+    def test_manager_can_read_a_report_saved_while_no_delivery_worker_runs(self):
+        self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        self.store.report_progress(
+            "demo", "task-1", "worker-1", "offline-report", {"summary": "saved"},
+            "2026-09-01T12:30:00+00:00",
+        )
+
+        status = self.store.status("demo")
+        self.assertEqual("offline-report", status["tasks"][0]["latest_report"]["report_id"])
+        notification = next(
+            item for item in status["outbox"]
+            if item["metadata"]["id"] == "report-notification:offline-report"
+        )
+        self.assertEqual("manager", notification["spec"]["target"]["ref"])
+
+    def test_reported_task_can_be_returned_to_the_assignee_but_failed_task_stays_terminal(self):
+        self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        self.store.transition_task(
+            "demo", "task-1", "completed", "worker-1", {"summary": "first result"}
+        )
+        resumed = self.store.transition_task("demo", "task-1", "running", "worker-1")
+        self.assertEqual("running", resumed["status"])
+
+        self.store.transition_task(
+            "demo", "task-1", "failed", "worker-1", {"summary": "cannot continue"}
+        )
+        with self.assertRaisesRegex(fleet_control.FleetError, "failed -> running"):
+            self.store.transition_task("demo", "task-1", "running", "worker-1")
+        self.assertEqual("failed", self.store.status("demo")["tasks"][0]["status"])
+
     def test_completion_report_requires_manager_acceptance(self):
         self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")
         self.store.transition_task("demo", "task-1", "running", "worker-1")
@@ -793,10 +969,18 @@ class FleetStoreTest(unittest.TestCase):
             )
 
         self.store.begin_delivery(
-            "demo", "cmd-1", claimed["delivery"]["lease_token"]
+            "demo",
+            "cmd-1",
+            claimed["delivery"]["lease_token"],
+            now="2026-09-01T12:00:10+00:00",
         )
         result = self.store.record_delivery_result(
-            "demo", "cmd-1", claimed["delivery"]["lease_token"], "unknown", "timeout"
+            "demo",
+            "cmd-1",
+            claimed["delivery"]["lease_token"],
+            "unknown",
+            "timeout",
+            now="2026-09-01T12:00:20+00:00",
         )
         self.assertEqual("unknown", result["status"])
         self.assertIsNone(
@@ -821,6 +1005,21 @@ class FleetStoreTest(unittest.TestCase):
         claimed = [result for result in results if result is not None]
         self.assertEqual(1, len(claimed))
         self.assertEqual("cmd-1", claimed[0]["command"]["metadata"]["id"])
+
+    def test_delivery_lease_comparison_normalizes_equivalent_timezones(self):
+        self.store.enqueue_command(
+            "demo", "manager", "worker-1", "message.send", {"text": "hello"}, "cmd-1"
+        )
+        first = self.store.claim_delivery(
+            "demo", "delivery-1", "2026-09-01T12:00:00+00:00", 30
+        )
+
+        second = self.store.claim_delivery(
+            "demo", "delivery-2", "2026-09-01T21:00:10+09:00", 30
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
 
     def test_expired_delivery_lease_is_reclaimed_and_old_token_is_fenced(self):
         self.store.enqueue_command(
@@ -851,7 +1050,10 @@ class FleetStoreTest(unittest.TestCase):
         )
 
         sending = self.store.begin_delivery(
-            "demo", "cmd-1", claimed["delivery"]["lease_token"]
+            "demo",
+            "cmd-1",
+            claimed["delivery"]["lease_token"],
+            now="2026-09-01T12:00:10+00:00",
         )
 
         self.assertEqual("sending", sending["status"])

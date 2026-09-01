@@ -91,6 +91,47 @@ class FakeRunner:
 
 
 class FleetRuntimeTest(unittest.TestCase):
+    def test_monitor_backs_off_only_while_idle_and_resets_after_delivery(self):
+        manifest = self.state / "runtimes" / "review.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(json.dumps({"phase": "running"}), encoding="utf-8")
+        delays = []
+
+        def sleeper(delay):
+            delays.append(delay)
+            if len(delays) == 3:
+                manifest.write_text(json.dumps({"phase": "stopping"}), encoding="utf-8")
+
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], sleeper=sleeper
+        )
+        with mock.patch.object(
+            runtime,
+            "_run_json",
+            side_effect=[
+                {"status": "idle"},
+                {"status": "idle"},
+                {"status": "delivered"},
+                {"status": "idle"},
+            ],
+        ):
+            result = runtime.monitor("review", self.state, once=False, poll_seconds=0.25)
+
+        self.assertEqual([0.25, 0.5, 0.25], delays)
+        self.assertEqual(1, result["processed"])
+
+    def test_wrapper_style_module_path_still_resolves_hook_source(self):
+        wrapper_path = Path(__file__).parents[1] / "scripts" / ".." / "fleet_runtime.py"
+        wrapper_spec = importlib.util.spec_from_file_location(
+            "fleet_runtime_from_wrapper_path", str(wrapper_path)
+        )
+        wrapper_module = importlib.util.module_from_spec(wrapper_spec)
+        assert wrapper_spec.loader
+        wrapper_spec.loader.exec_module(wrapper_module)
+
+        self.assertEqual(ROLE_CONTEXT.resolve(), wrapper_module.DEFAULT_HOOK_SOURCE)
+        self.assertTrue(wrapper_module.DEFAULT_HOOK_SOURCE.is_file())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)

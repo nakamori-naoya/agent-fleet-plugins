@@ -162,6 +162,18 @@ CREATE TABLE IF NOT EXISTS task_reports (
     FOREIGN KEY (fleet_id, task_id) REFERENCES tasks(fleet_id, task_id),
     FOREIGN KEY (fleet_id, reporter_ref) REFERENCES members(fleet_id, agent_ref)
 );
+CREATE TABLE IF NOT EXISTS report_deadline_state (
+    fleet_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    latest_report_id TEXT NOT NULL,
+    consecutive_missed_deadlines INTEGER NOT NULL DEFAULT 0,
+    requires_user_decision INTEGER NOT NULL DEFAULT 0 CHECK (requires_user_decision IN (0,1)),
+    notification_id TEXT,
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (fleet_id, task_id),
+    FOREIGN KEY (fleet_id, task_id) REFERENCES tasks(fleet_id, task_id),
+    FOREIGN KEY (fleet_id, latest_report_id) REFERENCES task_reports(fleet_id, report_id)
+);
 CREATE TABLE IF NOT EXISTS outbox (
     command_id TEXT NOT NULL,
     fleet_id TEXT NOT NULL REFERENCES fleets(fleet_id),
@@ -1218,6 +1230,26 @@ class FleetStore:
                 raise FleetError("only the assigned agent may report task state")
             current = str(task["status"])
             self._require_transition(current, target)
+            if target in {"reported", "failed"}:
+                deadline_state = db.execute(
+                    "SELECT notification_id FROM report_deadline_state "
+                    "WHERE fleet_id=? AND task_id=?",
+                    (fleet_id, task_id),
+                ).fetchone()
+                if deadline_state is not None and deadline_state["notification_id"]:
+                    db.execute(
+                        "UPDATE outbox SET status='abandoned',result_detail=? "
+                        "WHERE fleet_id=? AND command_id=? AND status IN ('pending','retry')",
+                        (
+                            f"task entered terminal report state: {target}",
+                            fleet_id,
+                            deadline_state["notification_id"],
+                        ),
+                    )
+                db.execute(
+                    "DELETE FROM report_deadline_state WHERE fleet_id=? AND task_id=?",
+                    (fleet_id, task_id),
+                )
             db.execute(
                 "UPDATE tasks SET status=?,updated_at=? WHERE fleet_id=? AND task_id=?",
                 (target, utc_now(), fleet_id, task_id),
@@ -1456,6 +1488,25 @@ class FleetStore:
             if manager is None:
                 raise FleetError("fleet manager is missing")
             created_at = utc_now()
+            previous_deadline = db.execute(
+                "SELECT notification_id FROM report_deadline_state "
+                "WHERE fleet_id=? AND task_id=?",
+                (fleet_id, task_id),
+            ).fetchone()
+            if previous_deadline is not None and previous_deadline["notification_id"]:
+                db.execute(
+                    "UPDATE outbox SET status='abandoned',result_detail=? "
+                    "WHERE fleet_id=? AND command_id=? AND status IN ('pending','retry')",
+                    (
+                        "superseded by a newer progress report",
+                        fleet_id,
+                        previous_deadline["notification_id"],
+                    ),
+                )
+            db.execute(
+                "DELETE FROM report_deadline_state WHERE fleet_id=? AND task_id=?",
+                (fleet_id, task_id),
+            )
             db.execute(
                 "INSERT INTO task_reports(fleet_id,report_id,task_id,reporter_ref,report_json,"
                 "next_report_at,created_at) VALUES(?,?,?,?,?,?,?)",
@@ -1512,6 +1563,191 @@ class FleetStore:
             "notification_id": notification_id,
             "created_at": created_at,
             "idempotent": False,
+        }
+
+    def check_report_deadlines(
+        self, fleet_id: str, now: str | None = None
+    ) -> dict[str, Any]:
+        """Record overdue facts and enqueue only the role-appropriate next action."""
+
+        checked_time = self._parse_timestamp(now or utc_now(), "now")
+        checked_at = checked_time.astimezone(timezone.utc).isoformat(
+            timespec="milliseconds"
+        )
+        observed: list[dict[str, Any]] = []
+        changed = False
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            manager = db.execute(
+                "SELECT manager_ref FROM fleet_contexts WHERE fleet_id=?", (fleet_id,)
+            ).fetchone()
+            if manager is None:
+                raise FleetError(f"unknown fleet: {fleet_id}")
+            for task in db.execute(
+                "SELECT task_id,status,assignee_ref FROM tasks WHERE fleet_id=? "
+                "AND status IN ('running','blocked') ORDER BY task_id",
+                (fleet_id,),
+            ):
+                reports = list(
+                    db.execute(
+                        "SELECT report_id,created_at,next_report_at FROM task_reports "
+                        "WHERE fleet_id=? AND task_id=? "
+                        "ORDER BY created_at,report_id",
+                        (fleet_id, task["task_id"]),
+                    )
+                )
+                if not reports:
+                    continue
+                latest = reports[-1]
+                latest_deadline = self._parse_timestamp(
+                    latest["next_report_at"], "next_report_at"
+                )
+                missed = 0
+                if latest_deadline < checked_time:
+                    missed = 1
+                    for index in range(len(reports) - 2, -1, -1):
+                        deadline = self._parse_timestamp(
+                            reports[index]["next_report_at"], "next_report_at"
+                        )
+                        next_reported = self._parse_timestamp(
+                            reports[index + 1]["created_at"], "created_at"
+                        )
+                        if next_reported <= deadline:
+                            break
+                        missed += 1
+                requires_user_decision = missed >= 2
+                notification_id = None
+                notification_type = None
+                target_ref = None
+                if missed == 1:
+                    notification_type = "task.progress.check_required"
+                    target_ref = task["assignee_ref"]
+                elif requires_user_decision:
+                    notification_type = "task.progress.user_decision_required"
+                    target_ref = manager["manager_ref"]
+                if notification_type and target_ref:
+                    notification_id = (
+                        f"report-deadline:{fleet_id}:{task['task_id']}:"
+                        f"{latest['report_id']}:{notification_type}"
+                    )
+                existing = db.execute(
+                    "SELECT latest_report_id,consecutive_missed_deadlines,"
+                    "requires_user_decision,notification_id FROM report_deadline_state "
+                    "WHERE fleet_id=? AND task_id=?",
+                    (fleet_id, task["task_id"]),
+                ).fetchone()
+                same_state = (
+                    existing is not None
+                    and existing["latest_report_id"] == latest["report_id"]
+                    and existing["consecutive_missed_deadlines"] == missed
+                    and bool(existing["requires_user_decision"])
+                    == requires_user_decision
+                    and existing["notification_id"] == notification_id
+                )
+                if not same_state:
+                    changed = True
+                    if (
+                        existing is not None
+                        and existing["notification_id"]
+                        and existing["notification_id"] != notification_id
+                    ):
+                        db.execute(
+                            "UPDATE outbox SET status='abandoned',result_detail=? "
+                            "WHERE fleet_id=? AND command_id=? "
+                            "AND status IN ('pending','retry')",
+                            (
+                                "superseded by a newer deadline evaluation",
+                                fleet_id,
+                                existing["notification_id"],
+                            ),
+                        )
+                    db.execute(
+                        "INSERT INTO report_deadline_state("
+                        "fleet_id,task_id,latest_report_id,consecutive_missed_deadlines,"
+                        "requires_user_decision,notification_id,checked_at) "
+                        "VALUES(?,?,?,?,?,?,?) ON CONFLICT(fleet_id,task_id) DO UPDATE SET "
+                        "latest_report_id=excluded.latest_report_id,"
+                        "consecutive_missed_deadlines=excluded.consecutive_missed_deadlines,"
+                        "requires_user_decision=excluded.requires_user_decision,"
+                        "notification_id=excluded.notification_id,checked_at=excluded.checked_at",
+                        (
+                            fleet_id,
+                            task["task_id"],
+                            latest["report_id"],
+                            missed,
+                            int(requires_user_decision),
+                            notification_id,
+                            checked_at,
+                        ),
+                    )
+                    self._append_event(
+                        db,
+                        fleet_id,
+                        "task",
+                        task["task_id"],
+                        "task.progress.deadline_evaluated",
+                        {
+                            "latest_report_id": latest["report_id"],
+                            "consecutive_missed_deadlines": missed,
+                            "requires_user_decision": requires_user_decision,
+                        },
+                    )
+                if notification_id:
+                    existing_command = db.execute(
+                        "SELECT 1 FROM outbox WHERE fleet_id=? AND command_id=?",
+                        (fleet_id, notification_id),
+                    ).fetchone()
+                    if existing_command is None:
+                        changed = True
+                        payload = {
+                            "notification_type": notification_type,
+                            "task_id": task["task_id"],
+                            "assignee_ref": task["assignee_ref"],
+                            "latest_report_id": latest["report_id"],
+                            "next_report_at": latest["next_report_at"],
+                            "consecutive_missed_deadlines": missed,
+                        }
+                        db.execute(
+                            "INSERT INTO outbox(command_id,fleet_id,sender_ref,"
+                            "target_agent_ref,command_type,payload_json,status,created_at) "
+                            "VALUES(?,?,?,?,?,?,?,?)",
+                            (
+                                notification_id,
+                                fleet_id,
+                                manager["manager_ref"],
+                                target_ref,
+                                "message.send",
+                                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                                "pending",
+                                checked_at,
+                            ),
+                        )
+                        self._append_event(
+                            db,
+                            fleet_id,
+                            "system",
+                            notification_id,
+                            "command.enqueued",
+                            {
+                                "command_type": "message.send",
+                                "target_agent_ref": target_ref,
+                            },
+                        )
+                if missed:
+                    observed.append(
+                        {
+                            "task_id": task["task_id"],
+                            "status": task["status"],
+                            "consecutive_missed_deadlines": missed,
+                            "requires_user_decision": requires_user_decision,
+                            "notification_id": notification_id,
+                        }
+                    )
+        return {
+            "fleet_id": fleet_id,
+            "checked_at": checked_at,
+            "tasks": observed,
+            "idempotent": not changed,
         }
 
     def enqueue_command(
@@ -1680,8 +1916,8 @@ class FleetStore:
             raise FleetError("delivery_worker_id is required")
         if lease_seconds <= 0:
             raise FleetError("lease_seconds must be positive")
-        now_value = now or utc_now()
-        now_at = self._parse_timestamp(now_value, "now")
+        now_at = self._parse_timestamp(now or utc_now(), "now")
+        now_value = now_at.astimezone(timezone.utc).isoformat(timespec="milliseconds")
         lease_expires_at = (now_at + timedelta(seconds=lease_seconds)).isoformat(
             timespec="milliseconds"
         )
@@ -1841,8 +2077,10 @@ class FleetStore:
                 raise FleetError("delivery has not started")
             if command["status"] != "sending" or command["lease_token"] != lease_token:
                 raise FleetError("delivery lease token is stale or invalid")
-            completed_at = now or utc_now()
-            current_time = self._parse_timestamp(completed_at, "now")
+            current_time = self._parse_timestamp(now or utc_now(), "now")
+            completed_at = current_time.astimezone(timezone.utc).isoformat(
+                timespec="milliseconds"
+            )
             expires_at = self._parse_timestamp(command["lease_expires_at"], "lease_expires_at")
             if expires_at <= current_time:
                 raise FleetError("delivery lease has expired")
@@ -1912,6 +2150,24 @@ class FleetStore:
                         "created_at": latest_report["created_at"],
                     }
                     task["next_report_at"] = latest_report["next_report_at"]
+                deadline = db.execute(
+                    "SELECT consecutive_missed_deadlines,requires_user_decision,checked_at "
+                    "FROM report_deadline_state WHERE fleet_id=? AND task_id=?",
+                    (fleet_id, task["task_id"]),
+                ).fetchone()
+                task["consecutive_missed_deadlines"] = (
+                    int(deadline["consecutive_missed_deadlines"])
+                    if deadline is not None
+                    else 0
+                )
+                task["requires_user_decision"] = (
+                    bool(deadline["requires_user_decision"])
+                    if deadline is not None
+                    else False
+                )
+                task["deadline_checked_at"] = (
+                    deadline["checked_at"] if deadline is not None else None
+                )
             pending = []
             for row in db.execute(
                 "SELECT command_id,fleet_id,sender_ref,target_agent_ref,command_type,payload_json,created_at "
@@ -1969,6 +2225,7 @@ class FleetStore:
             for table in (
                 "outbox",
                 "events",
+                "report_deadline_state",
                 "task_reports",
                 "task_dependencies",
                 "task_contexts",
@@ -2023,6 +2280,9 @@ def build_parser() -> argparse.ArgumentParser:
     progress.add_argument("--report-id", required=True)
     progress.add_argument("--report", type=_json_object, required=True)
     progress.add_argument("--next-report-at", required=True)
+    progress_check = sub.add_parser("progress.check")
+    progress_check.add_argument("--fleet", required=True)
+    progress_check.add_argument("--now")
     accept = sub.add_parser("task.accept")
     accept.add_argument("--fleet", required=True)
     accept.add_argument("--task", required=True)
@@ -2150,6 +2410,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.report,
                 args.next_report_at,
             )
+        elif args.action == "progress.check":
+            result = store.check_report_deadlines(args.fleet, args.now)
         elif args.action == "task.accept":
             result = store.accept_task(
                 args.fleet, args.task, args.manager_ref, args.operation_id

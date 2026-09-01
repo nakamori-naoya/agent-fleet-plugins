@@ -74,6 +74,22 @@ VIEW_PROFILE = {
 
 
 class HerdrAdapterTest(unittest.TestCase):
+    def test_wrapper_style_module_path_still_resolves_session_hook_plugin(self):
+        wrapper_path = Path(__file__).parents[1] / "scripts" / ".." / "herdr_adapter.py"
+        wrapper_spec = importlib.util.spec_from_file_location(
+            "herdr_adapter_from_wrapper_path", str(wrapper_path)
+        )
+        wrapper_module = importlib.util.module_from_spec(wrapper_spec)
+        assert wrapper_spec.loader
+        sys.modules[wrapper_spec.name] = wrapper_module
+        wrapper_spec.loader.exec_module(wrapper_module)
+
+        self.assertTrue(wrapper_module.SESSION_HOOK_PLUGIN_ROOT.is_dir())
+        self.assertEqual(
+            (Path(__file__).parents[2] / "session-hooks-plugin").resolve(),
+            wrapper_module.SESSION_HOOK_PLUGIN_ROOT,
+        )
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.state = herdr_adapter.AdapterState(Path(self.temp.name) / "herdr.sqlite3")

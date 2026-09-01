@@ -21,7 +21,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
-DEFAULT_HOOK_SOURCE = Path(__file__).parents[1] / "hooks" / "role_context.py"
+DEFAULT_HOOK_SOURCE = Path(__file__).resolve().parents[1] / "hooks" / "role_context.py"
 
 
 class FleetRuntimeError(RuntimeError):

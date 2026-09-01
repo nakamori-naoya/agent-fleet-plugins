@@ -47,6 +47,7 @@ class FleetControllerTest(unittest.TestCase):
         }
         runner = FakeRunner(
             [
+                completed({"ok": True, "result": {"tasks": []}}),
                 completed(
                     {
                         "ok": True,
@@ -84,12 +85,14 @@ class FleetControllerTest(unittest.TestCase):
 
         self.assertEqual("unknown", result["status"])
         self.assertEqual("hook_receipt", result["delivery_scope"])
-        self.assertIn("delivery.claim", runner.calls[0][0])
-        self.assertIn("60", runner.calls[0][0])
-        self.assertIn("delivery.begin", runner.calls[1][0])
-        self.assertIn("--until-started", runner.calls[2][0])
-        self.assertNotIn("--no-wait", runner.calls[2][0])
-        self.assertIn("delivery.result", runner.calls[3][0])
+        self.assertIn("progress.check", runner.calls[0][0])
+        self.assertIn("delivery.claim", runner.calls[1][0])
+        self.assertIn("60", runner.calls[1][0])
+        self.assertIn("delivery.begin", runner.calls[2][0])
+        self.assertIn("--until-started", runner.calls[3][0])
+        self.assertNotIn("--no-wait", runner.calls[3][0])
+        self.assertEqual(40, runner.calls[3][1]["timeout"])
+        self.assertIn("delivery.result", runner.calls[4][0])
 
     def test_dispatch_failure_after_send_begins_is_recorded_as_unknown(self):
         command = {
@@ -109,6 +112,7 @@ class FleetControllerTest(unittest.TestCase):
         }
         runner = FakeRunner(
             [
+                completed({"ok": True, "result": {"tasks": []}}),
                 completed(
                     {
                         "ok": True,
@@ -145,11 +149,16 @@ class FleetControllerTest(unittest.TestCase):
         )
 
         self.assertEqual("unknown", result["status"])
-        result_call = runner.calls[3][0]
+        result_call = runner.calls[4][0]
         self.assertEqual("unknown", result_call[result_call.index("--result") + 1])
 
     def test_run_once_is_idle_when_no_command_is_available(self):
-        runner = FakeRunner([completed({"ok": True, "result": None})])
+        runner = FakeRunner(
+            [
+                completed({"ok": True, "result": {"tasks": []}}),
+                completed({"ok": True, "result": None}),
+            ]
+        )
         controller = fleet_controller.FleetController(
             ["fleet-control"], ["fleet-herdr"], runner=runner
         )
@@ -162,7 +171,29 @@ class FleetControllerTest(unittest.TestCase):
         )
 
         self.assertEqual("idle", result["status"])
-        self.assertEqual(1, len(runner.calls))
+        self.assertEqual(2, len(runner.calls))
+
+    def test_deadline_check_failure_does_not_starve_existing_delivery_work(self):
+        runner = FakeRunner(
+            [
+                completed({}, returncode=2, stderr="deadline database busy"),
+                completed({"ok": True, "result": None}),
+            ]
+        )
+        controller = fleet_controller.FleetController(
+            ["fleet-control"], ["fleet-herdr"], runner=runner
+        )
+
+        result = controller.run_once(
+            core_db="/tmp/core.sqlite3",
+            herdr_db="/tmp/herdr.sqlite3",
+            fleet_id="demo",
+            worker_id="delivery-1",
+        )
+
+        self.assertEqual("idle", result["status"])
+        self.assertIn("deadline database busy", result["warnings"][0])
+        self.assertIn("delivery.claim", runner.calls[1][0])
 
 
 if __name__ == "__main__":

@@ -32,9 +32,11 @@ class FleetController:
         self.herdr_command = tuple(herdr_command)
         self.runner = runner
 
-    def _run_json(self, argv: Sequence[str], context: str) -> Mapping[str, Any]:
+    def _run_json(
+        self, argv: Sequence[str], context: str, *, timeout_seconds: int = 30
+    ) -> Mapping[str, Any]:
         completed = self.runner(
-            list(argv), capture_output=True, text=True, timeout=30
+            list(argv), capture_output=True, text=True, timeout=timeout_seconds
         )
         if completed.returncode != 0:
             raise FleetControllerError(
@@ -57,6 +59,22 @@ class FleetController:
         worker_id: str,
         lease_seconds: int = 60,
     ) -> dict[str, Any]:
+        warnings = []
+        try:
+            self._run_json(
+                [
+                    *self.core_command,
+                    "--db",
+                    core_db,
+                    "progress.check",
+                    "--fleet",
+                    fleet_id,
+                ],
+                "Core progress deadline check",
+            )
+        except FleetControllerError as exc:
+            # Deadline observation must not starve already durable delivery work.
+            warnings.append(str(exc))
         claim = self._run_json(
             [
                 *self.core_command,
@@ -73,7 +91,7 @@ class FleetController:
             "Core delivery claim",
         ).get("result")
         if claim is None:
-            return {"status": "idle", "fleet_id": fleet_id}
+            return {"status": "idle", "fleet_id": fleet_id, "warnings": warnings}
         if not isinstance(claim, Mapping):
             raise FleetControllerError("Core delivery claim result must be an object")
         command = claim.get("command")
@@ -115,7 +133,9 @@ class FleetController:
             "--execute",
         ]
         try:
-            dispatched = self._run_json(dispatch_argv, "Herdr dispatch").get("result")
+            dispatched = self._run_json(
+                dispatch_argv, "Herdr dispatch", timeout_seconds=40
+            ).get("result")
             if not isinstance(dispatched, Mapping):
                 raise FleetControllerError("Herdr dispatch result must be an object")
             dispatch_status = dispatched.get("status")
@@ -156,7 +176,11 @@ class FleetController:
         ).get("result")
         if not isinstance(recorded, Mapping):
             raise FleetControllerError("Core delivery result must be an object")
-        return {**dict(recorded), "delivery_scope": "hook_receipt"}
+        return {
+            **dict(recorded),
+            "delivery_scope": "hook_receipt",
+            "warnings": warnings,
+        }
 
 
 def build_parser() -> argparse.ArgumentParser:
