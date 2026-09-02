@@ -637,7 +637,14 @@ class HerdrAdapter:
     @staticmethod
     def _fleet_parts(
         fleet: Mapping[str, Any]
-    ) -> tuple[str, str, tuple[str, ...], str, Mapping[str, str]]:
+    ) -> tuple[
+        str,
+        str,
+        tuple[str, ...],
+        str,
+        Mapping[str, Mapping[str, str]],
+        Mapping[str, str],
+    ]:
         if fleet.get("apiVersion") != "fleet.harness/v1" or fleet.get("kind") != "Fleet":
             raise HerdrAdapterError("provision requires a fleet.harness/v1 Fleet document")
         metadata = fleet.get("metadata")
@@ -665,6 +672,7 @@ class HerdrAdapter:
             raise HerdrAdapterError("Fleet spec.collaboration.manager must be an agent_ref")
 
         refs: list[str] = []
+        member_runtimes: dict[str, Mapping[str, str]] = {}
         models: dict[str, str] = {}
         for index, member in enumerate(members):
             if not isinstance(member, Mapping):
@@ -678,6 +686,38 @@ class HerdrAdapter:
             if agent_ref in refs:
                 raise HerdrAdapterError(f"duplicate Fleet member agent_ref: {agent_ref}")
             refs.append(agent_ref)
+            member_runtime = member.get("runtime")
+            if member_runtime is not None:
+                if not isinstance(member_runtime, Mapping):
+                    raise HerdrAdapterError(
+                        f"Fleet spec.members[{index}].runtime must be a JSON object"
+                    )
+                product = member_runtime.get("product")
+                model = member_runtime.get("model")
+                effort = member_runtime.get("effort")
+                fallback = member_runtime.get("fallback")
+                if product not in {"claude", "codex"}:
+                    raise HerdrAdapterError(
+                        f"Fleet spec.members[{index}].runtime.product must be claude or codex"
+                    )
+                if not isinstance(model, str) or not model.strip():
+                    raise HerdrAdapterError(
+                        f"Fleet spec.members[{index}].runtime.model must be a non-empty string"
+                    )
+                if effort not in {"low", "medium", "high", "xhigh", "max"}:
+                    raise HerdrAdapterError(
+                        f"Fleet spec.members[{index}].runtime.effort is unsupported"
+                    )
+                if fallback not in {"fail", "product-default"}:
+                    raise HerdrAdapterError(
+                        f"Fleet spec.members[{index}].runtime.fallback is unsupported"
+                    )
+                member_runtimes[agent_ref] = {
+                    "product": product,
+                    "model": model,
+                    "effort": effort,
+                    "fallback": fallback,
+                }
             model = member.get("model")
             if model is not None:
                 if not isinstance(model, str) or not model.strip():
@@ -688,7 +728,7 @@ class HerdrAdapter:
         if refs.count(manager_ref) != 1:
             raise HerdrAdapterError("Fleet must contain exactly one declared manager member")
         workers = tuple(agent_ref for agent_ref in refs if agent_ref != manager_ref)
-        return fleet_id, manager_ref, workers, profile_ref, models
+        return fleet_id, manager_ref, workers, profile_ref, member_runtimes, models
 
     def plan_provision(
         self,
@@ -698,7 +738,14 @@ class HerdrAdapter:
         view_profile: Mapping[str, Any],
         agent_environment: Mapping[str, str] | None = None,
     ) -> ProvisionPlan:
-        fleet_id, manager_ref, workers, profile_ref, models = self._fleet_parts(fleet)
+        (
+            fleet_id,
+            manager_ref,
+            workers,
+            profile_ref,
+            member_runtimes,
+            models,
+        ) = self._fleet_parts(fleet)
         if models and agent_kind not in {"claude", "codex"}:
             raise HerdrAdapterError(
                 f"per-member model selection is not supported for agent kind {agent_kind!r}"
@@ -716,21 +763,38 @@ class HerdrAdapter:
                 "Fleet spec.runtime.codex_hook_trust must be preapproved or review"
             )
         provision_environment = dict(agent_environment or {})
-        if agent_kind == "codex":
+        configured_products = {
+            runtime["product"] for runtime in member_runtimes.values()
+        }
+        if not member_runtimes or "codex" in configured_products:
             provision_environment["AGENT_FLEET_CODEX_HOOK_TRUST"] = hook_trust
 
-        def session_args(agent_ref: str) -> tuple[str, ...]:
+        def member_execution(agent_ref: str) -> tuple[str, tuple[str, ...]]:
+            configured = member_runtimes.get(agent_ref)
+            product = configured["product"] if configured is not None else agent_kind
             args: list[str] = []
-            if agent_kind == "codex":
+            if product == "codex":
                 args.extend(["--config", CODEX_SESSION_HOOK_PLUGIN_CONFIG])
                 if hook_trust == "preapproved":
                     args.append("--dangerously-bypass-hook-trust")
-            elif agent_kind == "claude":
+            elif product == "claude":
                 args.extend(["--plugin-dir", str(SESSION_HOOK_PLUGIN_ROOT)])
-            model = models.get(agent_ref)
+            else:
+                raise HerdrAdapterError(
+                    f"Fleet member {agent_ref!r} has unsupported agent product {product!r}"
+                )
+            model = configured["model"] if configured is not None else models.get(agent_ref)
             if model:
                 args.extend(["--model", model])
-            return tuple(args)
+            if configured is not None:
+                effort = configured["effort"]
+                if product == "claude":
+                    args.extend(["--effort", effort])
+                    if configured["fallback"] == "fail":
+                        args.extend(["--settings", '{"switchModelsOnFlag":false}'])
+                else:
+                    args.extend(["--config", f'model_reasoning_effort="{effort}"'])
+            return product, tuple(args)
         profile_errors = validate_document(view_profile)
         if profile_errors:
             raise HerdrAdapterError("invalid View Profile: " + "; ".join(profile_errors))
@@ -758,8 +822,11 @@ class HerdrAdapter:
         member_fraction = member_stack["weight"] / total_weight
         safe_token(cwd, "cwd")
         safe_token(agent_kind, "agent_kind")
+        for product in configured_products:
+            safe_token(product, "member runtime product")
         root_pane = "$workspace.root_pane"
         workspace_label = f"agent-fleet:{fleet_id}:<operation-id>"
+        manager_product, manager_args = member_execution(manager_ref)
         operations: list[Mapping[str, Any]] = [
             {
                 "id": "workspace.create",
@@ -771,7 +838,7 @@ class HerdrAdapter:
             {
                 "id": f"agent.start:{manager_ref}",
                 "argv": self.commands.agent_start(
-                    manager_ref, agent_kind, root_pane, session_args(manager_ref)
+                    manager_ref, manager_product, root_pane, manager_args
                 ),
             },
         ]
@@ -791,6 +858,7 @@ class HerdrAdapter:
         ]
         split_target = root_pane
         for index, worker_ref in enumerate(workers, 1):
+            worker_product, worker_args = member_execution(worker_ref)
             pane_ref = f"$pane:{worker_ref}"
             operations.append(
                 {
@@ -817,7 +885,7 @@ class HerdrAdapter:
                 {
                     "id": f"agent.start:{worker_ref}",
                     "argv": self.commands.agent_start(
-                        worker_ref, agent_kind, pane_ref, session_args(worker_ref)
+                        worker_ref, worker_product, pane_ref, worker_args
                     ),
                 }
             )
@@ -1354,7 +1422,7 @@ def build_parser() -> argparse.ArgumentParser:
     provision.add_argument("--fleet-json", type=json_object, required=True)
     provision.add_argument("--view-profile-json", type=json_object, required=True)
     provision.add_argument("--cwd", required=True)
-    provision.add_argument("--agent-kind", required=True)
+    provision.add_argument("--agent-kind", default="codex", help=argparse.SUPPRESS)
     provision.add_argument("--agent-core-command")
     provision.add_argument("--agent-core-db")
     provision.add_argument("--agent-hook-runtime")

@@ -129,6 +129,15 @@ COVERAGE = {
     "dry-runでは艦隊状態と作業枠を変更しない": (
         (ADAPTER_TESTS, "test_provision_dry_run_does_not_create_requested_state_database"),
     ),
+    "一つの艦隊でCodexとClaudeをメンバーごとに使い分ける": (
+        (ADAPTER_TESTS, "test_member_runtime_can_mix_claude_fable_and_codex_sol"),
+    ),
+    "Claude Fableを古いモデルへ暗黙に切り替えない": (
+        (ADAPTER_TESTS, "test_member_runtime_can_mix_claude_fable_and_codex_sol"),
+    ),
+    "AI実行設定がないメンバーを含む艦隊を起動しない": (
+        (SPEC_TESTS, "test_member_runtime_is_required_and_legacy_top_level_model_is_rejected"),
+    ),
     "再開した艦隊会話へ現在の役割文脈を戻す": (
         (HOOK_TESTS, "test_fleet_prompt_binds_session_and_compaction_restores_context"),
     ),

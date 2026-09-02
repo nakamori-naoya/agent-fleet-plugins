@@ -46,6 +46,70 @@ class FleetValidatorTest(unittest.TestCase):
     def test_example_is_valid(self) -> None:
         self.assertEqual([], validator.validate_document(self.valid))
 
+    def test_member_runtime_requires_supported_product_model_and_effort(self) -> None:
+        for product, model in (
+            ("codex", "gpt-5.6-sol"),
+            ("claude", "claude-fable-5-1"),
+        ):
+            with self.subTest(product=product):
+                errors = self.errors_for(
+                    lambda doc, selected_product=product, selected_model=model: doc["spec"][
+                        "members"
+                    ][0].__setitem__(
+                        "runtime",
+                        {
+                            "product": selected_product,
+                            "model": selected_model,
+                            "effort": "medium",
+                            "fallback": "fail",
+                        },
+                    )
+                )
+                self.assertEqual([], errors)
+
+        errors = self.errors_for(
+            lambda doc: doc["spec"]["members"][0]["runtime"].__setitem__(
+                "product", "fable"
+            )
+        )
+        self.assertIn(
+            "spec.members[0].runtime.product: must be 'codex' or 'claude'",
+            errors,
+        )
+
+        errors = self.errors_for(
+            lambda doc: doc["spec"]["members"][0]["runtime"].__setitem__(
+                "effort", "ancient"
+            )
+        )
+        self.assertIn(
+            "spec.members[0].runtime.effort: must be low, medium, high, xhigh, or max",
+            errors,
+        )
+
+        errors = self.errors_for(
+            lambda doc: doc["spec"]["members"][0]["runtime"].__setitem__(
+                "fallback", "silent-old-model"
+            )
+        )
+        self.assertIn(
+            "spec.members[0].runtime.fallback: must be 'fail' or 'product-default'",
+            errors,
+        )
+
+    def test_member_runtime_is_required_and_legacy_top_level_model_is_rejected(self) -> None:
+        errors = self.errors_for(
+            lambda doc: doc["spec"]["members"][0].pop("runtime")
+        )
+        self.assertIn("spec.members[0].runtime: is required", errors)
+
+        def use_legacy_model(doc):
+            member = doc["spec"]["members"][0]
+            member["model"] = member.pop("runtime")["model"]
+
+        errors = self.errors_for(use_legacy_model)
+        self.assertIn("spec.members[0].model: is not allowed", errors)
+
     def test_codex_hook_trust_accepts_only_preapproved_or_review(self) -> None:
         for value in ("preapproved", "review"):
             with self.subTest(value=value):

@@ -13,7 +13,7 @@ description: logical agent_refをHerdr 0.8のworkspace、tab、pane、agentへ�
 
 `RuntimeBinding` と `ViewPlacement` は `--state-db` で指定したadapter専用SQLiteへ保存する。Core DBにはpane IDを入れない。paneが見つからない場合はbindingを `lost` にして停止し、`bind` または `rebind` で明示的に修復する。MVPのreconcileはpane lostを検出するだけで自動再配置しない。
 
-`provision --fleet-json '<normalized Fleet JSON>' --view-profile-json '<validated ViewProfile JSON>' --cwd <path> --agent-kind <kind>` は、Fleetの版固定`profile_ref`とProfile identityの一致、人数制約、layout treeを検査する。Profileのweightを決定的なHerdr 0.8逐次splitへ変換し、execute中にworkspace/tab/pane IDを解析できなければbindingやviewを保存せず停止する。同じFleet、Profile、memberのbindingが揃っていれば`already_provisioned`を返し、別Profileとの暗黙上書きは拒否する。
+`provision --fleet-json '<normalized Fleet JSON>' --view-profile-json '<validated ViewProfile JSON>' --cwd <path>` は、Fleetの版固定`profile_ref`とProfile identityの一致、人数制約、layout treeを検査する。各メンバーの`runtime.product`をHerdrのagent kind、`runtime.model`と`runtime.effort`を製品別の起動引数へ変換するため、一つのFleetでCodexとClaudeを混在できる。`fallback: fail`のClaudeにはモデル自動切替を無効にする設定を渡す。Profileのweightを決定的なHerdr 0.8逐次splitへ変換し、execute中にworkspace/tab/pane IDを解析できなければbindingやviewを保存せず停止する。同じFleet、Profile、memberのbindingが揃っていれば`already_provisioned`を返し、別Profileとの暗黙上書きは拒否する。
 
 `status --fleet <fleet_id>` はbinding、placement、`profile_ref`を公開JSONで返す読み取り専用操作である。HerdrへのprobeやSQLite更新は行わない。provisionのdry-runも指定されたstate DBや親directoryを作成しない。
 

@@ -13,10 +13,10 @@ failed=0
 for manifest in \
   "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json" \
   "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.3.0" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.4.0" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
 done
 for manifest in "$HOOK_PLUGIN/.codex-plugin/plugin.json" "$HOOK_PLUGIN/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.3.0" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.4.0" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
 done
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact|fork" and .hooks.SessionStart[0].hooks[0].timeout==12' \
   "$HOOK_PLUGIN/hooks/claude-hooks.json" >/dev/null || failed=1
@@ -35,7 +35,7 @@ test ! -e "$HERDR/view-profiles" || failed=1
 if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
   failed=1
 fi
-jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.3.0")' \
+jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.4.0")' \
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \
@@ -135,7 +135,7 @@ if [ -n "${fleet_json:-}" ]; then
 
   "$HERDR/adapter/scripts/fleet-herdr" --state-db "$TMP_ROOT/herdr.sqlite3" \
     provision --fleet-json "$fleet_json" --view-profile-json "$view_profile_json" \
-    --cwd "$ROOT" --agent-kind codex \
+    --cwd "$ROOT" \
     > "$TMP_ROOT/herdr-plan.json" || failed=1
   jq -e '.ok==true and .result.mode=="dry-run" and .result.status=="planned" and (.result.plan.operations|length)==10 and (.result.plan.placements|length)==5' \
     "$TMP_ROOT/herdr-plan.json" >/dev/null || failed=1
@@ -154,11 +154,13 @@ jq -e '.ok==true and (.result|length)==3 and all(.result[]; .profile_resolved==t
   --core-command "$CORE/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
   --profile-dir "$ROOT/configs/view-profiles" \
-  --state-dir "$TMP_ROOT/runtime-state" --cwd "$ROOT" --agent-kind codex \
+  --state-dir "$TMP_ROOT/runtime-state" --cwd "$ROOT" \
   > "$TMP_ROOT/fleet-plan.json" || failed=1
 jq -e '.ok==true and .result.status=="planned" and .result.profile_ref=="local/development-focus@1" and (.result.herdr.plan.placements|length)==5' \
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
-jq -e 'all(.result.herdr.plan.operations[] | select(.id|startswith("agent.start:")); (.argv|index("plugins.agent-fleet-session-hooks@agent-fleet.enabled=true")) != null)' \
+jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.start:worker-implementation" or .id=="agent.start:worker-verification"); (.argv|index("codex")) != null and (.argv|index("gpt-5.6-sol")) != null and (.argv|index("plugins.agent-fleet-session-hooks@agent-fleet.enabled=true")) != null and (.argv|index("model_reasoning_effort=\"medium\"")) != null)' \
+  "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
+jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.start:manager" or .id=="agent.start:advisor" or .id=="agent.start:reviewer"); (.argv|index("claude")) != null and (.argv|index("claude-fable-5-1")) != null and (.argv|index("--plugin-dir")) != null and (.argv|index("high")) != null and (.argv|index("{\"switchModelsOnFlag\":false}")) != null)' \
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
 test ! -e "$TMP_ROOT/runtime-state" || failed=1
 

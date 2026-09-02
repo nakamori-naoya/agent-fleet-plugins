@@ -328,6 +328,10 @@ class FleetRuntime:
                     "path": str(path),
                     "objective": spec["objective"],
                     "members": len(spec["members"]),
+                    "member_runtimes": {
+                        member["agent_ref"]: dict(member["runtime"])
+                        for member in spec["members"]
+                    },
                     "profile_ref": profile_ref,
                     "profile_resolved": resolved_profile is not None,
                     "start_command": shlex.join(
@@ -552,7 +556,10 @@ class FleetRuntime:
             "profile_path": str(resolved.profile_path),
             "profile_hash": resolved.profile_hash,
             "cwd": str(Path(cwd).resolve()),
-            "agent_kind": agent_kind,
+            "member_runtimes": {
+                member["agent_ref"]: dict(member["runtime"])
+                for member in resolved.fleet["spec"]["members"]
+            },
         }
         if self.role_catalog is not None:
             desired["role_catalog_path"] = str(self.role_catalog.resolve())
@@ -1098,11 +1105,21 @@ def build_parser() -> argparse.ArgumentParser:
     plan = sub.add_parser("plan", parents=[common])
     plan.add_argument("fleet")
     plan.add_argument("--cwd", default=str(Path.cwd()))
-    plan.add_argument("--agent-kind", choices=["codex", "claude"], default="codex")
+    plan.add_argument(
+        "--agent-kind",
+        choices=["codex", "claude"],
+        default="codex",
+        help=argparse.SUPPRESS,
+    )
     start = sub.add_parser("start", parents=[common])
     start.add_argument("fleet")
     start.add_argument("--cwd", default=str(Path.cwd()))
-    start.add_argument("--agent-kind", choices=["codex", "claude"], default="codex")
+    start.add_argument(
+        "--agent-kind",
+        choices=["codex", "claude"],
+        default="codex",
+        help=argparse.SUPPRESS,
+    )
     start.add_argument("--execute", action="store_true")
     start.add_argument("--once", action="store_true")
     start.add_argument("--poll-seconds", type=float, default=0.25)

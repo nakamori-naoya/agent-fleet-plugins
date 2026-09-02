@@ -25,8 +25,26 @@ FLEET = {
         "completion_criteria": ["Manager accepted the result"],
         "stop_conditions": ["Unsafe change is required"],
         "members": [
-            {"agent_ref": "manager", "role_ref": "manager@1"},
-            {"agent_ref": "worker", "role_ref": "worker@1"},
+            {
+                "agent_ref": "manager",
+                "role_ref": "manager@1",
+                "runtime": {
+                    "product": "claude",
+                    "model": "claude-fable-5-1",
+                    "effort": "high",
+                    "fallback": "fail",
+                },
+            },
+            {
+                "agent_ref": "worker",
+                "role_ref": "worker@1",
+                "runtime": {
+                    "product": "codex",
+                    "model": "gpt-5.6-sol",
+                    "effort": "medium",
+                    "fallback": "fail",
+                },
+            },
         ],
         "tasks": [
             {

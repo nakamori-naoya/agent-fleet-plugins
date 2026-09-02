@@ -13,14 +13,39 @@ spec:
   members:
     - agent_ref: manager
       role_ref: manager@1
+      runtime:
+        product: claude
+        model: claude-fable-5-1
+        effort: high
+        fallback: fail
     - agent_ref: worker-implementation
       role_ref: worker@1
+      runtime:
+        product: codex
+        model: gpt-5.6-sol
+        effort: medium
+        fallback: fail
     - agent_ref: worker-verification
       role_ref: worker@1
+      runtime:
+        product: codex
+        model: gpt-5.6-sol
+        effort: medium
+        fallback: fail
     - agent_ref: advisor
       role_ref: advisor@1
+      runtime:
+        product: claude
+        model: claude-fable-5-1
+        effort: high
+        fallback: fail
     - agent_ref: reviewer
       role_ref: reviewer@1
+      runtime:
+        product: claude
+        model: claude-fable-5-1
+        effort: high
+        fallback: fail
   tasks:
     - id: architecture-advice
       assignee: advisor

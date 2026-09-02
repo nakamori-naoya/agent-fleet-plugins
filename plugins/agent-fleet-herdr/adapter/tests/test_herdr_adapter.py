@@ -200,6 +200,47 @@ class HerdrAdapterTest(unittest.TestCase):
             manager_start["argv"][-6:],
         )
 
+    def test_member_runtime_can_mix_claude_fable_and_codex_sol(self):
+        fleet = json.loads(json.dumps(FLEET))
+        fleet["spec"]["members"][0]["runtime"] = {
+            "product": "claude",
+            "model": "claude-fable-5-1",
+            "effort": "high",
+            "fallback": "fail",
+        }
+        fleet["spec"]["members"][1]["runtime"] = {
+            "product": "codex",
+            "model": "gpt-5.6-sol",
+            "effort": "medium",
+            "fallback": "fail",
+        }
+
+        plan = herdr_adapter.HerdrAdapter(self.state).plan_provision(
+            fleet, "/repo", "codex", VIEW_PROFILE
+        )
+
+        manager = next(
+            operation["argv"]
+            for operation in plan.operations
+            if operation["id"] == "agent.start:manager-1"
+        )
+        worker = next(
+            operation["argv"]
+            for operation in plan.operations
+            if operation["id"] == "agent.start:worker-1"
+        )
+        self.assertEqual("claude", manager[manager.index("--kind") + 1])
+        self.assertIn("--plugin-dir", manager)
+        self.assertEqual("claude-fable-5-1", manager[manager.index("--model") + 1])
+        self.assertEqual("high", manager[manager.index("--effort") + 1])
+        self.assertEqual(
+            '{"switchModelsOnFlag":false}', manager[manager.index("--settings") + 1]
+        )
+        self.assertEqual("codex", worker[worker.index("--kind") + 1])
+        self.assertIn("--config", worker)
+        self.assertEqual("gpt-5.6-sol", worker[worker.index("--model") + 1])
+        self.assertIn('model_reasoning_effort="medium"', worker)
+
     def test_fleet_agents_enable_session_only_hook_plugin(self):
         adapter = herdr_adapter.HerdrAdapter(self.state)
 

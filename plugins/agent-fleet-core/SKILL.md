@@ -5,7 +5,7 @@ description: YAML Fleet Specを検査し、論理エージェント、タスク�
 
 # control-agent-fleet
 
-Fleet Specはdesired state、SQLiteは実行時のlogical stateとして分ける。Coreだけで使うFleetは`runtime`と`view`を省略できる。Herdr Adapterを使う場合だけ版固定`profile_ref`を指定する。pane ID、workspace ID、tab ID、比率、UI geometryをCore DBへ保存しない。
+Fleet Specはdesired state、SQLiteは実行時のlogical stateとして分ける。各メンバーには、役割と分離した`runtime.product`、`runtime.model`、`runtime.effort`、`runtime.fallback`を必ず指定する。Coreだけで使うFleetはspec直下のHerdr用`runtime`と`view`を省略できる。Herdr Adapterを使う場合だけ版固定`profile_ref`を指定する。pane ID、workspace ID、tab ID、比率、UI geometryをCore DBへ保存しない。
 
 ## Fleet Specを検査する
 

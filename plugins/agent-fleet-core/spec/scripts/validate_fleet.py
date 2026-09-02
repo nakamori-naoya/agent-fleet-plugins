@@ -137,8 +137,8 @@ def _members(value: Any, errors: list[str]) -> dict[str, str]:
         _keys(
             member,
             member_path,
-            {"agent_ref", "role_ref"},
-            {"agent_ref", "role_ref", "model"},
+            {"agent_ref", "role_ref", "runtime"},
+            {"agent_ref", "role_ref", "runtime"},
             errors,
         )
         for field in ("agent_ref", "role_ref"):
@@ -152,8 +152,44 @@ def _members(value: Any, errors: list[str]) -> dict[str, str]:
                 f"{member_path}.role_ref: must match "
                 "'<role-id>@<positive-version>'"
             )
-        if "model" in member:
-            _string(member["model"], f"{member_path}.model", errors)
+        if "runtime" in member:
+            runtime_path = f"{member_path}.runtime"
+            runtime = _mapping(member["runtime"], runtime_path, errors)
+            if runtime is not None:
+                _keys(
+                    runtime,
+                    runtime_path,
+                    {"product", "model", "effort", "fallback"},
+                    {"product", "model", "effort", "fallback"},
+                    errors,
+                )
+                for field in ("product", "model", "effort", "fallback"):
+                    if field in runtime:
+                        _string(runtime[field], f"{runtime_path}.{field}", errors)
+                product = runtime.get("product")
+                if _non_empty_string(product) and product not in {"codex", "claude"}:
+                    errors.append(
+                        f"{runtime_path}.product: must be 'codex' or 'claude'"
+                    )
+                effort = runtime.get("effort")
+                if _non_empty_string(effort) and effort not in {
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max",
+                }:
+                    errors.append(
+                        f"{runtime_path}.effort: must be low, medium, high, xhigh, or max"
+                    )
+                fallback = runtime.get("fallback")
+                if _non_empty_string(fallback) and fallback not in {
+                    "fail",
+                    "product-default",
+                }:
+                    errors.append(
+                        f"{runtime_path}.fallback: must be 'fail' or 'product-default'"
+                    )
         agent_ref = member.get("agent_ref")
         if _non_empty_string(agent_ref):
             if agent_ref in members_by_ref:

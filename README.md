@@ -24,7 +24,7 @@ role catalogは別marketplaceの`agent-roles`を使う。Coreだけを使う場�
 
 ## 依存関係
 
-外部pluginは`plugin@marketplace`のidentityで指定する。install commandではversionを固定しない。現在のFleet pluginは0.3.0であり、`roles.harness/v1`のcatalog version 1とHerdr 0.8.xのCLI surfaceを前提とする。
+外部pluginは`plugin@marketplace`のidentityで指定する。install commandではversionを固定しない。現在のFleet pluginは0.4.0であり、`roles.harness/v1`のcatalog version 1とHerdr 0.8.xのCLI surfaceを前提とする。
 
 | 依存 | 必須度 | 用途 |
 |---|---|---|
@@ -96,6 +96,8 @@ Claude Codeでは`agent-fleet-session-hooks`を通常pluginとしてinstallし�
 Coreだけを利用する場合、Herdr CLIと`agent-fleet-herdr`は不要である。Adapterのdry-runはHerdrを実行しないが、`--execute`を使う前に`herdr --version`が0.8.xであることを確認する。
 
 Fleet YAMLの形式例は[manager 1・worker 2の利用者設定](configs/fleets/release-readiness.yml)にある。最初にCore validatorへFleet YAMLと検査済みRole Catalogを渡す。Coreは各`role_ref`を解決し、RoleDefinitionとCatalogのidentity・内容hashを含むnormalized JSONへ変換してHerdr Adapterへ渡す。`provision`はdry-runが既定であり、`--execute`を付けない限りHerdrを変更しない。
+
+各メンバーの`runtime`へAI製品、モデル、思考量、代替モデル方針を指定する。開始例はCodexに`gpt-5.6-sol`、Claudeに`claude-fable-5-1`を使い、`fallback: fail`で古いモデルへの暗黙切替を許さない。Herdr Adapterはメンバーごとに`--kind codex`または`--kind claude`を選ぶため、同じ艦隊で両製品を混在できる。Role Catalogは役割の意味だけを持ち、AI製品やモデルを持たない。
 
 艦隊編成とpane配置の正本はplugin外の利用者設定である。既定では`~/.config/agent-fleet/fleets`と`~/.config/agent-fleet/view-profiles`を読む。repositoryの[艦隊設定例](configs/fleets/development-squad.yml)と[表示設定例](configs/view-profiles/development-focus.v1.yml)は手元へ複製して編集するための例であり、pluginは自動読込しない。実行時SQLiteもrepository外のstate directoryへ保存する。
 

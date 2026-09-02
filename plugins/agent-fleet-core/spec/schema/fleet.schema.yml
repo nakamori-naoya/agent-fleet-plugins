@@ -54,19 +54,37 @@ $defs:
   safeIdentifier:
     type: string
     pattern: ^[a-z][a-z0-9]*(-[a-z0-9]+)*$
+  agentRuntime:
+    description: The AI product, model, and reasoning effort requested for one member.
+    type: object
+    additionalProperties: false
+    required: [product, model, effort, fallback]
+    properties:
+      product:
+        type: string
+        enum: [codex, claude]
+      model:
+        $ref: "#/$defs/nonEmptyString"
+      effort:
+        type: string
+        enum: [low, medium, high, xhigh, max]
+      fallback:
+        description: Whether the product may silently switch to another model.
+        type: string
+        enum: [fail, product-default]
   agentInstance:
     description: A fleet member instance; it is not a reusable RoleDefinition.
     type: object
     additionalProperties: false
-    required: [agent_ref, role_ref]
+    required: [agent_ref, role_ref, runtime]
     properties:
       agent_ref:
         $ref: "#/$defs/safeIdentifier"
       role_ref:
         type: string
         pattern: ^[a-z][a-z0-9]*(-[a-z0-9]+)*@[1-9][0-9]*$
-      model:
-        $ref: "#/$defs/nonEmptyString"
+      runtime:
+        $ref: "#/$defs/agentRuntime"
   taskAssignment:
     description: A declarative assignment; it is not task execution state.
     type: object
