@@ -13,10 +13,10 @@ failed=0
 for manifest in \
   "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json" \
   "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.4.0" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.4.1" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
 done
 for manifest in "$HOOK_PLUGIN/.codex-plugin/plugin.json" "$HOOK_PLUGIN/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.4.0" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.4.1" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
 done
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact|fork" and .hooks.SessionStart[0].hooks[0].timeout==12' \
   "$HOOK_PLUGIN/hooks/claude-hooks.json" >/dev/null || failed=1
@@ -35,7 +35,7 @@ test ! -e "$HERDR/view-profiles" || failed=1
 if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
   failed=1
 fi
-jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.4.0")' \
+jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.4.1")' \
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \

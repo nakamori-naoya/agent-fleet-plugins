@@ -117,6 +117,9 @@ COVERAGE = {
     "遅れて届いたHook受領で結果不明を配送済みへ訂正する": (
         (CORE_TESTS, "test_late_hook_receipt_corrects_unknown_delivery"),
     ),
+    "Hook受領と送信結果が同時でも配送済みから戻さない": (
+        (CORE_TESTS, "test_concurrent_hook_receipt_cannot_be_overwritten_by_unknown_result"),
+    ),
     "同じ論理識別子を持つ複数艦隊を混同しない": (
         (ADAPTER_TESTS, "test_same_agent_ref_in_two_fleets_resolves_to_each_fleets_pane"),
     ),

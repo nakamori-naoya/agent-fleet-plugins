@@ -2079,6 +2079,7 @@ class FleetStore:
         if result not in {"delivered", "unknown", "retry", "abandoned"}:
             raise FleetError(f"unsupported delivery result: {result}")
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             command = db.execute(
                 "SELECT status,lease_token,lease_expires_at,attempt_count,"
                 "activation_consumed_at FROM outbox "

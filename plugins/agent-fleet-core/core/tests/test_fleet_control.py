@@ -1,10 +1,11 @@
 import importlib.util
 import copy
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from contextlib import closing
 import sqlite3
 import stat
 import tempfile
+from threading import Event
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -637,6 +638,100 @@ class FleetStoreTest(unittest.TestCase):
 
         self.assertEqual("received", receipt["status"])
         self.assertEqual(2, self.store.status("demo")["delivery_counts"]["delivered"])
+
+    def test_concurrent_hook_receipt_cannot_be_overwritten_by_unknown_result(self):
+        self.store.enqueue_command(
+            "demo", "manager", "worker-1", "message.send", {"text": "hello"}, "race"
+        )
+        self.store.enqueue_command(
+            "demo",
+            "manager",
+            "worker-1",
+            "context.sync",
+            {"reason": "bind receipt session"},
+            "race-context",
+        )
+        activation = self.store.claim_delivery("demo", "context-controller")
+        self.store.begin_delivery(
+            "demo", "race-context", activation["delivery"]["lease_token"]
+        )
+        self.store.consume_context_activation(
+            "demo",
+            "race-context",
+            activation["command"]["spec"]["payload"]["activation_token"],
+            "session-1",
+            "codex",
+        )
+        claimed = self.store.claim_delivery("demo", "controller")
+        command = claimed["command"]
+        self.store.begin_delivery(
+            "demo", "race", claimed["delivery"]["lease_token"]
+        )
+
+        result_is_resolving = Event()
+        release_result = Event()
+        receipt_started = Event()
+        original_parse_timestamp = self.store._parse_timestamp
+
+        def pause_delivery_result(value, field):
+            parsed = original_parse_timestamp(value, field)
+            if field == "now":
+                result_is_resolving.set()
+                if not release_result.wait(5):
+                    raise AssertionError("timed out waiting to release delivery result")
+            return parsed
+
+        def consume_receipt():
+            receipt_started.set()
+            return self.store.consume_command(
+                "demo", "race", command, "session-1", "codex"
+            )
+
+        with mock.patch.object(
+            self.store, "_parse_timestamp", side_effect=pause_delivery_result
+        ):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                result_future = executor.submit(
+                    self.store.record_delivery_result,
+                    "demo",
+                    "race",
+                    claimed["delivery"]["lease_token"],
+                    "unknown",
+                )
+                self.assertTrue(result_is_resolving.wait(2))
+                receipt_future = executor.submit(consume_receipt)
+                self.assertTrue(receipt_started.wait(2))
+                try:
+                    receipt_future.result(timeout=0.5)
+                except TimeoutError:
+                    pass
+                release_result.set()
+                result_future.result(timeout=5)
+                receipt = receipt_future.result(timeout=5)
+
+        self.assertEqual("received", receipt["status"])
+        status = self.store.status("demo")
+        self.assertEqual(2, status["delivery_counts"]["delivered"])
+        self.assertNotIn("unknown", status["delivery_counts"])
+        with self.store.connect() as db:
+            row = db.execute(
+                "SELECT status,activation_consumed_at,lease_owner,lease_token,"
+                "lease_expires_at FROM outbox WHERE fleet_id='demo' AND command_id='race'"
+            ).fetchone()
+            events = [
+                event["event_type"]
+                for event in db.execute(
+                    "SELECT event_type FROM events WHERE fleet_id='demo' "
+                    "AND entity_id='race' AND event_type LIKE 'delivery.%' "
+                    "ORDER BY event_id"
+                )
+            ]
+        self.assertEqual("delivered", row["status"])
+        self.assertIsNotNone(row["activation_consumed_at"])
+        self.assertIsNone(row["lease_owner"])
+        self.assertIsNone(row["lease_token"])
+        self.assertIsNone(row["lease_expires_at"])
+        self.assertEqual("delivery.delivered", events[-1])
 
     def test_current_session_context_rejects_stale_or_unbound_sessions(self):
         self.store.assign(
