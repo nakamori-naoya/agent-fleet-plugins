@@ -2,7 +2,7 @@
 
 YAMLのFleet Specを正本に、logical agent、task、command、eventを管理し、Herdr 0.8へruntime/view操作を委譲するClaude Code/Codex両対応marketplaceである。
 
-配布単位は`agent-fleet-core`、`agent-fleet-herdr`、`agent-fleet-session-hooks`に分ける。Coreだけを使う利用者へHerdr操作権限を同梱せず、通常セッションへ艦隊専用Hookを登録しない。Fleet Specにはdesired stateだけを記載し、pane IDや実行状態はSQLiteのobserved stateへ分離する。
+配布単位は`agent-fleet-core`と`agent-fleet-herdr`である。`agent-fleet-session-hooks`はHerdrが所有する同梱sidecarで、marketplace entryはCodexで有効化する配布面にすぎず、独立した実装domainではない。Coreだけを使う利用者へHerdr操作権限を同梱せず、通常セッションへ艦隊専用Hookを登録しない。Fleet Specにはdesired stateだけを記載し、pane IDや実行状態はSQLiteのobserved stateへ分離する。
 
 ## MVP境界
 
@@ -18,13 +18,13 @@ daemon、multi-host、fleet間gateway、独自Web UI、自動pane再作成は対
 
 - `agent-fleet-core`: Fleet Spec、logical agent、task、command、event、outbox
 - `agent-fleet-herdr`: Herdr 0.8の実行時関連付け、利用者定義のpane配置、指示配送
-- `agent-fleet-session-hooks`: 艦隊から起動したagent sessionだけで使う役割Hook
+- `agent-fleet-session-hooks`: Herdr同梱sidecarとして、艦隊から起動したagent sessionだけで使う役割Hookを配布するentry
 
 role catalogは別marketplaceの`agent-roles`を使う。Coreだけを使う場合、Herdr pluginをinstallする必要はない。
 
 ## 依存関係
 
-外部pluginは`plugin@marketplace`のidentityで指定する。install commandではversionを固定しない。現在のFleet pluginは0.5.0であり、`roles.harness/v1`のcatalog version 1とHerdr 0.8.xのCLI surfaceを前提とする。
+外部pluginは`plugin@marketplace`のidentityで指定する。install commandではversionを固定しない。現在のFleet pluginは0.5.1であり、`roles.harness/v1`のcatalog version 1とHerdr 0.8.xのCLI surfaceを前提とする。
 
 | 依存 | 必須度 | 用途 |
 |---|---|---|
@@ -103,7 +103,13 @@ Fleet YAMLの形式例は[manager 1・worker 2の利用者設定](configs/fleets
 
 Codex艦隊では`spec.runtime.codex_hook_trust: preapproved`を明示すると、Herdrから起動する各Codexだけに`--dangerously-bypass-hook-trust`を渡し、役割文脈Hookの起動時レビューを省略する。これはHookの信頼確認だけを省略し、tool承認やsandboxを無効にしない。省略時と`review`指定時は対話確認を維持し、プラグイン更新で旧実行ファイルが消えた場合も未確認の新版へ自動移行しない。利用者設定例3件は、毎回の艦隊起動を止めないよう`preapproved`を明示している。
 
-Hook登録は`agent-fleet-session-hooks`へ分離し、通常セッションでは読み込まない。Hookの実体は艦隊起動時に艦隊stateへ内容address付きで固定配置し、各paneへ`AGENT_FLEET_HOOK_RUNTIME`として渡す。`fleet-runtime`は起動時と再開時に固定版をSHA-256照合する。Hook plugin内の`hooks/*.json`は検査済みの固定版を起動する一行だけを持つ。既存sessionは起動時の実体を使い続けるため、plugin cacheの旧versionが削除されても実行pathを失わない。Hook実体を更新する場合は、艦隊を停止して再起動する。
+Hook登録は`agent-fleet-session-hooks`へ分離し、通常セッションでは読み込まない。Hookの実体は艦隊起動時に艦隊stateへ内容address付きで固定配置し、各paneへ`AGENT_FLEET_HOOK_RUNTIME`として渡す。`fleet-runtime`は起動時と再開時に固定版をSHA-256照合する。Hook plugin内の`hooks/*.json`は検査済みの固定版を起動する一行だけを持つ。既存sessionは起動時の実体を使い続けるため、plugin cacheの旧versionが削除されても実行pathを失わない。Hook実体を更新する場合は、既存runtimeを削除するか新しいfleet IDで起動する。
+
+`--execute`はfleet-controller、Core、Herdr adapter、Hook sourceをstate directoryやHerdr workspaceを作る前に検査する。manifestは実行木の相対path順内容SHA-256と解決済みcommand pathを実行identityとして保存するため、同じfleet IDを異なる版、内容、install pathの実行物で再開しない。拒否時は表示された期待identity・既存identityを比較し、まず新しいfleet IDで起動する。既存runtimeの削除は、そのruntimeを作成した同じ版で実行できる場合だけの復旧手段である。
+
+実行木identityの対象は、Core/adapter直下の`.py`、`scripts/`、`schema/`、`config/`、Coreの`spec/scripts`・`spec/schema`・`spec/config`、およびsession-hooks-pluginのHook設定と両製品用manifestである。各ファイルは相対pathと内容hashを辞書順で連結する。tests、SKILL、README、`__pycache__`、`.pyc`などの実行副産物は対象外とする。
+
+レビューはworkerが`reported`を明示した直後に始め、managerがレビュー結果と報告を照合してから`task.accept`する。したがってreviewer taskをworker taskの`depends_on`に置いて、`accepted`後までレビューを遅らせない。
 
 ## 検証
 

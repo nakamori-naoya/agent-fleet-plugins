@@ -94,11 +94,14 @@ COVERAGE = {
     "現在の役割文脈を確認していないメンバーへ新しい仕事を開始させない": (
         (CORE_TESTS, "test_work_command_waits_until_current_role_context_is_confirmed"),
     ),
-    "起動済み艦隊がプラグイン更新後も同じHookで作業を続ける": (
-        (RUNTIME_TESTS, "test_active_fleet_keeps_its_hook_snapshot_until_stop_and_restart"),
+    "起動済み艦隊を異なるHook identityで再開しない": (
+        (RUNTIME_TESTS, "test_different_hook_rejects_same_fleet_id"),
     ),
-    "停止後の再起動で新しいHookへ切り替える": (
-        (RUNTIME_TESTS, "test_active_fleet_keeps_its_hook_snapshot_until_stop_and_restart"),
+    "異なるHookで同じfleet IDを再開しない": (
+        (RUNTIME_TESTS, "test_different_hook_rejects_same_fleet_id"),
+    ),
+    "異なるHookを新しいfleet IDで起動する": (
+        (RUNTIME_TESTS, "test_different_hook_can_start_with_new_fleet_id"),
     ),
     "固定版が変更されている艦隊を再開しない": (
         (RUNTIME_TESTS, "test_start_rejects_a_modified_materialized_hook_runtime"),

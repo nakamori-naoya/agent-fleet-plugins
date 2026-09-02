@@ -156,6 +156,116 @@ class FleetRuntime:
                 argv[0] = discovered
         return shlex.join(argv)
 
+    @staticmethod
+    def _tree_identity(root: Path) -> str:
+        if root.is_symlink() or not root.is_dir():
+            raise FleetRuntimeError(f"required implementation tree is unavailable: {root}")
+        digest = hashlib.sha256()
+        # Deliberately enumerate the runtime closure: rglob would include generated
+        # __pycache__ files and make an unchanged installation conflict with itself.
+        candidates = [*root.glob("*.py"), *root.glob("scripts/*"), *root.glob("schema/*"), *root.glob("config/*")]
+        if root.name == "core":
+            plugin_root = root.parent
+            candidates += [* (plugin_root / "spec" / "scripts").glob("*.py"),
+                           * (plugin_root / "spec" / "schema").glob("*"),
+                           * (plugin_root / "spec" / "config").glob("*"),
+                           * (plugin_root / "config").glob("*")]
+        if root.name == "adapter":
+            plugin_root = root.parent
+            hook_plugin = plugin_root / "session-hooks-plugin"
+            candidates += [* (hook_plugin / "hooks").glob("*.json"),
+                           hook_plugin / ".claude-plugin" / "plugin.json",
+                           hook_plugin / ".codex-plugin" / "plugin.json"]
+        files = sorted(
+            (path for path in candidates if path.is_file() and not path.is_symlink()),
+            key=lambda path: path.relative_to(root.parent).as_posix(),
+        )
+        if not files:
+            raise FleetRuntimeError(f"required implementation tree is empty: {root}")
+        for path in files:
+            relative = path.relative_to(root.parent).as_posix().encode("utf-8")
+            digest.update(len(relative).to_bytes(4, "big"))
+            digest.update(relative)
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+        return digest.hexdigest()
+
+    @staticmethod
+    def _executable_identity(
+        label: str, command: Sequence[str], implementation: str
+    ) -> dict[str, str]:
+        """Return a runtime identity that deliberately binds content and install path."""
+        if not command or not command[0]:
+            raise FleetRuntimeError(f"{label} command is empty")
+        candidate = Path(command[0])
+        resolved = candidate.resolve() if candidate.is_file() else None
+        if resolved is None:
+            discovered = shutil.which(command[0])
+            resolved = Path(discovered).resolve() if discovered else None
+        if resolved is None or resolved.is_symlink() or not resolved.is_file():
+            raise FleetRuntimeError(f"required executable is unavailable: {label} ({command[0]})")
+        try:
+            digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise FleetRuntimeError(f"cannot read required executable {label}: {exc}") from exc
+        implementation_path = (resolved.parent / implementation).resolve()
+        if (
+            implementation_path.is_symlink()
+            or not implementation_path.is_file()
+        ):
+            raise FleetRuntimeError(
+                f"required implementation is unavailable: {label} ({implementation_path})"
+            )
+        try:
+            implementation_digest = hashlib.sha256(
+                implementation_path.read_bytes()
+            ).hexdigest()
+        except OSError as exc:
+            raise FleetRuntimeError(
+                f"cannot read required implementation {label}: {exc}"
+            ) from exc
+        tree_root = resolved.parent.parent
+        return {
+            "command_path": str(resolved),
+            "entry_sha256": digest,
+            "implementation_sha256": implementation_digest,
+            "tree_sha256": FleetRuntime._tree_identity(tree_root),
+        }
+
+    def _preflight_execution(self) -> dict[str, Any]:
+        """Validate every executable before creating fleet or Herdr state."""
+        hook = self.hook_source
+        if hook.is_symlink() or not hook.is_file():
+            raise FleetRuntimeError("required hook runtime source is unavailable")
+        try:
+            hook_sha256 = hashlib.sha256(hook.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise FleetRuntimeError(f"cannot read hook runtime source: {exc}") from exc
+        if self.role_catalog is not None and (self.role_catalog.is_symlink() or not self.role_catalog.is_file()):
+            raise FleetRuntimeError("required role catalog is unavailable")
+        return {
+            "core": self._executable_identity(
+                "fleet-control", self.core_command, "../fleet_control.py"
+            ),
+            "adapter": self._executable_identity(
+                "fleet-herdr", self.herdr_command, "../herdr_adapter.py"
+            ),
+            "controller": self._executable_identity(
+                "fleet-controller", self.controller_command, "../fleet_controller.py"
+            ),
+            "hook": {"sha256": hook_sha256},
+        }
+
+    @staticmethod
+    def _assert_runtime_identity(current: Mapping[str, Any], expected: Mapping[str, Any]) -> None:
+        if "execution_identity" not in current:
+            raise FleetRuntimeError("runtime identity conflict: the existing Fleet has a legacy manifest with no recorded identity. Start with a new fleet ID, or remove this runtime using the same installed version.")
+        if current.get("execution_identity") != expected:
+            raise FleetRuntimeError(
+                "runtime identity conflict: the existing Fleet was started with a "
+                f"different executable identity (actual={current.get('execution_identity')!r}, "
+                f"expected={expected!r}). Start with a new fleet ID, or remove the existing runtime."
+            )
+
     def _run_json(
         self,
         argv: Sequence[str],
@@ -505,6 +615,11 @@ class FleetRuntime:
             return self.plan(
                 fleet_name, fleet_dirs, profile_dirs, state_dir, cwd, agent_kind
             )
+        execution_identity = self._preflight_execution()
+        # Check before resolving configs so an incompatible resume has no state or runner effects.
+        known_manifest = self._manifest_path(state_dir, fleet_name)
+        if known_manifest.exists():
+            self._assert_runtime_identity(_load_document(known_manifest), execution_identity)
         resolved = self.resolve(fleet_name, fleet_dirs, profile_dirs, state_dir)
         lock_root = state_dir / "locks"
         lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -526,6 +641,7 @@ class FleetRuntime:
                 state_dir,
                 cwd,
                 agent_kind,
+                execution_identity,
                 once=once,
                 poll_seconds=poll_seconds,
             )
@@ -538,6 +654,7 @@ class FleetRuntime:
         state_dir: Path,
         cwd: str,
         agent_kind: str,
+        execution_identity: Mapping[str, Any],
         *,
         once: bool = False,
         poll_seconds: float = 0.25,
@@ -572,6 +689,8 @@ class FleetRuntime:
         current: Mapping[str, Any] | None = None
         if manifest_path.exists():
             current = _load_document(manifest_path)
+            # Repeat under the fleet lock to close the TOCTOU window after the early check.
+            self._assert_runtime_identity(current, execution_identity)
             if not all(current.get(key) == value for key, value in desired.items()):
                 raise FleetRuntimeError(
                     "configuration conflict: stop the active Fleet before changing its config"
@@ -600,6 +719,7 @@ class FleetRuntime:
             hook_runtime, hook_sha256 = self._materialize_hook_runtime(fleet_state_dir)
         runtime_manifest = {
             **desired,
+            "execution_identity": dict(execution_identity),
             "runtime_generation": runtime_generation,
             "hook_runtime": str(hook_runtime),
             "hook_sha256": hook_sha256,

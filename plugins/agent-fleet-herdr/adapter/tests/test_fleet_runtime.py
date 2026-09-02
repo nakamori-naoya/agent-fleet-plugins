@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -164,8 +165,34 @@ class FleetRuntimeTest(unittest.TestCase):
         (self.profiles / "review-grid.yml").write_text(
             json.dumps(PROFILE), encoding="utf-8"
         )
+        self.commands = {}
+        for name, implementation, tree in (
+            ("fleet-control", "fleet_control.py", "core"),
+            ("fleet-herdr", "herdr_adapter.py", "adapter"),
+            ("fleet-controller", "fleet_controller.py", "adapter"),
+        ):
+            command = self.root / tree / "scripts" / name
+            command.parent.mkdir(parents=True, exist_ok=True)
+            command.write_text("#!/bin/sh\n", encoding="utf-8")
+            command.chmod(0o700)
+            (command.parent.parent / implementation).write_text(
+                f"# {name} fixture\n", encoding="utf-8"
+            )
+            self.commands[name] = command
+        (self.root / "adapter" / "view_profiles.py").write_text("# view fixture\n", encoding="utf-8")
+        (self.root / "adapter" / "fleet_runtime.py").write_text("# runtime fixture\n", encoding="utf-8")
+        original_which = fleet_runtime.shutil.which
+        self.which = mock.patch.object(
+            fleet_runtime.shutil,
+            "which",
+            side_effect=lambda name: str(self.commands[name])
+            if name in {"fleet-control", "fleet-herdr", "fleet-controller"}
+            else original_which(name),
+        )
+        self.which.start()
 
     def tearDown(self):
+        self.which.stop()
         self.temp.cleanup()
 
     def test_catalog_resolves_fleet_to_versioned_profile(self):
@@ -443,7 +470,157 @@ class FleetRuntimeTest(unittest.TestCase):
                 once=True,
             )
 
-    def test_active_fleet_keeps_its_hook_snapshot_until_stop_and_restart(self):
+    def test_start_rejects_missing_execution_prerequisite_before_state_creation(self):
+        runtime = fleet_runtime.FleetRuntime(
+            ["missing-fleet-control"],
+            ["missing-fleet-herdr"],
+            ["missing-fleet-controller"],
+        )
+
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "required executable"):
+            runtime.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
+
+        self.assertFalse(self.state.exists())
+
+    def test_resume_rejects_different_execution_identity_with_recovery_guidance(self):
+        runner = FakeRunner()
+        original = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        original.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        manifest = self.state / "runtimes/review.json"
+        saved = json.loads(manifest.read_text(encoding="utf-8"))
+        saved["execution_identity"] = {"core": {"implementation_sha256": "old"}}
+        manifest.write_text(json.dumps(saved), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "new fleet ID"
+        ):
+            original.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
+
+    def test_legacy_manifest_is_rejected_before_runner_side_effects(self):
+        runner = FakeRunner()
+        manifest = self.state / "runtimes/review.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(json.dumps({"fleet_id": "review", "phase": "active"}), encoding="utf-8")
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "legacy manifest"):
+            runtime.start("review", [self.fleets], [self.profiles], self.state,
+                          str(self.root), "codex", execute=True, once=True)
+        self.assertEqual([], runner.calls)
+
+    def test_execution_identity_includes_wrapper_implementation_content(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            [str(self.commands["fleet-control"])],
+            [str(self.commands["fleet-herdr"])],
+            [str(self.commands["fleet-controller"])],
+            runner=runner,
+        )
+        first = runtime._preflight_execution()
+        (self.commands["fleet-control"].parent.parent / "fleet_control.py").write_text("# changed\n", encoding="utf-8")
+        second = runtime._preflight_execution()
+
+        self.assertNotEqual(first["core"], second["core"])
+        self.assertEqual(first["adapter"], second["adapter"])
+
+    def test_execution_identity_covers_adapter_tree_and_rejects_before_side_effects(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start("review", [self.fleets], [self.profiles], self.state,
+                      str(self.root), "codex", execute=True, once=True)
+        manifest = self.state / "runtimes/review.json"
+        before_manifest = manifest.read_bytes()
+        before_calls = len(runner.calls)
+        (self.root / "adapter" / "view_profiles.py").write_text("# changed\n", encoding="utf-8")
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "identity conflict"):
+            runtime.start("review", [self.fleets], [self.profiles], self.state,
+                          str(self.root), "codex", execute=True, once=True)
+        self.assertEqual(before_manifest, manifest.read_bytes())
+        self.assertEqual(before_calls, len(runner.calls))
+
+    def test_runtime_module_change_rejects_without_side_effects(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start("review", [self.fleets], [self.profiles], self.state,
+                      str(self.root), "codex", execute=True, once=True)
+        manifest = self.state / "runtimes/review.json"
+        before_manifest = manifest.read_bytes()
+        before_calls = len(runner.calls)
+        (self.root / "adapter" / "fleet_runtime.py").write_text(
+            "# changed runtime\n", encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "identity conflict"):
+            runtime.start("review", [self.fleets], [self.profiles], self.state,
+                          str(self.root), "codex", execute=True, once=True)
+
+        self.assertEqual(before_manifest, manifest.read_bytes())
+        self.assertEqual(before_calls, len(runner.calls))
+
+    def test_same_install_resumes_after_pyc_generation(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start("review", [self.fleets], [self.profiles], self.state,
+                      str(self.root), "codex", execute=True, once=True)
+        cache = self.root / "adapter" / "__pycache__"
+        cache.mkdir()
+        (cache / "view_profiles.cpython-314.pyc").write_bytes(b"generated")
+        resumed = runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+
+        self.assertEqual("resumed", resumed["status"])
+
+    def test_same_content_at_different_install_path_rejects_resume(self):
+        runner = FakeRunner()
+        original = fleet_runtime.FleetRuntime(
+            [str(self.commands["fleet-control"])],
+            [str(self.commands["fleet-herdr"])],
+            [str(self.commands["fleet-controller"])],
+            runner=runner,
+        )
+        original.start("review", [self.fleets], [self.profiles], self.state,
+                       str(self.root), "codex", execute=True, once=True)
+        manifest = self.state / "runtimes/review.json"
+        before_manifest = manifest.read_bytes()
+        before_calls = len(runner.calls)
+        relocated = self.root / "relocated"
+        shutil.copytree(self.root / "core", relocated / "core")
+        shutil.copytree(self.root / "adapter", relocated / "adapter")
+        moved = fleet_runtime.FleetRuntime(
+            [str(relocated / "core/scripts/fleet-control")],
+            [str(relocated / "adapter/scripts/fleet-herdr")],
+            [str(relocated / "adapter/scripts/fleet-controller")],
+            runner=runner,
+        )
+
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "identity conflict"):
+            moved.start("review", [self.fleets], [self.profiles], self.state,
+                        str(self.root), "codex", execute=True, once=True)
+
+        self.assertEqual(before_manifest, manifest.read_bytes())
+        self.assertEqual(before_calls, len(runner.calls))
+
+    def test_different_hook_rejects_same_fleet_id(self):
         runner = FakeRunner()
         first_source = self.root / "role-context-v1.py"
         second_source = self.root / "role-context-v2.py"
@@ -475,34 +652,57 @@ class FleetRuntimeTest(unittest.TestCase):
             runner=runner,
             hook_source=second_source,
         )
-        resumed = updated_runtime.start(
-            "review",
-            [self.fleets],
-            [self.profiles],
-            self.state,
-            str(self.root),
-            "codex",
-            execute=True,
-            once=True,
-        )
-        self.assertEqual("resumed", resumed["status"])
-        self.assertEqual(first_hook, Path(resumed["hook_runtime"]))
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "identity conflict"):
+            updated_runtime.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
         self.assertEqual("print('v1')\n", first_hook.read_text(encoding="utf-8"))
 
-        updated_runtime.stop("review", self.state, execute=True)
-        restarted = updated_runtime.start(
-            "review",
-            [self.fleets],
-            [self.profiles],
-            self.state,
-            str(self.root),
-            "codex",
-            execute=True,
-            once=True,
+    def test_different_hook_can_start_with_new_fleet_id(self):
+        class ConfigAwareRunner(FakeRunner):
+            def __call__(self, argv, **kwargs):
+                if "spec.validate" in argv:
+                    self.calls.append(list(argv))
+                    config = Path(argv[argv.index("--config") + 1])
+                    payload = {
+                        "ok": True,
+                        "result": json.loads(config.read_text(encoding="utf-8")),
+                    }
+                    return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+                return super().__call__(argv, **kwargs)
+
+        updated_fleet = json.loads(json.dumps(FLEET))
+        updated_fleet["metadata"]["id"] = "review-v2"
+        (self.fleets / "review-v2.yml").write_text(
+            json.dumps(updated_fleet), encoding="utf-8"
         )
-        second_hook = Path(restarted["hook_runtime"])
-        self.assertNotEqual(first_hook, second_hook)
-        self.assertEqual("print('v2')\n", second_hook.read_text(encoding="utf-8"))
+        first_source = self.root / "role-context-v1.py"
+        second_source = self.root / "role-context-v2.py"
+        first_source.write_text("print('v1')\n", encoding="utf-8")
+        second_source.write_text("print('v2')\n", encoding="utf-8")
+        runner = ConfigAwareRunner()
+        first_runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"],
+            runner=runner, hook_source=first_source,
+        )
+        second_runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"],
+            runner=runner, hook_source=second_source,
+        )
+
+        started = first_runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        updated = second_runtime.start(
+            "review-v2", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+
+        self.assertEqual("started", started["status"])
+        self.assertEqual("started", updated["status"])
+        self.assertNotEqual(started["hook_runtime"], updated["hook_runtime"])
 
     def test_init_and_doctor_keep_configuration_outside_the_plugin(self):
         runtime = fleet_runtime.FleetRuntime(
