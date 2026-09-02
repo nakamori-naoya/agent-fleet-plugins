@@ -1254,7 +1254,8 @@ class FleetStore:
                 "UPDATE tasks SET status=?,updated_at=? WHERE fleet_id=? AND task_id=?",
                 (target, utc_now(), fleet_id, task_id),
             )
-            self._bump_context(db, fleet_id, agent_ref, f"task_{target}")
+            if target != "running":
+                self._bump_context(db, fleet_id, agent_ref, f"task_{target}")
             payload = {"from": current, "to": target, "report": report or {}}
             self._append_event(db, fleet_id, "task", task_id, "task.reported", payload)
             if target in {"reported", "blocked", "failed"}:
@@ -2116,6 +2117,82 @@ class FleetStore:
             "attempt_count": command["attempt_count"],
         }
 
+    def _task_status_rows(
+        self, db: sqlite3.Connection, fleet_id: str
+    ) -> list[dict[str, Any]]:
+        tasks = [dict(row) for row in db.execute(
+                "SELECT t.task_id,t.title,t.status,t.assignee_ref,t.updated_at,"
+                "c.expected_output,c.completion_criteria_json "
+                "FROM tasks t JOIN task_contexts c ON c.fleet_id=t.fleet_id "
+                "AND c.task_id=t.task_id WHERE t.fleet_id=? ORDER BY t.task_id",
+                (fleet_id,),
+            )]
+        for task in tasks:
+            task["completion_criteria"] = json.loads(
+                task.pop("completion_criteria_json")
+            )
+            latest_state_event = db.execute(
+                "SELECT payload_json,created_at FROM events "
+                "WHERE fleet_id=? AND entity_type='task' AND entity_id=? "
+                "AND event_type='task.reported' ORDER BY event_id DESC LIMIT 1",
+                (fleet_id, task["task_id"]),
+            ).fetchone()
+            if latest_state_event is None:
+                task["latest_state_report"] = None
+            else:
+                state_payload = json.loads(latest_state_event["payload_json"])
+                task["latest_state_report"] = {
+                    "status": state_payload["to"],
+                    "reporter_ref": task["assignee_ref"],
+                    "report": state_payload.get("report", {}),
+                    "created_at": latest_state_event["created_at"],
+                }
+            latest_report = db.execute(
+                "SELECT report_id,reporter_ref,report_json,next_report_at,created_at "
+                "FROM task_reports WHERE fleet_id=? AND task_id=? "
+                "ORDER BY created_at DESC,report_id DESC LIMIT 1",
+                (fleet_id, task["task_id"]),
+            ).fetchone()
+            if latest_report is None:
+                task["latest_report"] = None
+                task["next_report_at"] = None
+            else:
+                task["latest_report"] = {
+                    "report_id": latest_report["report_id"],
+                    "reporter_ref": latest_report["reporter_ref"],
+                    "report": json.loads(latest_report["report_json"]),
+                    "created_at": latest_report["created_at"],
+                }
+                task["next_report_at"] = latest_report["next_report_at"]
+            deadline = db.execute(
+                "SELECT consecutive_missed_deadlines,requires_user_decision,checked_at "
+                "FROM report_deadline_state WHERE fleet_id=? AND task_id=?",
+                (fleet_id, task["task_id"]),
+            ).fetchone()
+            task["consecutive_missed_deadlines"] = (
+                int(deadline["consecutive_missed_deadlines"])
+                if deadline is not None
+                else 0
+            )
+            task["requires_user_decision"] = (
+                bool(deadline["requires_user_decision"])
+                if deadline is not None
+                else False
+            )
+            task["deadline_checked_at"] = (
+                deadline["checked_at"] if deadline is not None else None
+            )
+        return tasks
+
+    def task_list(self, fleet_id: str) -> dict[str, Any]:
+        with self.connect() as db:
+            fleet = db.execute(
+                "SELECT 1 FROM fleets WHERE fleet_id=?", (fleet_id,)
+            ).fetchone()
+            if fleet is None:
+                raise FleetError(f"unknown fleet: {fleet_id}")
+            return {"fleet_id": fleet_id, "tasks": self._task_status_rows(db, fleet_id)}
+
     def status(self, fleet_id: str) -> dict[str, Any]:
         with self.connect() as db:
             fleet = db.execute("SELECT * FROM fleets WHERE fleet_id=?", (fleet_id,)).fetchone()
@@ -2128,46 +2205,7 @@ class FleetStore:
                 "AND c.agent_ref=m.agent_ref WHERE m.fleet_id=? ORDER BY m.agent_ref",
                 (fleet_id,),
             )]
-            tasks = [dict(row) for row in db.execute(
-                "SELECT task_id,title,status,assignee_ref,updated_at FROM tasks WHERE fleet_id=? ORDER BY task_id",
-                (fleet_id,),
-            )]
-            for task in tasks:
-                latest_report = db.execute(
-                    "SELECT report_id,reporter_ref,report_json,next_report_at,created_at "
-                    "FROM task_reports WHERE fleet_id=? AND task_id=? "
-                    "ORDER BY created_at DESC,report_id DESC LIMIT 1",
-                    (fleet_id, task["task_id"]),
-                ).fetchone()
-                if latest_report is None:
-                    task["latest_report"] = None
-                    task["next_report_at"] = None
-                else:
-                    task["latest_report"] = {
-                        "report_id": latest_report["report_id"],
-                        "reporter_ref": latest_report["reporter_ref"],
-                        "report": json.loads(latest_report["report_json"]),
-                        "created_at": latest_report["created_at"],
-                    }
-                    task["next_report_at"] = latest_report["next_report_at"]
-                deadline = db.execute(
-                    "SELECT consecutive_missed_deadlines,requires_user_decision,checked_at "
-                    "FROM report_deadline_state WHERE fleet_id=? AND task_id=?",
-                    (fleet_id, task["task_id"]),
-                ).fetchone()
-                task["consecutive_missed_deadlines"] = (
-                    int(deadline["consecutive_missed_deadlines"])
-                    if deadline is not None
-                    else 0
-                )
-                task["requires_user_decision"] = (
-                    bool(deadline["requires_user_decision"])
-                    if deadline is not None
-                    else False
-                )
-                task["deadline_checked_at"] = (
-                    deadline["checked_at"] if deadline is not None else None
-                )
+            tasks = self._task_status_rows(db, fleet_id)
             pending = []
             for row in db.execute(
                 "SELECT command_id,fleet_id,sender_ref,target_agent_ref,command_type,payload_json,created_at "
@@ -2257,6 +2295,8 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--config", type=Path, required=True)
     status = sub.add_parser("status", aliases=["fleet.reconcile"])
     status.add_argument("--fleet", required=True)
+    task_list = sub.add_parser("task.list")
+    task_list.add_argument("--fleet", required=True)
     remove = sub.add_parser("fleet.remove")
     remove.add_argument("--fleet", required=True)
     remove.add_argument("--confirm-fleet", required=True)
@@ -2382,6 +2422,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = store.initialize(load_fleet_config(args.config))
         elif args.action in {"status", "fleet.reconcile"}:
             result = store.status(args.fleet)
+        elif args.action == "task.list":
+            result = store.task_list(args.fleet)
         elif args.action == "fleet.remove":
             result = store.remove_fleet(args.fleet, args.confirm_fleet)
         elif args.action in {"assign", "task.assign"}:

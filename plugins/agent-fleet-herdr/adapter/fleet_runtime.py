@@ -686,6 +686,14 @@ class FleetRuntime:
                     "manager_ref": manager_ref,
                 },
             }
+            if agent_ref == manager_ref:
+                control["monitoring"] = {
+                    "action": "task.list",
+                    "prohibited_methods": [
+                        "sqlite-direct",
+                        "external-json-filter",
+                    ],
+                }
             self._run_json(
                 [
                     *self.core_command,

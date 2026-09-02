@@ -127,7 +127,17 @@ class RoleContextHookTest(unittest.TestCase):
             self.context, {}, command_type="context.sync"
         )["hookSpecificOutput"]["additionalContext"]
         manager_text = role_context_hook._additional_context(
-            manager_context, {}, command_type="task.report"
+            manager_context,
+            {
+                "monitoring": {
+                    "action": "task.list",
+                    "prohibited_methods": [
+                        "sqlite-direct",
+                        "external-json-filter",
+                    ],
+                }
+            },
+            command_type="task.report",
         )["hookSpecificOutput"]["additionalContext"]
 
         self.assertIn("割り当てられた成果物", worker_text)
@@ -136,6 +146,9 @@ class RoleContextHookTest(unittest.TestCase):
         self.assertIn("作業者の成果物を自分で実装しない", manager_text)
         self.assertIn("独立確認が必要な成果", manager_text)
         self.assertIn("三回失敗", manager_text)
+        self.assertIn("task.list", manager_text)
+        self.assertIn("SQLiteを直接読まない", manager_text)
+        self.assertIn("外部のJSON加工commandへ依存しない", manager_text)
 
     def test_unrelated_prompt_and_unknown_session_receive_no_fleet_context(self):
         self.assertEqual(

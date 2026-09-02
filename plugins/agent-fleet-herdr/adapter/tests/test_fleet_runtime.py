@@ -243,6 +243,24 @@ class FleetRuntimeTest(unittest.TestCase):
         )
         self.assertNotIn("context_confirm_argv", payload["control"])
         self.assertEqual("manager", payload["control"]["reporting"]["manager_ref"])
+        self.assertEqual("task.list", payload["control"]["monitoring"]["action"])
+        self.assertEqual(
+            ["sqlite-direct", "external-json-filter"],
+            payload["control"]["monitoring"]["prohibited_methods"],
+        )
+        worker_activation = next(
+            call
+            for call in runner.calls
+            if "context.sync" in call
+            and json.loads(call[call.index("--payload") + 1])["control"][
+                "reporting"
+            ]["required_identity"]
+            == "worker"
+        )
+        worker_payload = json.loads(
+            worker_activation[worker_activation.index("--payload") + 1]
+        )
+        self.assertNotIn("monitoring", worker_payload["control"])
         controller = next(call for call in runner.calls if call[0] == "fleet-controller")
         self.assertIn("--execute", controller)
         self.assertEqual(

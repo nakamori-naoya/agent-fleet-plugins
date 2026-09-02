@@ -206,7 +206,7 @@ class FleetStoreTest(unittest.TestCase):
             "demo",
             activation["command"]["metadata"]["id"],
             activation["delivery"]["lease_token"],
-            "delivered",
+            "unknown",
         )
         claimed = self.store.claim_delivery("demo", "controller")
         self.assertEqual("task.assign", claimed["command"]["spec"]["type"])
@@ -216,7 +216,7 @@ class FleetStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(fleet_control.FleetError, "not current"):
             self.store.confirm_context("demo", "worker-1", 1)
 
-    def test_every_context_change_enqueues_one_current_context_sync(self):
+    def test_running_report_does_not_interrupt_the_agent_with_context_sync(self):
         self.store.assign(
             "demo", "task-1", "worker-1", "manager", "assignment:context"
         )
@@ -231,11 +231,182 @@ class FleetStoreTest(unittest.TestCase):
             "session-1",
             "codex",
         )
+        with self.store.connect() as db:
+            before = db.execute(
+                "SELECT context_revision FROM member_context_state "
+                "WHERE fleet_id='demo' AND agent_ref='worker-1'"
+            ).fetchone()[0]
+            pending_before = db.execute(
+                "SELECT COUNT(*) FROM outbox WHERE fleet_id='demo' "
+                "AND target_agent_ref='worker-1' AND command_type='context.sync' "
+                "AND status IN ('pending','retry')"
+            ).fetchone()[0]
         self.store.transition_task("demo", "task-1", "running", "worker-1")
+        with self.store.connect() as db:
+            after = db.execute(
+                "SELECT context_revision FROM member_context_state "
+                "WHERE fleet_id='demo' AND agent_ref='worker-1'"
+            ).fetchone()[0]
+            pending_after = db.execute(
+                "SELECT COUNT(*) FROM outbox WHERE fleet_id='demo' "
+                "AND target_agent_ref='worker-1' AND command_type='context.sync' "
+                "AND status IN ('pending','retry')"
+            ).fetchone()[0]
+        self.assertEqual(before, after)
+        self.assertEqual(pending_before, pending_after)
         second = self.store.claim_delivery("demo", "controller")
-        self.assertEqual("context.sync", second["command"]["spec"]["type"])
+        self.assertEqual("task.assign", second["command"]["spec"]["type"])
         self.assertEqual(
-            3, second["command"]["spec"]["context"]["context_revision"]
+            2, second["command"]["spec"]["context"]["context_revision"]
+        )
+
+    def test_resuming_after_block_or_rework_does_not_enqueue_a_second_context_sync(self):
+        self.store.assign(
+            "demo", "task-1", "worker-1", "manager", "assignment:resume"
+        )
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+
+        self.store.transition_task(
+            "demo", "task-1", "blocked", "worker-1", {"reason": "waiting"}
+        )
+        with self.store.connect() as db:
+            blocked_revision = db.execute(
+                "SELECT context_revision FROM member_context_state "
+                "WHERE fleet_id='demo' AND agent_ref='worker-1'"
+            ).fetchone()[0]
+            blocked_syncs = db.execute(
+                "SELECT COUNT(*) FROM outbox WHERE fleet_id='demo' "
+                "AND target_agent_ref='worker-1' AND command_type='context.sync' "
+                "AND status IN ('pending','retry')"
+            ).fetchone()[0]
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        with self.store.connect() as db:
+            self.assertEqual(
+                blocked_revision,
+                db.execute(
+                    "SELECT context_revision FROM member_context_state "
+                    "WHERE fleet_id='demo' AND agent_ref='worker-1'"
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                blocked_syncs,
+                db.execute(
+                    "SELECT COUNT(*) FROM outbox WHERE fleet_id='demo' "
+                    "AND target_agent_ref='worker-1' AND command_type='context.sync' "
+                    "AND status IN ('pending','retry')"
+                ).fetchone()[0],
+            )
+        blocked_report = self.store.claim_delivery("demo", "controller-blocked-report")
+        self.assertEqual("task.report", blocked_report["command"]["spec"]["type"])
+        self.store.begin_delivery(
+            "demo",
+            blocked_report["command"]["metadata"]["id"],
+            blocked_report["delivery"]["lease_token"],
+        )
+        self.store.record_delivery_result(
+            "demo",
+            blocked_report["command"]["metadata"]["id"],
+            blocked_report["delivery"]["lease_token"],
+            "unknown",
+        )
+        blocked_context = self.store.claim_delivery("demo", "controller-blocked")
+        self.assertEqual(
+            "context.sync", blocked_context["command"]["spec"]["type"]
+        )
+        self.store.consume_context_activation(
+            "demo",
+            blocked_context["command"]["metadata"]["id"],
+            blocked_context["command"]["spec"]["payload"]["activation_token"],
+            "session-blocked",
+            "codex",
+        )
+        current = self.store.current_session_context(
+            "demo", "worker-1", "session-blocked", "codex"
+        )
+        self.assertEqual("running", current["context"]["assignments"][0]["status"])
+
+        self.store.transition_task(
+            "demo", "task-1", "completed", "worker-1", {"summary": "first"}
+        )
+        with self.store.connect() as db:
+            reported_revision = db.execute(
+                "SELECT context_revision FROM member_context_state "
+                "WHERE fleet_id='demo' AND agent_ref='worker-1'"
+            ).fetchone()[0]
+            reported_syncs = db.execute(
+                "SELECT COUNT(*) FROM outbox WHERE fleet_id='demo' "
+                "AND target_agent_ref='worker-1' AND command_type='context.sync' "
+                "AND status IN ('pending','retry')"
+            ).fetchone()[0]
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        with self.store.connect() as db:
+            self.assertEqual(
+                reported_revision,
+                db.execute(
+                    "SELECT context_revision FROM member_context_state "
+                    "WHERE fleet_id='demo' AND agent_ref='worker-1'"
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                reported_syncs,
+                db.execute(
+                    "SELECT COUNT(*) FROM outbox WHERE fleet_id='demo' "
+                    "AND target_agent_ref='worker-1' AND command_type='context.sync' "
+                    "AND status IN ('pending','retry')"
+                ).fetchone()[0],
+            )
+        manager_report = self.store.claim_delivery("demo", "controller-manager")
+        self.assertEqual("task.report", manager_report["command"]["spec"]["type"])
+        self.store.begin_delivery(
+            "demo",
+            manager_report["command"]["metadata"]["id"],
+            manager_report["delivery"]["lease_token"],
+        )
+        self.store.record_delivery_result(
+            "demo",
+            manager_report["command"]["metadata"]["id"],
+            manager_report["delivery"]["lease_token"],
+            "unknown",
+        )
+        reported_context = self.store.claim_delivery("demo", "controller-reported")
+        self.assertEqual(
+            "context.sync", reported_context["command"]["spec"]["type"]
+        )
+        self.store.consume_context_activation(
+            "demo",
+            reported_context["command"]["metadata"]["id"],
+            reported_context["command"]["spec"]["payload"]["activation_token"],
+            "session-reported",
+            "codex",
+        )
+        current = self.store.current_session_context(
+            "demo", "worker-1", "session-reported", "codex"
+        )
+        self.assertEqual("running", current["context"]["assignments"][0]["status"])
+
+    def test_later_context_sync_preserves_manager_monitoring_control(self):
+        monitoring = {
+            "action": "task.list",
+            "prohibited_methods": ["sqlite-direct", "external-json-filter"],
+        }
+        self.store.enqueue_command(
+            "demo",
+            "manager",
+            "worker-1",
+            "context.sync",
+            {"control": {"monitoring": monitoring}},
+            "context:monitoring",
+        )
+
+        self.store.assign(
+            "demo", "task-1", "worker-1", "manager", "assignment:monitoring"
+        )
+        generated = self.store.claim_delivery("demo", "controller")
+
+        self.assertEqual("context.sync", generated["command"]["spec"]["type"])
+        self.assertEqual(
+            monitoring,
+            generated["command"]["spec"]["payload"]["control"]["monitoring"],
         )
 
     def test_terminal_worker_report_enqueues_manager_review_command(self):
@@ -452,10 +623,11 @@ class FleetStoreTest(unittest.TestCase):
             )
 
         self.store.transition_task("demo", "task-1", "running", "worker-1")
-        with self.assertRaisesRegex(fleet_control.FleetError, "not current"):
-            self.store.current_session_context(
-                "demo", "worker-1", "session-1", "codex"
-            )
+        current = self.store.current_session_context(
+            "demo", "worker-1", "session-1", "codex"
+        )
+        self.assertEqual(2, current["context"]["context_revision"])
+        self.assertEqual("running", current["context"]["assignments"][0]["status"])
 
     def test_context_invalidation_closes_delivery_gate(self):
         self.store.enqueue_command(
@@ -915,6 +1087,88 @@ class FleetStoreTest(unittest.TestCase):
             if item["metadata"]["id"] == "report-notification:offline-report"
         )
         self.assertEqual("manager", notification["spec"]["target"]["ref"])
+
+    def test_task_list_exposes_a_compact_manager_monitoring_view(self):
+        self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        self.store.report_progress(
+            "demo", "task-1", "worker-1", "progress-1", {"summary": "working"},
+            "2026-09-01T12:30:00+00:00",
+        )
+        self.store.check_report_deadlines(
+            "demo", "2026-09-01T12:30:00.001+00:00"
+        )
+
+        result = self.store.task_list("demo")
+
+        self.assertEqual("demo", result["fleet_id"])
+        self.assertEqual(1, len(result["tasks"]))
+        self.assertEqual("running", result["tasks"][0]["status"])
+        self.assertEqual("A verified result.", result["tasks"][0]["expected_output"])
+        self.assertEqual(
+            ["The result includes test evidence."],
+            result["tasks"][0]["completion_criteria"],
+        )
+        self.assertEqual(
+            "progress-1", result["tasks"][0]["latest_report"]["report_id"]
+        )
+        self.assertEqual(1, result["tasks"][0]["consecutive_missed_deadlines"])
+        self.assertFalse(result["tasks"][0]["requires_user_decision"])
+        self.assertEqual(
+            "2026-09-01T12:30:00.001+00:00",
+            result["tasks"][0]["deadline_checked_at"],
+        )
+        self.assertNotIn("members", result)
+        self.assertNotIn("outbox", result)
+        self.assertNotIn("events", result)
+
+    def test_task_list_keeps_the_terminal_report_visible_after_acceptance(self):
+        self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        self.store.transition_task(
+            "demo", "task-1", "completed", "worker-1", {"summary": "done"}
+        )
+        self.store.accept_task("demo", "task-1", "manager")
+
+        task = self.store.task_list("demo")["tasks"][0]
+
+        self.assertEqual("accepted", task["status"])
+        self.assertEqual("reported", task["latest_state_report"]["status"])
+        self.assertEqual({"summary": "done"}, task["latest_state_report"]["report"])
+        self.assertEqual("worker-1", task["latest_state_report"]["reporter_ref"])
+
+    def test_task_list_cli_does_not_require_external_json_processing(self):
+        self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        self.store.report_progress(
+            "demo", "task-1", "worker-1", "progress-1", {"summary": "working"},
+            "2026-09-01T12:30:00+00:00",
+        )
+        self.store.transition_task(
+            "demo", "task-1", "completed", "worker-1", {"summary": "done"}
+        )
+        stdout = __import__("io").StringIO()
+        with mock.patch("sys.stdout", stdout):
+            exit_code = fleet_control.main(
+                ["--db", str(self.db), "task.list", "--fleet", "demo"]
+            )
+
+        result = __import__("json").loads(stdout.getvalue())
+        self.assertEqual(0, exit_code)
+        self.assertTrue(result["ok"])
+        self.assertEqual("demo", result["result"]["fleet_id"])
+        self.assertEqual(["fleet_id", "tasks"], sorted(result["result"]))
+        task = result["result"]["tasks"][0]
+        self.assertEqual("reported", task["status"])
+        self.assertEqual("A verified result.", task["expected_output"])
+        self.assertEqual(
+            ["The result includes test evidence."], task["completion_criteria"]
+        )
+        self.assertEqual("reported", task["latest_state_report"]["status"])
+        self.assertEqual("progress-1", task["latest_report"]["report_id"])
+        self.assertEqual(0, task["consecutive_missed_deadlines"])
+        self.assertFalse(task["requires_user_decision"])
+        self.assertIsNone(task["deadline_checked_at"])
 
     def test_reported_task_can_be_returned_to_the_assignee_but_failed_task_stays_terminal(self):
         self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")

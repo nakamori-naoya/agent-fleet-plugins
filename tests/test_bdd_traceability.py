@@ -57,11 +57,25 @@ COVERAGE = {
     "マネージャー不在中の報告を復帰後に確認する": (
         (CORE_TESTS, "test_manager_can_read_a_report_saved_while_no_delivery_worker_runs"),
     ),
+    "マネージャーがCoreの公開操作から進捗を判断する": (
+        (CORE_TESTS, "test_task_list_exposes_a_compact_manager_monitoring_view"),
+        (CORE_TESTS, "test_task_list_keeps_the_terminal_report_visible_after_acceptance"),
+        (CORE_TESTS, "test_task_list_cli_does_not_require_external_json_processing"),
+        (CORE_TESTS, "test_later_context_sync_preserves_manager_monitoring_control"),
+    ),
     "マネージャーだけが完了報告済みタスクを受容する": (
         (CORE_TESTS, "test_completion_report_requires_manager_acceptance"),
     ),
     "差し戻されたタスクを担当者が再開する": (
         (CORE_TESTS, "test_reported_task_can_be_returned_to_the_assignee_but_failed_task_stays_terminal"),
+        (CORE_TESTS, "test_resuming_after_block_or_rework_does_not_enqueue_a_second_context_sync"),
+    ),
+    "作業開始報告で進行中の仕事へ役割同期を割り込ませない": (
+        (CORE_TESTS, "test_running_report_does_not_interrupt_the_agent_with_context_sync"),
+        (CORE_TESTS, "test_current_session_context_rejects_stale_or_unbound_sessions"),
+    ),
+    "停止後に再開する仕事へ役割同期を割り込ませない": (
+        (CORE_TESTS, "test_resuming_after_block_or_rework_does_not_enqueue_a_second_context_sync"),
     ),
     "依存する仕事は前のタスクが受容された後に始められる": (
         (CORE_TESTS, "test_accepting_task_releases_newly_unblocked_dependents"),
@@ -158,6 +172,13 @@ COVERAGE = {
     ),
     "役割同期だけでは担当作業を開始しない": (
         (HOOK_TESTS, "test_role_context_includes_role_specific_duties"),
+    ),
+    "マネージャーへ公開された監視方法を役割文脈へ含める": (
+        (RUNTIME_TESTS, "test_start_provisions_context_and_tasks_then_runs_paneless_controller"),
+        (HOOK_TESTS, "test_role_context_includes_role_specific_duties"),
+    ),
+    "マネージャー以外へ艦隊全体の監視方法を渡さない": (
+        (RUNTIME_TESTS, "test_start_provisions_context_and_tasks_then_runs_paneless_controller"),
     ),
     "再起動前の会話を新しい起動世代で使わない": (
         (CORE_TESTS, "test_new_runtime_confirmation_does_not_reactivate_old_session"),
