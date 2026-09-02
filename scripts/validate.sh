@@ -4,6 +4,7 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CORE="$ROOT/plugins/agent-fleet-core"
 HERDR="$ROOT/plugins/agent-fleet-herdr"
+ROLE_CATALOG="$ROOT/tests/fixtures/role-catalog.yml"
 HOOK_PLUGIN="$HERDR/session-hooks-plugin"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agent-fleet-validation.XXXXXX") || exit 2
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -12,10 +13,10 @@ failed=0
 for manifest in \
   "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json" \
   "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.2.11" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.3.0" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
 done
 for manifest in "$HOOK_PLUGIN/.codex-plugin/plugin.json" "$HOOK_PLUGIN/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.2.11" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.3.0" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
 done
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact|fork" and .hooks.SessionStart[0].hooks[0].timeout==12' \
   "$HOOK_PLUGIN/hooks/claude-hooks.json" >/dev/null || failed=1
@@ -34,7 +35,7 @@ test ! -e "$HERDR/view-profiles" || failed=1
 if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
   failed=1
 fi
-jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.2.11")' \
+jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.3.0")' \
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \
@@ -52,16 +53,19 @@ python3 -m unittest discover -s "$HERDR/adapter/tests" -p 'test_*.py' >/dev/null
 python3 -m unittest discover -s "$ROOT/tests" -p 'test_*.py' >/dev/null || failed=1
 
 fleet_json=$(python3 -S "$CORE/spec/scripts/validate_fleet.py" \
-  "$ROOT/configs/fleets/development-squad.yml" --output-json) || failed=1
+  "$ROOT/configs/fleets/development-squad.yml" \
+  --role-catalog "$ROLE_CATALOG" --output-json) || failed=1
 view_profile_json=$(yq -o=json '.' "$ROOT/configs/view-profiles/development-focus.v1.yml") || failed=1
 if [ -n "${fleet_json:-}" ]; then
   "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" \
     fleet.provision --config "$ROOT/configs/fleets/development-squad.yml" \
+    --role-catalog "$ROLE_CATALOG" \
     > "$TMP_ROOT/core.json" || failed=1
   jq -e '.ok==true and .result.members==5 and .result.tasks==4' "$TMP_ROOT/core.json" >/dev/null || failed=1
 
   "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/deadline.sqlite3" \
     fleet.provision --config "$ROOT/configs/fleets/development-squad.yml" \
+    --role-catalog "$ROLE_CATALOG" \
     >/dev/null || failed=1
   "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/deadline.sqlite3" task.assign \
     --fleet development-squad --task architecture-advice --agent-ref advisor \
@@ -138,6 +142,7 @@ if [ -n "${fleet_json:-}" ]; then
 fi
 
 "$HERDR/adapter/scripts/fleet-runtime" list \
+  --role-catalog "$ROLE_CATALOG" \
   --core-command "$CORE/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
   --profile-dir "$ROOT/configs/view-profiles" \
@@ -145,6 +150,7 @@ fi
 jq -e '.ok==true and (.result|length)==3 and all(.result[]; .profile_resolved==true)' \
   "$TMP_ROOT/fleet-list.json" >/dev/null || failed=1
 "$HERDR/adapter/scripts/fleet-runtime" plan development-squad \
+  --role-catalog "$ROLE_CATALOG" \
   --core-command "$CORE/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
   --profile-dir "$ROOT/configs/view-profiles" \
@@ -160,6 +166,7 @@ mkdir -p "$TMP_ROOT/separate/core" "$TMP_ROOT/separate/herdr"
 cp -R "$CORE/." "$TMP_ROOT/separate/core/"
 cp -R "$HERDR/." "$TMP_ROOT/separate/herdr/"
 "$TMP_ROOT/separate/herdr/adapter/scripts/fleet-runtime" list \
+  --role-catalog "$ROLE_CATALOG" \
   --core-command "$TMP_ROOT/separate/core/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
   --profile-dir "$ROOT/configs/view-profiles" \

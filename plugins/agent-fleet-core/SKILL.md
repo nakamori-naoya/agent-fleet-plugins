@@ -11,10 +11,11 @@ Fleet Specはdesired state、SQLiteは実行時のlogical stateとして分け�
 
 ```bash
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-/absolute/path/to/agent-fleet-core}"
-python3 "${PLUGIN_ROOT}/spec/scripts/validate_fleet.py" fleet.yml --output-json
+python3 "${PLUGIN_ROOT}/spec/scripts/validate_fleet.py" fleet.yml \
+  --role-catalog /absolute/path/to/builtin@1.json --output-json
 ```
 
-成功したnormalized JSONだけをCoreへ渡す。未知field、重複member/task、参照切れ、task依存cycle、manager/advisorのrole不一致を修正するまでprovisionしない。
+成功したnormalized JSONだけをCoreへ渡す。未知field、重複member/task、参照切れ、task依存cycle、Role Catalogに存在しない`role_ref`、マネージャーに必要な権限不足を修正するまでprovisionしない。役割の本文はFleet内に定義せず、`agent-roles`が書き出した検査済みCatalogから解決する。
 
 ## Coreを操作する
 

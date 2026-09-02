@@ -52,7 +52,11 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def load_fleet_config(path: Path, validator_command: Path | None = None) -> Mapping[str, Any]:
+def load_fleet_config(
+    path: Path,
+    validator_command: Path | None = None,
+    role_catalog: Path | None = None,
+) -> Mapping[str, Any]:
     """Validate fleet.yml through the stable spec CLI and return normalized JSON."""
 
     validator = validator_command or (
@@ -60,8 +64,12 @@ def load_fleet_config(path: Path, validator_command: Path | None = None) -> Mapp
     )
     if not validator.is_file():
         raise FleetError(f"fleet spec validator not found: {validator}")
+    argv = [sys.executable, str(validator), str(path)]
+    if role_catalog is not None:
+        argv.extend(["--role-catalog", str(role_catalog)])
+    argv.append("--output-json")
     completed = subprocess.run(
-        [sys.executable, str(validator), str(path), "--output-json"],
+        argv,
         check=False,
         capture_output=True,
         text=True,
@@ -368,6 +376,10 @@ class FleetStore:
                 if not agent_ref or not role_ref:
                     raise FleetError("member agent_ref and role_ref are required")
                 metadata = dict(item.get("metadata") or {})
+                role_definition = item.get("role_definition")
+                if not isinstance(role_definition, Mapping):
+                    raise FleetError("member role_definition is required")
+                metadata["role_definition"] = dict(role_definition)
                 db.execute(
                     "INSERT INTO members(fleet_id,agent_ref,role_ref,is_manager,metadata_json) VALUES(?,?,?,?,?)",
                     (
@@ -540,7 +552,7 @@ class FleetStore:
         db: sqlite3.Connection, fleet_id: str, agent_ref: str
     ) -> dict[str, Any]:
         member = db.execute(
-            "SELECT m.role_ref,c.context_revision FROM members m "
+            "SELECT m.role_ref,m.metadata_json,c.context_revision FROM members m "
             "JOIN member_context_state c ON c.fleet_id=m.fleet_id "
             "AND c.agent_ref=m.agent_ref WHERE m.fleet_id=? AND m.agent_ref=?",
             (fleet_id, agent_ref),
@@ -570,10 +582,18 @@ class FleetStore:
                     "completion_criteria": json.loads(task["completion_criteria_json"]),
                 }
             )
+        member_metadata = json.loads(member["metadata_json"])
+        role_definition = member_metadata.get("role_definition")
+        if not isinstance(role_definition, Mapping):
+            raise FleetError("resolved role definition is unavailable")
         return {
             "fleet_id": fleet_id,
             "context_revision": member["context_revision"],
-            "agent": {"agent_ref": agent_ref, "role_ref": member["role_ref"]},
+            "agent": {
+                "agent_ref": agent_ref,
+                "role_ref": member["role_ref"],
+                "role_definition": dict(role_definition),
+            },
             "fleet": {
                 "objective": fleet["objective"],
                 "completion_criteria": json.loads(fleet["completion_criteria_json"]),
@@ -2291,8 +2311,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="action", required=True)
     validate = sub.add_parser("spec.validate")
     validate.add_argument("--config", type=Path, required=True)
+    validate.add_argument("--role-catalog", type=Path, required=True)
     init = sub.add_parser("init", aliases=["fleet.provision"])
     init.add_argument("--config", type=Path, required=True)
+    init.add_argument("--role-catalog", type=Path, required=True)
     status = sub.add_parser("status", aliases=["fleet.reconcile"])
     status.add_argument("--fleet", required=True)
     task_list = sub.add_parser("task.list")
@@ -2414,12 +2436,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.action == "spec.validate":
-            result = load_fleet_config(args.config)
+            result = load_fleet_config(args.config, role_catalog=args.role_catalog)
             print(json.dumps({"ok": True, "result": result}, sort_keys=True))
             return 0
         store = FleetStore(args.db)
         if args.action in {"init", "fleet.provision"}:
-            result = store.initialize(load_fleet_config(args.config))
+            result = store.initialize(
+                load_fleet_config(args.config, role_catalog=args.role_catalog)
+            )
         elif args.action in {"status", "fleet.reconcile"}:
             result = store.status(args.fleet)
         elif args.action == "task.list":

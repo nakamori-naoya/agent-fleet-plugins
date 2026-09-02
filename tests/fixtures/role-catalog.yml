@@ -1,0 +1,81 @@
+apiVersion: roles.harness/v1
+kind: RoleCatalog
+metadata:
+  name: test
+  version: 1
+spec:
+  artifactTypes: [assignment, work_result, advice]
+  roles:
+    - id: coordinator
+      version: 1
+      produces: decision
+      mission: 目的と完了条件を保持して最終判断を行う
+      responsibilities: [担当を決める, 成果を受容する]
+      forbidden: [作業成果を自分で実装する]
+      authority: [assign, accept, reject]
+      receives: [work_result, advice]
+      sends: [assignment]
+    - id: builder
+      version: 1
+      produces: artifact
+      mission: 割り当てられた成果物を作る
+      responsibilities: [成果と検証結果を報告する]
+      forbidden: [完了条件を書き換える]
+      authority: [work]
+      receives: [assignment]
+      sends: [work_result]
+    - id: consultant
+      version: 1
+      produces: opinion
+      mission: 判断材料を増やす
+      responsibilities: [選択肢を示す]
+      forbidden: [成果物を受容する]
+      authority: [consult]
+      receives: [assignment]
+      sends: [advice]
+    - id: manager
+      version: 1
+      produces: decision
+      mission: 目的と完了条件を保持して最終判断を行う
+      responsibilities: [担当を決める, 成果を受容する]
+      forbidden: [作業成果を自分で実装する]
+      authority: [assign, accept, reject]
+      receives: [work_result, advice]
+      sends: [assignment]
+    - id: worker
+      version: 1
+      produces: artifact
+      mission: 割り当てられた成果物を作る
+      responsibilities: [成果と検証結果を報告する]
+      forbidden: [完了条件を書き換える]
+      authority: [work]
+      receives: [assignment]
+      sends: [work_result]
+    - id: advisor
+      version: 1
+      produces: opinion
+      mission: 選択肢とトレードオフを示す
+      responsibilities: [判断材料を報告する]
+      forbidden: [成果を受容する]
+      authority: [consult]
+      receives: [assignment]
+      sends: [advice]
+    - id: reviewer
+      version: 1
+      produces: refutation
+      mission: 成果物を独立して反証する
+      responsibilities: [再現可能な欠陥を報告する]
+      forbidden: [指摘した問題を自分で修正する]
+      authority: [block_acceptance]
+      receives: [assignment]
+      sends: [work_result]
+  relations:
+    - {from: coordinator, to: builder, permits: [assign], sends: [assignment]}
+    - {from: builder, to: coordinator, permits: [], sends: [work_result]}
+    - {from: consultant, to: coordinator, permits: [], sends: [advice]}
+  exchange:
+    maxRounds: 2
+    unresolved: escalate
+    blockedAcceptanceRequires: [rework]
+    duplicates: {}
+  isolation: {}

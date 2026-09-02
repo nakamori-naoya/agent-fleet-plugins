@@ -7,7 +7,7 @@ description: logical agent_refをHerdr 0.8のworkspace、tab、pane、agentへ�
 
 ## 利用者向けの統合入口
 
-複数のFleet設定を保持して選択起動する場合は`scripts/fleet-runtime`を使う。既定では`~/.config/agent-fleet/fleets`と`~/.config/agent-fleet/view-profiles`を読む。別の場所は`--fleet-dir`と`--profile-dir`で指定する。
+複数のFleet設定を保持して選択起動する場合は`scripts/fleet-runtime`を使う。既定では`~/.config/agent-fleet/fleets`と`~/.config/agent-fleet/view-profiles`を読む。別の場所は`--fleet-dir`と`--profile-dir`で指定する。役割定義は`agent-roles`が書き出した検査済みCatalogを`--role-catalog`または`AGENT_ROLES_CATALOG`で明示する。pluginのinstall先を暗黙探索しない。
 
 `init`は利用者の設定・状態directoryだけを作り、Fleetを埋め込まない。`doctor`は設定directory、Core CLI、Herdr、状態directoryを診断する。`list`は設定と解決状態を列挙する。`plan <fleet_id>`はファイル、内容要約値、pane計画を返し、DBもdirectoryも作らない。`start <fleet_id> --execute`はCore、Herdr、役割文脈、初期タスクを冪等に準備し、paneを持たない配送制御をforegroundで続ける。`status <fleet_id>`はCoreとHerdrの公開CLIを通して状態を結合する。同じ内容で再起動した場合はpaneを増やさず配送制御を再開し、内容が変わっていれば暗黙適用せず競合として止める。`stop`はCoreの履歴を残してworkspaceを閉じ、`remove`は再構成のためCore状態も明示的に削除する。
 

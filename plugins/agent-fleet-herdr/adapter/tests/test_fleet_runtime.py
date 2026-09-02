@@ -138,8 +138,10 @@ class FleetRuntimeTest(unittest.TestCase):
         self.fleets = self.root / "fleets"
         self.profiles = self.root / "profiles"
         self.state = self.root / "state"
+        self.role_catalog = self.root / "role-catalog.yml"
         self.fleets.mkdir()
         self.profiles.mkdir()
+        self.role_catalog.write_text("fixture: true\n", encoding="utf-8")
         (self.fleets / "review.yml").write_text(json.dumps(FLEET), encoding="utf-8")
         (self.profiles / "review-grid.yml").write_text(
             json.dumps(PROFILE), encoding="utf-8"
@@ -151,7 +153,11 @@ class FleetRuntimeTest(unittest.TestCase):
     def test_catalog_resolves_fleet_to_versioned_profile(self):
         runner = FakeRunner()
         runtime = fleet_runtime.FleetRuntime(
-            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+            ["fleet-control"],
+            ["fleet-herdr"],
+            ["fleet-controller"],
+            runner=runner,
+            role_catalog=self.role_catalog,
         )
         resolved = runtime.resolve(
             "review", [self.fleets], [self.profiles], self.state
@@ -195,10 +201,17 @@ class FleetRuntimeTest(unittest.TestCase):
     def test_each_fleet_file_has_a_stable_start_command(self):
         runner = FakeRunner()
         runtime = fleet_runtime.FleetRuntime(
-            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+            ["fleet-control"],
+            ["fleet-herdr"],
+            ["fleet-controller"],
+            runner=runner,
+            role_catalog=self.role_catalog,
         )
         result = runtime.list_configs([self.fleets], [self.profiles], self.state)
-        self.assertEqual("fleet-runtime start review --execute", result[0]["start_command"])
+        self.assertEqual(
+            f"fleet-runtime start review --role-catalog {self.role_catalog} --execute",
+            result[0]["start_command"],
+        )
 
     def test_cli_defaults_only_to_user_configuration_directories(self):
         runtime = mock.Mock()
@@ -209,13 +222,64 @@ class FleetRuntimeTest(unittest.TestCase):
             mock.patch.object(fleet_runtime, "FleetRuntime", return_value=runtime),
             mock.patch("sys.stdout", stdout),
         ):
-            result = fleet_runtime.main(["list"])
+            result = fleet_runtime.main(
+                ["list", "--role-catalog", str(self.role_catalog)]
+            )
 
         self.assertEqual(0, result)
         fleet_dirs, profile_dirs, _state_dir = runtime.list_configs.call_args.args
         self.assertEqual([self.root / ".config/agent-fleet/fleets"], fleet_dirs)
         self.assertEqual([self.root / ".config/agent-fleet/view-profiles"], profile_dirs)
         self.assertNotIn("plugins", str(profile_dirs))
+
+    def test_runtime_passes_explicit_role_catalog_to_core(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"],
+            ["fleet-herdr"],
+            ["fleet-controller"],
+            runner=runner,
+            role_catalog=self.role_catalog,
+        )
+        runtime.resolve("review", [self.fleets], [self.profiles], self.state)
+        validation = next(call for call in runner.calls if "spec.validate" in call)
+        self.assertEqual(
+            str(self.role_catalog),
+            validation[validation.index("--role-catalog") + 1],
+        )
+
+    def test_status_detects_role_catalog_drift(self):
+        manifest = self.state / "runtimes" / "review.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            json.dumps(
+                {
+                    "phase": "active",
+                    "fleet_path": str(self.fleets / "review.yml"),
+                    "fleet_source_hash": fleet_runtime._content_hash(FLEET),
+                    "profile_path": str(self.profiles / "review-grid.yml"),
+                    "profile_hash": fleet_runtime._content_hash(PROFILE),
+                    "role_catalog_path": str(self.role_catalog),
+                    "role_catalog_hash": fleet_runtime._content_hash(
+                        {"fixture": True}
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"],
+            ["fleet-herdr"],
+            ["fleet-controller"],
+            runner=FakeRunner(),
+            role_catalog=self.role_catalog,
+        )
+
+        self.assertEqual("active", runtime.status("review", self.state)["status"])
+        self.role_catalog.write_text("fixture: changed\n", encoding="utf-8")
+        self.assertEqual(
+            "configuration_drift", runtime.status("review", self.state)["status"]
+        )
 
     def test_start_provisions_context_and_tasks_then_runs_paneless_controller(self):
         runner = FakeRunner()

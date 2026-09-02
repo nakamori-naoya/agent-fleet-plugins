@@ -5,7 +5,7 @@ description: SQLiteを正本としてfleet、logical agent、task、event、type
 
 # Fleet control runtime
 
-`scripts/fleet-control --db <path> fleet.provision --config fleet.yml` で初期化する。Coreは `../spec/scripts/validate_fleet.py <fleet.yml> --output-json` をsubprocess実行し、検査済みnormalized JSONだけをDBへ反映する。未検査YAMLのfallback parseはしない。同じFleet IDと同じ内容の再初期化は冪等成功とし、同じIDで内容が違う場合は拒否する。`spec.validate`は状態を変更せず検査済みFleet JSONを返す。
+`scripts/fleet-control --db <path> fleet.provision --config fleet.yml --role-catalog <catalog.json>` で初期化する。Coreは `../spec/scripts/validate_fleet.py <fleet.yml> --role-catalog <catalog.json> --output-json` をsubprocess実行し、Role Catalogから役割定義を解決したnormalized JSONだけをDBへ反映する。未検査YAMLのfallback parseはしない。同じFleet IDと同じ解決結果の再初期化は冪等成功とし、同じIDでFleetまたはRole Catalogの内容が違う場合は拒否する。`spec.validate`は状態を変更せず検査済みFleet JSONを返す。
 
 memberは再利用可能な役割を `role_ref` で参照する。taskは `pending -> assigned -> running -> blocked|reported|failed` と進み、マネージャーの`task.accept`だけが`reported -> accepted`を成立させる。`blocked -> running`と、差し戻しによる`reported -> running`を許可し、その他の逆行や終端状態からの更新は拒否する。割当済みagentだけが`task.report --agent-ref <self>`を実行でき、完了・失敗・blockedは明示reportを必要とする。`assigned`、`blocked`、`reported`から`running`への移行は目的、役割、担当、完了条件を変えないため役割文脈を改訂せず、作業中のagentへ文脈同期を割り込ませない。終端報告はマネージャー宛て指示として同じtransactionで保存する。
 

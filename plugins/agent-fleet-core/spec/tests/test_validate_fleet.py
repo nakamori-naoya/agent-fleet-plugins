@@ -13,6 +13,7 @@ from pathlib import Path
 SPEC_DIR = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = SPEC_DIR / "scripts" / "validate_fleet.py"
 EXAMPLE_PATH = SPEC_DIR.parents[2] / "configs" / "fleets" / "release-readiness.yml"
+CATALOG_PATH = SPEC_DIR.parents[2] / "tests" / "fixtures" / "role-catalog.yml"
 
 module_spec = importlib.util.spec_from_file_location("validate_fleet", VALIDATOR_PATH)
 assert module_spec is not None and module_spec.loader is not None
@@ -79,12 +80,26 @@ class FleetValidatorTest(unittest.TestCase):
         self.assertIn("spec.tasks[0].completion_criteria: is required", errors)
 
     def test_cli_emits_normalized_json(self) -> None:
-        result = subprocess.run(
-            [sys.executable, str(VALIDATOR_PATH), str(EXAMPLE_PATH), "--output-json"],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        document = copy.deepcopy(self.valid)
+        document["spec"]["members"][0]["role_ref"] = "coordinator@1"
+        for member in document["spec"]["members"][1:]:
+            member["role_ref"] = "builder@1"
+        with tempfile.TemporaryDirectory() as directory:
+            fleet_path = Path(directory) / "fleet.yml"
+            fleet_path.write_text(json.dumps(document), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(VALIDATOR_PATH),
+                    str(fleet_path),
+                    "--role-catalog",
+                    str(CATALOG_PATH),
+                    "--output-json",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("", result.stderr)
         normalized = json.loads(result.stdout)
@@ -92,17 +107,33 @@ class FleetValidatorTest(unittest.TestCase):
         self.assertEqual("Fleet", normalized["kind"])
         self.assertEqual("release-readiness", normalized["metadata"]["id"])
         self.assertEqual("manager-1", normalized["spec"]["members"][0]["agent_ref"])
-        self.assertEqual("manager@1", normalized["spec"]["members"][0]["role_ref"])
+        manager = normalized["spec"]["members"][0]
+        self.assertEqual("coordinator@1", manager["role_ref"])
+        self.assertEqual(
+            "目的と完了条件を保持して最終判断を行う",
+            manager["role_definition"]["mission"],
+        )
+        self.assertEqual("test@1", normalized["resolved_role_catalog"]["ref"])
         self.assertEqual("verify-candidate", normalized["spec"]["tasks"][0]["id"])
 
     def test_invalid_cli_uses_exit_2_stderr_and_empty_stdout(self) -> None:
         document = copy.deepcopy(self.valid)
         document["spec"]["tasks"][0]["assignee"] = "missing"
+        document["spec"]["members"][0]["role_ref"] = "coordinator@1"
+        for member in document["spec"]["members"][1:]:
+            member["role_ref"] = "builder@1"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fleet.yml"
             path.write_text(json.dumps(document), encoding="utf-8")
             result = subprocess.run(
-                [sys.executable, str(VALIDATOR_PATH), str(path), "--output-json"],
+                [
+                    sys.executable,
+                    str(VALIDATOR_PATH),
+                    str(path),
+                    "--role-catalog",
+                    str(CATALOG_PATH),
+                    "--output-json",
+                ],
                 text=True,
                 capture_output=True,
                 check=False,
@@ -137,13 +168,11 @@ class FleetValidatorTest(unittest.TestCase):
             )
         )
 
-    def test_accepts_each_versioned_role_ref_kind(self) -> None:
+    def test_accepts_any_safe_versioned_role_ref_shape(self) -> None:
         for role_ref in (
             "manager@1",
-            "advisor@2",
-            "worker@10",
-            "reviewer@3",
-            "researcher@99",
+            "builder@2",
+            "security-reviewer@10",
         ):
             with self.subTest(role_ref=role_ref):
                 errors = self.errors_for(
@@ -155,12 +184,12 @@ class FleetValidatorTest(unittest.TestCase):
                     any("spec.members[1].role_ref: must match" in error for error in errors)
                 )
 
-    def test_rejects_unversioned_or_unknown_role_ref(self) -> None:
+    def test_rejects_malformed_role_ref(self) -> None:
         for role_ref in (
             "manager",
             "manager@0",
             "worker@01",
-            "custom@1",
+            "Custom@1",
             "worker@1.0",
         ):
             with self.subTest(role_ref=role_ref):
@@ -173,6 +202,31 @@ class FleetValidatorTest(unittest.TestCase):
                     any("spec.members[1].role_ref: must match" in error for error in errors)
                 )
 
+    def test_catalog_rejects_missing_role_ref(self) -> None:
+        document = copy.deepcopy(self.valid)
+        document["spec"]["members"][0]["role_ref"] = "coordinator@1"
+        document["spec"]["members"][1]["role_ref"] = "missing@1"
+        errors = validator.resolve_role_definitions(
+            document, validator.load_yaml(CATALOG_PATH)
+        )[1]
+        self.assertIn(
+            "spec.members[1].role_ref: 'missing@1' does not exist in Role Catalog test@1",
+            errors,
+        )
+
+    def test_manager_is_selected_by_authority_not_role_name(self) -> None:
+        document = copy.deepcopy(self.valid)
+        document["spec"]["members"][0]["role_ref"] = "coordinator@1"
+        for member in document["spec"]["members"][1:]:
+            member["role_ref"] = "builder@1"
+        normalized, errors = validator.resolve_role_definitions(
+            document, validator.load_yaml(CATALOG_PATH)
+        )
+        self.assertEqual([], errors)
+        self.assertEqual(
+            ["assign", "accept", "reject"],
+            normalized["spec"]["members"][0]["role_definition"]["authority"],
+        )
     def test_rejects_free_text_role_field(self) -> None:
         def mutate(doc):
             member = doc["spec"]["members"][1]
@@ -231,33 +285,13 @@ class FleetValidatorTest(unittest.TestCase):
         )
         self.assertIn("spec.collaboration.manager: unknown agent_ref 'missing'", unknown_errors)
 
-    def test_manager_member_requires_manager_role_ref(self) -> None:
-        errors = self.errors_for(
-            lambda doc: doc["spec"]["members"][0].__setitem__("role_ref", "worker@1")
-        )
-        self.assertIn(
-            "spec.collaboration.manager: member 'manager-1' must use a "
-            "manager@<version> role_ref",
-            errors,
-        )
-
-    def test_advisor_member_requires_advisor_role_ref(self) -> None:
-        def valid_advisor(doc):
-            doc["spec"]["members"][2]["role_ref"] = "advisor@2"
+    def test_fleet_does_not_infer_responsibility_from_role_name(self) -> None:
+        def use_catalog_owned_names(doc):
+            doc["spec"]["members"][0]["role_ref"] = "coordinator@1"
+            doc["spec"]["members"][2]["role_ref"] = "consultant@1"
             doc["spec"]["collaboration"]["advisor"] = "worker-2"
 
-        self.assertEqual([], self.errors_for(valid_advisor))
-
-        mismatch_errors = self.errors_for(
-            lambda doc: doc["spec"]["collaboration"].__setitem__(
-                "advisor", "worker-2"
-            )
-        )
-        self.assertIn(
-            "spec.collaboration.advisor: member 'worker-2' must use an "
-            "advisor@<version> role_ref",
-            mismatch_errors,
-        )
+        self.assertEqual([], self.errors_for(use_catalog_owned_names))
 
     def test_runtime_is_adapter_neutral_but_rejects_unknown_fields(self) -> None:
         def add_state(doc):

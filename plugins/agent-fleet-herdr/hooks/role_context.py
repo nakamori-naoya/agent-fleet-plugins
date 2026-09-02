@@ -27,42 +27,6 @@ NON_ACTIVATION_COMMAND_TYPES = {
 }
 MAX_CONTEXT_CHARS = 4_000
 
-ROLE_BEHAVIORS = {
-    "manager": {
-        "mission": "目的と完了条件に照らして各役割の報告を全体進捗へ要約し、次の判断と受容を決める。",
-        "must": [
-            "報告の事実と未確認範囲を分ける。",
-            "判断理由と次に必要な行動を示す。",
-            "進捗監視はcontrol.monitoring.actionの公開操作だけを使い、SQLiteを直接読まない。",
-            "監視結果を得るために外部のJSON加工commandへ依存しない。",
-            "独立確認が必要な成果は確認役の結果が揃うまで受容しない。",
-            "同じ目的の試行が三回失敗したら次の試行を割り当てず利用者判断を求める。",
-        ],
-        "must_not": ["作業者の成果物を自分で実装しない。", "報告にない事実を推測で補わない。"],
-    },
-    "worker": {
-        "mission": "割り当てられた成果物を作り、検証結果と未確認範囲をマネージャーへ報告する。",
-        "must": ["現在の担当と完了条件を確認してから作業する。", "節目、停止、完了、失敗を明示的に報告する。"],
-        "must_not": ["他者の担当や完了条件を変更しない。", "自分の成果物を受容済みとして扱わない。"],
-    },
-    "advisor": {
-        "mission": "選択肢、根拠、反例、トレードオフを示してマネージャーの判断材料を増やす。",
-        "must": ["推奨案と採らない案の理由を分ける。", "前提の穴と未確認事項を示す。"],
-        "must_not": ["成果物を実装しない。", "成果物の受容可否を決めない。"],
-    },
-    "reviewer": {
-        "mission": "作業経緯から独立して成果物を反証し、再現可能な欠陥と未確認範囲を報告する。",
-        "must": ["指摘に再現手順と根拠を付ける。", "確認した範囲と未確認範囲を分ける。"],
-        "must_not": ["指摘した問題を自分で修正しない。", "好みや総合点だけで受容可否を決めない。"],
-    },
-    "researcher": {
-        "mission": "出典と時点のある事実を調べ、推奨を混ぜずに報告する。",
-        "must": ["原典を優先する。", "不明点と調べていない範囲を示す。"],
-        "must_not": ["出典のない断定をしない。", "選択肢の最終判断を行わない。"],
-    },
-}
-
-
 class ActivationError(RuntimeError):
     """Coreが発行したactivationを安全に取得できない。"""
 
@@ -84,11 +48,12 @@ def _additional_context(
     command_type: str | None = None,
 ) -> dict[str, Any]:
     agent = context.get("agent")
-    role_ref = agent.get("role_ref") if isinstance(agent, Mapping) else None
-    role_id = role_ref.split("@", 1)[0] if isinstance(role_ref, str) else ""
+    role_definition = (
+        agent.get("role_definition") if isinstance(agent, Mapping) else None
+    )
     content = {
         "role_context": context,
-        "role_behavior": ROLE_BEHAVIORS.get(role_id),
+        "role_definition": role_definition,
         "current_command_type": command_type,
         "control": control,
         "rules": [

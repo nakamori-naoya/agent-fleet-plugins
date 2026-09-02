@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -17,7 +19,7 @@ class FleetLoadError(Exception):
 
 
 ROLE_REF_PATTERN = re.compile(
-    r"^(manager|advisor|worker|reviewer|researcher)@[1-9][0-9]*$"
+    r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*@[1-9][0-9]*$"
 )
 VIEW_PROFILE_REF_PATTERN = re.compile(
     r"^[a-z][a-z0-9-]*(?:/[a-z][a-z0-9-]*)?@[1-9][0-9]*$"
@@ -148,7 +150,7 @@ def _members(value: Any, errors: list[str]) -> dict[str, str]:
         if _non_empty_string(role_ref) and ROLE_REF_PATTERN.fullmatch(role_ref) is None:
             errors.append(
                 f"{member_path}.role_ref: must match "
-                "'^(manager|advisor|worker|reviewer|researcher)@[1-9][0-9]*$'"
+                "'<role-id>@<positive-version>'"
             )
         if "model" in member:
             _string(member["model"], f"{member_path}.model", errors)
@@ -294,23 +296,11 @@ def _collaboration(
         _string(manager, f"{path}.manager", errors)
     if _non_empty_string(manager) and manager not in members_by_ref:
         errors.append(f"{path}.manager: unknown agent_ref {manager!r}")
-    elif _non_empty_string(manager):
-        role_ref = members_by_ref[manager]
-        if ROLE_REF_PATTERN.fullmatch(role_ref) and not role_ref.startswith("manager@"):
-            errors.append(
-                f"{path}.manager: member {manager!r} must use a manager@<version> role_ref"
-            )
     advisor = collaboration.get("advisor")
     if "advisor" in collaboration:
         _string(advisor, f"{path}.advisor", errors)
     if _non_empty_string(advisor) and advisor not in members_by_ref:
         errors.append(f"{path}.advisor: unknown agent_ref {advisor!r}")
-    elif _non_empty_string(advisor):
-        role_ref = members_by_ref[advisor]
-        if ROLE_REF_PATTERN.fullmatch(role_ref) and not role_ref.startswith("advisor@"):
-            errors.append(
-                f"{path}.advisor: member {advisor!r} must use an advisor@<version> role_ref"
-            )
 
     if "reporting" not in collaboration:
         return
@@ -441,13 +431,135 @@ def normalize_document(document: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(document, ensure_ascii=False))
 
 
+ROLE_DEFINITION_FIELDS = {
+    "id",
+    "version",
+    "produces",
+    "mission",
+    "responsibilities",
+    "forbidden",
+    "authority",
+    "receives",
+    "sends",
+}
+
+
+def resolve_role_definitions(
+    document: dict[str, Any], catalog: Any
+) -> tuple[dict[str, Any], list[str]]:
+    """Resolve versioned role references from the public Role Catalog contract."""
+    normalized = normalize_document(document)
+    errors: list[str] = []
+    if not isinstance(catalog, dict):
+        return normalized, ["role catalog: must be a mapping"]
+    if catalog.get("apiVersion") != "roles.harness/v1" or catalog.get("kind") != "RoleCatalog":
+        return normalized, ["role catalog: unsupported apiVersion or kind"]
+    metadata = catalog.get("metadata")
+    spec = catalog.get("spec")
+    if not isinstance(metadata, dict) or not isinstance(spec, dict):
+        return normalized, ["role catalog: metadata and spec must be mappings"]
+    name = metadata.get("name")
+    version = metadata.get("version")
+    if not isinstance(name, str) or not name or not isinstance(version, int) or version < 1:
+        return normalized, ["role catalog: metadata name/version is invalid"]
+    catalog_ref = f"{name}@{version}"
+    roles = spec.get("roles")
+    if not isinstance(roles, list):
+        return normalized, ["role catalog: spec.roles must be a list"]
+
+    by_ref: dict[str, dict[str, Any]] = {}
+    for index, raw_role in enumerate(roles):
+        if not isinstance(raw_role, dict):
+            errors.append(f"role catalog spec.roles[{index}]: must be a mapping")
+            continue
+        missing = sorted(ROLE_DEFINITION_FIELDS - raw_role.keys())
+        if missing:
+            errors.append(
+                f"role catalog spec.roles[{index}]: missing keys: {', '.join(missing)}"
+            )
+            continue
+        role_id = raw_role.get("id")
+        role_version = raw_role.get("version")
+        if (
+            not isinstance(role_id, str)
+            or IDENTIFIER_PATTERN.fullmatch(role_id) is None
+            or not isinstance(role_version, int)
+            or role_version < 1
+        ):
+            errors.append(f"role catalog spec.roles[{index}]: invalid id/version")
+            continue
+        role_ref = f"{role_id}@{role_version}"
+        if role_ref in by_ref:
+            errors.append(f"role catalog: duplicate role reference {role_ref!r}")
+            continue
+        by_ref[role_ref] = {
+            field: json.loads(json.dumps(raw_role[field], ensure_ascii=False))
+            for field in sorted(ROLE_DEFINITION_FIELDS)
+        }
+
+    fleet_spec = normalized.get("spec")
+    if not isinstance(fleet_spec, dict):
+        return normalized, errors
+    members = fleet_spec.get("members")
+    if not isinstance(members, list):
+        return normalized, errors
+    member_roles: dict[str, dict[str, Any]] = {}
+    for index, member in enumerate(members):
+        if not isinstance(member, dict):
+            continue
+        role_ref = member.get("role_ref")
+        role_definition = by_ref.get(role_ref) if isinstance(role_ref, str) else None
+        if role_definition is None:
+            errors.append(
+                f"spec.members[{index}].role_ref: {role_ref!r} does not exist "
+                f"in Role Catalog {catalog_ref}"
+            )
+            continue
+        member["role_definition"] = role_definition
+        agent_ref = member.get("agent_ref")
+        if isinstance(agent_ref, str):
+            member_roles[agent_ref] = role_definition
+
+    collaboration = fleet_spec.get("collaboration")
+    if isinstance(collaboration, dict):
+        manager_ref = collaboration.get("manager")
+        manager_role = member_roles.get(manager_ref) if isinstance(manager_ref, str) else None
+        if manager_role is not None:
+            authority = manager_role.get("authority")
+            missing_authority = sorted(
+                {"assign", "accept"}
+                - (set(authority) if isinstance(authority, list) else set())
+            )
+            if missing_authority:
+                errors.append(
+                    f"spec.collaboration.manager: member {manager_ref!r} role "
+                    f"must grant authority: {', '.join(missing_authority)}"
+                )
+
+    canonical = json.dumps(
+        catalog, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    normalized["resolved_role_catalog"] = {
+        "apiVersion": "roles.harness/v1",
+        "ref": catalog_ref,
+        "sha256": hashlib.sha256(canonical).hexdigest(),
+    }
+    return normalized, errors
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 3 or argv[2] != "--output-json":
-        print(f"usage: {Path(argv[0]).name} FLEET_YML --output-json", file=sys.stderr)
+    parser = argparse.ArgumentParser(prog=Path(argv[0]).name)
+    parser.add_argument("fleet", type=Path)
+    parser.add_argument("--role-catalog", type=Path, required=True)
+    parser.add_argument("--output-json", action="store_true", required=True)
+    try:
+        args = parser.parse_args(argv[1:])
+    except SystemExit:
         return 2
-    path = Path(argv[1])
+    path = args.fleet
     try:
         document = load_yaml(path)
+        catalog = load_yaml(args.role_catalog)
     except (FleetLoadError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -457,7 +569,11 @@ def main(argv: list[str]) -> int:
         for error in errors:
             print(f"error: {error}", file=sys.stderr)
         return 2
-    normalized = normalize_document(document)
+    normalized, role_errors = resolve_role_definitions(document, catalog)
+    if role_errors:
+        for error in role_errors:
+            print(f"error: {error}", file=sys.stderr)
+        return 2
     print(json.dumps(normalized, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 

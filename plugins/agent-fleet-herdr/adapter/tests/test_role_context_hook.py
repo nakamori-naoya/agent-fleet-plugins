@@ -23,7 +23,18 @@ class RoleContextHookTest(unittest.TestCase):
         self.context = {
             "fleet_id": "demo",
             "context_revision": 3,
-            "agent": {"agent_ref": "worker-1", "role_ref": "worker@1"},
+            "agent": {
+                "agent_ref": "worker-1",
+                "role_ref": "builder@1",
+                "role_definition": {
+                    "id": "builder",
+                    "version": 1,
+                    "mission": "Catalog由来の成果物作成責務",
+                    "responsibilities": ["Catalog由来の検証報告責務"],
+                    "forbidden": ["Catalog由来の完了条件変更禁止"],
+                    "authority": ["work"],
+                },
+            },
             "fleet": {
                 "objective": "Ship verified changes.",
                 "completion_criteria": ["All checks pass."],
@@ -116,12 +127,23 @@ class RoleContextHookTest(unittest.TestCase):
 
         self.assertIn("worker-1", submitted["hookSpecificOutput"]["additionalContext"])
         restored_text = restored["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("worker@1", restored_text)
+        self.assertIn("builder@1", restored_text)
         self.assertIn("fleet-control task.report", restored_text)
 
-    def test_role_context_includes_role_specific_duties(self):
+    def test_role_context_uses_resolved_catalog_definition(self):
         manager_context = copy.deepcopy(self.context)
-        manager_context["agent"] = {"agent_ref": "manager", "role_ref": "manager@1"}
+        manager_context["agent"] = {
+            "agent_ref": "manager",
+            "role_ref": "coordinator@1",
+            "role_definition": {
+                "id": "coordinator",
+                "version": 1,
+                "mission": "Catalog由来の全体判断責務",
+                "responsibilities": ["Catalog由来の受容責務"],
+                "forbidden": ["Catalog由来の実装禁止"],
+                "authority": ["assign", "accept"],
+            },
+        }
 
         worker_text = role_context_hook._additional_context(
             self.context, {}, command_type="context.sync"
@@ -140,15 +162,12 @@ class RoleContextHookTest(unittest.TestCase):
             command_type="task.report",
         )["hookSpecificOutput"]["additionalContext"]
 
-        self.assertIn("割り当てられた成果物", worker_text)
+        self.assertIn("Catalog由来の成果物作成責務", worker_text)
+        self.assertIn("Catalog由来の完了条件変更禁止", worker_text)
         self.assertIn("ツールやSkillを呼び出さず", worker_text)
-        self.assertIn("全体進捗へ要約", manager_text)
-        self.assertIn("作業者の成果物を自分で実装しない", manager_text)
-        self.assertIn("独立確認が必要な成果", manager_text)
-        self.assertIn("三回失敗", manager_text)
+        self.assertIn("Catalog由来の全体判断責務", manager_text)
+        self.assertIn("Catalog由来の実装禁止", manager_text)
         self.assertIn("task.list", manager_text)
-        self.assertIn("SQLiteを直接読まない", manager_text)
-        self.assertIn("外部のJSON加工commandへ依存しない", manager_text)
 
     def test_unrelated_prompt_and_unknown_session_receive_no_fleet_context(self):
         self.assertEqual(

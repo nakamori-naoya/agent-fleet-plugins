@@ -27,8 +27,30 @@ NORMALIZED = {
         "completion_criteria": ["The manager accepts the task evidence."],
         "stop_conditions": ["An irreversible side effect becomes uncertain."],
         "members": [
-            {"agent_ref": "manager", "role_ref": "manager@1"},
-            {"agent_ref": "worker-1", "role_ref": "worker@1"},
+            {
+                "agent_ref": "manager",
+                "role_ref": "coordinator@1",
+                "role_definition": {
+                    "id": "coordinator",
+                    "version": 1,
+                    "mission": "Keep the objective and make final decisions.",
+                    "responsibilities": ["Accept evidence"],
+                    "forbidden": ["Implement worker output"],
+                    "authority": ["assign", "accept"],
+                },
+            },
+            {
+                "agent_ref": "worker-1",
+                "role_ref": "builder@1",
+                "role_definition": {
+                    "id": "builder",
+                    "version": 1,
+                    "mission": "Create the assigned artifact.",
+                    "responsibilities": ["Report verification evidence"],
+                    "forbidden": ["Rewrite completion criteria"],
+                    "authority": ["work"],
+                },
+            },
         ],
         "tasks": [
             {
@@ -53,6 +75,8 @@ class FleetStoreTest(unittest.TestCase):
         self.db = self.root / "fleet.sqlite3"
         self.config = self.root / "fleet.yml"
         self.config.write_text("fixture: true\n", encoding="utf-8")
+        self.catalog = self.root / "role-catalog.yml"
+        self.catalog.write_text("fixture: true\n", encoding="utf-8")
         self.validator = self.root / "validate_fleet.py"
         self.validator.write_text(
             "import json\n"
@@ -83,6 +107,15 @@ class FleetStoreTest(unittest.TestCase):
         self.assertEqual(0o600, stat.S_IMODE(self.db.stat().st_mode))
         self.assertEqual(0o700, stat.S_IMODE(self.root.stat().st_mode))
 
+    def test_role_definition_snapshot_is_in_session_context(self):
+        with self.store.connect() as db:
+            context = self.store._context_capsule(db, "demo", "worker-1")
+        self.assertEqual("builder@1", context["agent"]["role_ref"])
+        self.assertEqual(
+            "Create the assigned artifact.",
+            context["agent"]["role_definition"]["mission"],
+        )
+
     def test_same_fleet_config_initialization_is_idempotent(self):
         result = self.store.initialize(NORMALIZED)
         self.assertTrue(result["idempotent"])
@@ -101,7 +134,15 @@ class FleetStoreTest(unittest.TestCase):
             stdout = __import__("io").StringIO()
             with mock.patch("sys.stdout", stdout):
                 result = fleet_control.main(
-                    ["--db", str(cli_db), "spec.validate", "--config", str(self.config)]
+                    [
+                        "--db",
+                        str(cli_db),
+                        "spec.validate",
+                        "--config",
+                        str(self.config),
+                        "--role-catalog",
+                        str(self.catalog),
+                    ]
                 )
         self.assertEqual(0, result)
         self.assertEqual(NORMALIZED, __import__("json").loads(stdout.getvalue())["result"])
@@ -810,7 +851,9 @@ class FleetStoreTest(unittest.TestCase):
             columns = {row[1] for row in db.execute("PRAGMA table_info(members)")}
         self.assertIn("role_ref", columns)
         self.assertNotIn("role", columns)
-        self.assertEqual("manager@1", self.store.status("demo")["members"][0]["role_ref"])
+        self.assertEqual(
+            "coordinator@1", self.store.status("demo")["members"][0]["role_ref"]
+        )
 
     def test_only_manager_can_enqueue_typed_command_and_target_can_ack(self):
         command = self.store.enqueue_command(
@@ -843,7 +886,7 @@ class FleetStoreTest(unittest.TestCase):
         self.assertEqual({"text": "hello"}, request["spec"]["payload"])
         context = request["spec"]["context"]
         self.assertEqual("worker-1", context["agent"]["agent_ref"])
-        self.assertEqual("worker@1", context["agent"]["role_ref"])
+        self.assertEqual("builder@1", context["agent"]["role_ref"])
         self.assertEqual("Complete the demo safely.", context["fleet"]["objective"])
         self.assertEqual("manager", context["reporting"]["manager_ref"])
         self.assertEqual([], context["assignments"])

@@ -24,26 +24,34 @@ role catalogは別marketplaceの`agent-roles`を使う。Coreだけを使う場�
 
 ## 依存関係
 
-外部pluginは`plugin@marketplace`のidentityで指定する。install commandではversionを固定しない。現在のFleet pluginは0.2.11であり、`roles.harness/v1`のcatalog version 1とHerdr 0.8.xのCLI surfaceを前提とする。
+外部pluginは`plugin@marketplace`のidentityで指定する。install commandではversionを固定しない。現在のFleet pluginは0.3.0であり、`roles.harness/v1`のcatalog version 1とHerdr 0.8.xのCLI surfaceを前提とする。
 
 | 依存 | 必須度 | 用途 |
 |---|---|---|
 | Codex CLIまたはClaude Code | 必須 | marketplaceとpluginのinstall、skill実行 |
 | Python 3.10以上 | 必須 | Fleet validator、Core、Herdr Adapter |
-| `agent-roles@agent-roles` | role付きFleet運用では必須 | `manager@1`、`worker@1`などのRoleDefinition |
+| `agent-roles@agent-roles` 0.1.1以上 | Fleet設定の検査・起動で必須 | `role_ref`を検査済みRole Catalogへ解決し、RoleDefinitionの固定版を提供する |
 | `agent-fleet-core@agent-fleet` | 必須 | Fleet Specの検査、logical state、task、outboxの管理 |
 | `agent-fleet-herdr@agent-fleet` | 任意 | HerdrのRuntimeBinding、ViewPlacement、command配送 |
 | `agent-fleet-session-hooks@agent-fleet` | Codex艦隊では必須 | 艦隊agent sessionだけで役割Hookを登録。通常時はinstall済み・無効にする |
 | Herdr 0.8.x | Herdr Adapterの`--execute`時のみ必須 | local workspace、pane、agentの操作 |
 | PyYAMLまたはRuby標準`yaml` | いずれか必須 | Fleet YAMLの安全な読込 |
 
-`agent-fleet-core`は`agent-roles`やHerdrの内部fileをimportしない。`role_ref`の形式だけを検査し、Herdrとは公開CLI/JSON契約で接続する。このため、利用者が必要な依存pluginを明示的にinstallする。
+`agent-fleet-core`は`agent-roles`やHerdrの内部fileを探索・importしない。利用者が`agent-roles`から書き出した検査済みCatalogを`--role-catalog`で明示し、Coreは`role_ref`の存在と必要な権限を解決する。解決したRoleDefinitionは起動時の固定版としてCoreへ保存し、Hookは内容を変更せず会話へ渡す。Herdrとは公開CLI/JSON契約で接続する。
 
 SQLiteはPython標準libraryを使うため、`sqlite3` CLIの追加installは不要である。repositoryの`bash scripts/validate.sh`を実行する開発者は、追加で`bash`、`jq`、Mike Farah `yq` v4、`rg`を用意する。
 
 ## インストール
 
 先にRole CatalogとCoreをinstallする。Herdr連携を使う場合だけ、Herdr CLIとAdapterを追加する。
+
+`agent-roles`のSkillで検査済みCatalogを利用者領域へ書き出し、Fleet起動時に次のどちらかで指定する。
+
+```bash
+export AGENT_ROLES_CATALOG="$HOME/.config/agent-roles/catalogs/builtin@1.json"
+# または fleet-runtimeの各commandへ次を渡す
+# --role-catalog "$HOME/.config/agent-roles/catalogs/builtin@1.json"
+```
 
 ### Codex
 
@@ -87,7 +95,7 @@ Claude Codeでは`agent-fleet-session-hooks`を通常pluginとしてinstallし�
 
 Coreだけを利用する場合、Herdr CLIと`agent-fleet-herdr`は不要である。Adapterのdry-runはHerdrを実行しないが、`--execute`を使う前に`herdr --version`が0.8.xであることを確認する。
 
-Fleet YAMLの形式例は[manager 1・worker 2の利用者設定](configs/fleets/release-readiness.yml)にある。最初にCore validatorでnormalized JSONへ変換し、Herdr Adapterの`provision`へ渡す。`provision`はdry-runが既定であり、`--execute`を付けない限りHerdrを変更しない。
+Fleet YAMLの形式例は[manager 1・worker 2の利用者設定](configs/fleets/release-readiness.yml)にある。最初にCore validatorへFleet YAMLと検査済みRole Catalogを渡す。Coreは各`role_ref`を解決し、RoleDefinitionとCatalogのidentity・内容hashを含むnormalized JSONへ変換してHerdr Adapterへ渡す。`provision`はdry-runが既定であり、`--execute`を付けない限りHerdrを変更しない。
 
 艦隊編成とpane配置の正本はplugin外の利用者設定である。既定では`~/.config/agent-fleet/fleets`と`~/.config/agent-fleet/view-profiles`を読む。repositoryの[艦隊設定例](configs/fleets/development-squad.yml)と[表示設定例](configs/view-profiles/development-focus.v1.yml)は手元へ複製して編集するための例であり、pluginは自動読込しない。実行時SQLiteもrepository外のstate directoryへ保存する。
 

@@ -11,6 +11,7 @@ DOCUMENTS = (
     ROOT / "docs" / "2026-09-01-エージェント艦隊-役割Hookの実行契機と責務.md",
 )
 CORE_TESTS = ROOT / "plugins" / "agent-fleet-core" / "core" / "tests" / "test_fleet_control.py"
+SPEC_TESTS = ROOT / "plugins" / "agent-fleet-core" / "spec" / "tests" / "test_validate_fleet.py"
 RUNTIME_TESTS = ROOT / "plugins" / "agent-fleet-herdr" / "adapter" / "tests" / "test_fleet_runtime.py"
 ADAPTER_TESTS = ROOT / "plugins" / "agent-fleet-herdr" / "adapter" / "tests" / "test_herdr_adapter.py"
 HOOK_TESTS = ROOT / "plugins" / "agent-fleet-herdr" / "adapter" / "tests" / "test_role_context_hook.py"
@@ -82,12 +83,6 @@ COVERAGE = {
     ),
     "失敗したタスクを自動で再開しない": (
         (CORE_TESTS, "test_reported_task_can_be_returned_to_the_assignee_but_failed_task_stays_terminal"),
-    ),
-    "三回目の失敗後は利用者判断なしに再試行しない": (
-        (HOOK_TESTS, "test_role_context_includes_role_specific_duties"),
-    ),
-    "独立確認が必要な成果を確認結果なしで受容しない": (
-        (HOOK_TESTS, "test_role_context_includes_role_specific_duties"),
     ),
     "現在の役割文脈を確認していないメンバーへ新しい仕事を開始させない": (
         (CORE_TESTS, "test_work_command_waits_until_current_role_context_is_confirmed"),
@@ -168,14 +163,20 @@ COVERAGE = {
         (HOOK_TESTS, "test_consume_retries_signal_exit_or_broken_json_after_core_commit"),
     ),
     "役割ごとの行動境界を現在文脈へ含める": (
-        (HOOK_TESTS, "test_role_context_includes_role_specific_duties"),
+        (HOOK_TESTS, "test_role_context_uses_resolved_catalog_definition"),
+    ),
+    "Role Catalogに存在しない役割参照で艦隊を起動しない": (
+        (SPEC_TESTS, "test_catalog_rejects_missing_role_ref"),
+    ),
+    "起動時に固定したRole Catalogの変更を構成差分として検出する": (
+        (RUNTIME_TESTS, "test_status_detects_role_catalog_drift"),
     ),
     "役割同期だけでは担当作業を開始しない": (
-        (HOOK_TESTS, "test_role_context_includes_role_specific_duties"),
+        (HOOK_TESTS, "test_role_context_uses_resolved_catalog_definition"),
     ),
     "マネージャーへ公開された監視方法を役割文脈へ含める": (
         (RUNTIME_TESTS, "test_start_provisions_context_and_tasks_then_runs_paneless_controller"),
-        (HOOK_TESTS, "test_role_context_includes_role_specific_duties"),
+        (HOOK_TESTS, "test_role_context_uses_resolved_catalog_definition"),
     ),
     "マネージャー以外へ艦隊全体の監視方法を渡さない": (
         (RUNTIME_TESTS, "test_start_provisions_context_and_tasks_then_runs_paneless_controller"),

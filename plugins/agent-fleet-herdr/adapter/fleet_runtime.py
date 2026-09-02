@@ -50,6 +50,10 @@ class ResolvedFleet:
         return _content_hash(self.fleet)
 
     @property
+    def fleet_source_hash(self) -> str:
+        return _content_hash(_load_document(self.fleet_path))
+
+    @property
     def profile_hash(self) -> str:
         return _content_hash(self.profile)
 
@@ -124,6 +128,7 @@ class FleetRuntime:
         runner: Runner = subprocess.run,
         sleeper: Callable[[float], None] = time.sleep,
         hook_source: Path = DEFAULT_HOOK_SOURCE,
+        role_catalog: Path | None = None,
     ):
         self.core_command = tuple(core_command)
         self.herdr_command = tuple(herdr_command)
@@ -131,6 +136,14 @@ class FleetRuntime:
         self.runner = runner
         self.sleeper = sleeper
         self.hook_source = hook_source
+        self.role_catalog = role_catalog
+
+    def _role_catalog_args(self) -> list[str]:
+        return (
+            ["--role-catalog", str(self.role_catalog)]
+            if self.role_catalog is not None
+            else []
+        )
 
     def _agent_core_command(self) -> str:
         argv = list(self.core_command)
@@ -182,6 +195,7 @@ class FleetRuntime:
                     "spec.validate",
                     "--config",
                     str(path),
+                    *self._role_catalog_args(),
                 ],
                 f"Fleet validation ({path})",
             )
@@ -316,7 +330,15 @@ class FleetRuntime:
                     "members": len(spec["members"]),
                     "profile_ref": profile_ref,
                     "profile_resolved": resolved_profile is not None,
-                    "start_command": f"fleet-runtime start {fleet_id} --execute",
+                    "start_command": shlex.join(
+                        [
+                            "fleet-runtime",
+                            "start",
+                            fleet_id,
+                            *self._role_catalog_args(),
+                            "--execute",
+                        ]
+                    ),
                 }
             )
         return rows
@@ -353,6 +375,7 @@ class FleetRuntime:
             "fleet_id": resolved.fleet_id,
             "fleet_path": str(resolved.fleet_path),
             "fleet_hash": resolved.fleet_hash,
+            "fleet_source_hash": resolved.fleet_source_hash,
             "profile_ref": resolved.profile_ref,
             "profile_path": str(resolved.profile_path),
             "profile_hash": resolved.profile_hash,
@@ -524,12 +547,18 @@ class FleetRuntime:
             "fleet_id": resolved.fleet_id,
             "fleet_path": str(resolved.fleet_path),
             "fleet_hash": resolved.fleet_hash,
+            "fleet_source_hash": resolved.fleet_source_hash,
             "profile_ref": resolved.profile_ref,
             "profile_path": str(resolved.profile_path),
             "profile_hash": resolved.profile_hash,
             "cwd": str(Path(cwd).resolve()),
             "agent_kind": agent_kind,
         }
+        if self.role_catalog is not None:
+            desired["role_catalog_path"] = str(self.role_catalog.resolve())
+            desired["role_catalog_hash"] = _content_hash(
+                _load_document(self.role_catalog)
+            )
         phase = "planned"
         runtime_generation = uuid.uuid4().hex
         restarting = False
@@ -598,6 +627,7 @@ class FleetRuntime:
                     "fleet.provision",
                     "--config",
                     str(resolved.fleet_path),
+                    *self._role_catalog_args(),
                 ],
                 "Core fleet provision",
             )
@@ -859,6 +889,13 @@ class FleetRuntime:
         executable = self.core_command[0]
         core_found = Path(executable).is_file() or shutil.which(executable) is not None
         checks.append({"check": "fleet-control", "ok": core_found, "value": executable})
+        checks.append(
+            {
+                "check": "role_catalog",
+                "ok": self.role_catalog is not None and self.role_catalog.is_file(),
+                "path": str(self.role_catalog) if self.role_catalog is not None else None,
+            }
+        )
         herdr_found = shutil.which("herdr") is not None
         herdr_check: dict[str, Any] = {"check": "herdr", "ok": False}
         if herdr_found:
@@ -985,8 +1022,9 @@ class FleetRuntime:
             }
         drift = False
         for path_key, hash_key in (
-            ("fleet_path", "fleet_hash"),
+            ("fleet_path", "fleet_source_hash"),
             ("profile_path", "profile_hash"),
+            ("role_catalog_path", "role_catalog_hash"),
         ):
             configured_path = manifest.get(path_key)
             if not isinstance(configured_path, str) or not Path(configured_path).is_file():
@@ -1040,6 +1078,11 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--fleet-dir", type=Path, action="append")
     common.add_argument("--profile-dir", type=Path, action="append", default=[])
     common.add_argument("--state-dir", type=Path, default=_default_state_dir())
+    common.add_argument(
+        "--role-catalog",
+        type=Path,
+        default=(Path(os.environ["AGENT_ROLES_CATALOG"]) if os.environ.get("AGENT_ROLES_CATALOG") else None),
+    )
     common.add_argument("--core-command", default=core_default)
     common.add_argument(
         "--herdr-command", default=str(adapter_root / "scripts" / "fleet-herdr")
@@ -1079,10 +1122,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     config_root = Path.home() / ".config" / "agent-fleet"
     fleet_dirs = args.fleet_dir or [config_root / "fleets"]
     profile_dirs = args.profile_dir or [config_root / "view-profiles"]
-    runtime = FleetRuntime(
-        [args.core_command], [args.herdr_command], [args.controller_command]
-    )
     try:
+        if args.action in {"list", "plan", "start"} and args.role_catalog is None:
+            raise FleetRuntimeError(
+                "Role Catalog is required: pass --role-catalog or set AGENT_ROLES_CATALOG"
+            )
+        runtime = FleetRuntime(
+            [args.core_command],
+            [args.herdr_command],
+            [args.controller_command],
+            role_catalog=args.role_catalog,
+        )
         if args.action == "init":
             result = runtime.initialize_user_config(
                 fleet_dirs, profile_dirs, args.state_dir
