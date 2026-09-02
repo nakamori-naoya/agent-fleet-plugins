@@ -81,6 +81,13 @@ COVERAGE = {
     "依存する仕事は前のタスクが受容された後に始められる": (
         (CORE_TESTS, "test_accepting_task_releases_newly_unblocked_dependents"),
     ),
+    "マネージャーが未受理の依存タスクを手動で割り当てようとする": (
+        (CORE_TESTS, "test_manual_assignment_rejects_pending_and_reported_dependencies"),
+        (CORE_TESTS, "test_acceptance_releases_multiple_dependencies_and_assignment_retry_is_idempotent"),
+    ),
+    "マネージャーが状態一覧だけで依存関係を監視する": (
+        (CORE_TESTS, "test_task_list_includes_declared_dependencies_in_order_after_acceptance"),
+    ),
     "失敗したタスクを自動で再開しない": (
         (CORE_TESTS, "test_reported_task_can_be_returned_to_the_assignee_but_failed_task_stays_terminal"),
     ),

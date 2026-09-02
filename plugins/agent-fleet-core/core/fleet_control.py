@@ -1144,6 +1144,7 @@ class FleetStore:
     ) -> dict[str, Any]:
         command_id = command_id or str(uuid.uuid4())
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             manager = db.execute(
                 "SELECT is_manager FROM members WHERE fleet_id=? AND agent_ref=?",
                 (fleet_id, manager_ref),
@@ -1185,6 +1186,25 @@ class FleetStore:
                         "command_id": command_id,
                         "idempotent": True,
                     }
+            dependencies = list(
+                db.execute(
+                    "SELECT d.dependency_task_id,dependency.status FROM task_dependencies d "
+                    "JOIN tasks dependency ON dependency.fleet_id=d.fleet_id "
+                    "AND dependency.task_id=d.dependency_task_id "
+                    "WHERE d.fleet_id=? AND d.task_id=? ORDER BY d.rowid",
+                    (fleet_id, task_id),
+                )
+            )
+            unaccepted_dependencies = [
+                f"{dependency['dependency_task_id']} ({dependency['status']})"
+                for dependency in dependencies
+                if dependency["status"] != "accepted"
+            ]
+            if unaccepted_dependencies:
+                raise FleetError(
+                    f"task {task_id!r} cannot be assigned until dependencies are accepted: "
+                    + ", ".join(unaccepted_dependencies)
+                )
             self._require_transition(str(task["status"]), "assigned")
             self._assign_pending_in_tx(
                 db, fleet_id, task_id, agent_ref, manager_ref, command_id
@@ -2152,6 +2172,14 @@ class FleetStore:
             task["completion_criteria"] = json.loads(
                 task.pop("completion_criteria_json")
             )
+            task["depends_on"] = [
+                row["dependency_task_id"]
+                for row in db.execute(
+                    "SELECT dependency_task_id FROM task_dependencies "
+                    "WHERE fleet_id=? AND task_id=? ORDER BY rowid",
+                    (fleet_id, task["task_id"]),
+                )
+            ]
             latest_state_event = db.execute(
                 "SELECT payload_json,created_at FROM events "
                 "WHERE fleet_id=? AND entity_type='task' AND entity_id=? "

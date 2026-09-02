@@ -927,6 +927,140 @@ class FleetStoreTest(unittest.TestCase):
         tasks = {item["task_id"]: item for item in self.store.status("dependent")["tasks"]}
         self.assertEqual("assigned", tasks["task-2"]["status"])
 
+    def test_manual_assignment_rejects_pending_and_reported_dependencies(self):
+        config = copy.deepcopy(NORMALIZED)
+        config["metadata"]["id"] = "dependent"
+        config["spec"]["tasks"].extend(
+            [
+                {
+                    "id": "task-2",
+                    "assignee": "worker-1",
+                    "depends_on": [],
+                    "instructions": "Do the second task.",
+                    "expected_output": "A second verified result.",
+                    "completion_criteria": ["The result includes evidence."],
+                },
+                {
+                    "id": "task-3",
+                    "assignee": "worker-1",
+                    "depends_on": ["task-2", "task-1"],
+                    "instructions": "Do the third task.",
+                    "expected_output": "A third verified result.",
+                    "completion_criteria": ["The result includes evidence."],
+                },
+            ]
+        )
+        self.store.initialize(config)
+        self.store.assign("dependent", "task-2", "worker-1", "manager")
+        self.store.transition_task("dependent", "task-2", "running", "worker-1")
+        self.store.transition_task(
+            "dependent", "task-2", "reported", "worker-1", {"summary": "done"}
+        )
+        with self.assertRaisesRegex(
+            fleet_control.FleetError,
+            "task-2 \\(reported\\), task-1 \\(pending\\)",
+        ):
+            self.store.assign("dependent", "task-3", "worker-1", "manager")
+
+        task = next(
+            item for item in self.store.task_list("dependent")["tasks"]
+            if item["task_id"] == "task-3"
+        )
+        self.assertEqual("pending", task["status"])
+
+    def test_acceptance_releases_multiple_dependencies_and_assignment_retry_is_idempotent(self):
+        config = copy.deepcopy(NORMALIZED)
+        config["metadata"]["id"] = "multiple-dependencies"
+        config["spec"]["tasks"].extend(
+            [
+                {
+                    "id": "task-2",
+                    "assignee": "worker-1",
+                    "depends_on": [],
+                    "instructions": "Do the second task.",
+                    "expected_output": "A second verified result.",
+                    "completion_criteria": ["The result includes evidence."],
+                },
+                {
+                    "id": "task-3",
+                    "assignee": "worker-1",
+                    "depends_on": ["task-2", "task-1"],
+                    "instructions": "Do the third task.",
+                    "expected_output": "A third verified result.",
+                    "completion_criteria": ["The result includes evidence."],
+                },
+            ]
+        )
+        self.store.initialize(config)
+        for task_id in ("task-1", "task-2"):
+            self.store.assign("multiple-dependencies", task_id, "worker-1", "manager")
+            self.store.transition_task(
+                "multiple-dependencies", task_id, "running", "worker-1"
+            )
+            self.store.transition_task(
+                "multiple-dependencies",
+                task_id,
+                "reported",
+                "worker-1",
+                {"summary": f"{task_id} done"},
+            )
+            result = self.store.accept_task(
+                "multiple-dependencies", task_id, "manager", f"accept:{task_id}"
+            )
+            self.assertEqual(
+                [] if task_id == "task-1" else ["task-3"], result["released_tasks"]
+            )
+
+        retry = self.store.assign(
+            "multiple-dependencies",
+            "task-3",
+            "worker-1",
+            "manager",
+            "task-assign:multiple-dependencies:task-3:dependency-release",
+        )
+        self.assertEqual("assigned", retry["status"])
+        self.assertTrue(retry["idempotent"])
+
+    def test_task_list_includes_declared_dependencies_in_order_after_acceptance(self):
+        config = copy.deepcopy(NORMALIZED)
+        config["metadata"]["id"] = "dependency-monitoring"
+        config["spec"]["tasks"].extend(
+            [
+                {
+                    "id": "task-2",
+                    "assignee": "worker-1",
+                    "depends_on": ["task-1"],
+                    "instructions": "Do the second task.",
+                    "expected_output": "A second verified result.",
+                    "completion_criteria": ["The result includes evidence."],
+                },
+                {
+                    "id": "task-3",
+                    "assignee": "worker-1",
+                    "depends_on": ["task-2", "task-1"],
+                    "instructions": "Do the third task.",
+                    "expected_output": "A third verified result.",
+                    "completion_criteria": ["The result includes evidence."],
+                },
+            ]
+        )
+        self.store.initialize(config)
+        self.store.assign("dependency-monitoring", "task-1", "worker-1", "manager")
+        self.store.transition_task("dependency-monitoring", "task-1", "running", "worker-1")
+        self.store.transition_task(
+            "dependency-monitoring", "task-1", "reported", "worker-1", {"summary": "done"}
+        )
+        self.store.accept_task("dependency-monitoring", "task-1", "manager")
+
+        tasks = {
+            item["task_id"]: item
+            for item in self.store.task_list("dependency-monitoring")["tasks"]
+        }
+
+        self.assertEqual([], tasks["task-1"]["depends_on"])
+        self.assertEqual(["task-1"], tasks["task-2"]["depends_on"])
+        self.assertEqual(["task-2", "task-1"], tasks["task-3"]["depends_on"])
+
     def test_blocked_task_can_resume_running(self):
         self.store.assign("demo", "task-1", "worker-1", "manager")
         self.store.transition_task("demo", "task-1", "running", "worker-1")
