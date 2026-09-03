@@ -4,6 +4,8 @@ __pycache__/
 
 # Repository-root allowlist
 /*
+!/LICENSE
+!/SECURITY.md
 !/.agents/
 !/.claude-plugin/
 !/.harness-plugins/
