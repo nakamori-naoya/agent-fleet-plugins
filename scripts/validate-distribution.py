@@ -83,6 +83,30 @@ def reject_symlink_ancestors(root: Path, target: Path) -> None:
             fail(f"source ancestorがsymlinkです: {current}")
 
 
+def declared_catalog_source(root: Path, source: str, plugin_name: str) -> Path:
+    if Path(source).is_absolute():
+        fail(f"catalog sourceは相対pathでなければなりません: {plugin_name}")
+    raw_parts = source.split("/")
+    if len(raw_parts) < 3 or raw_parts[:2] != [".", "plugins"]:
+        fail(f"catalog sourceは./plugins/<canonical segments>形式でなければなりません: {plugin_name}")
+
+    current = root
+    for part in raw_parts[1:]:
+        if part in {"", ".", ".."}:
+            break
+        current /= part
+        try:
+            mode = current.lstat().st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            break
+        if stat.S_ISLNK(mode):
+            fail(f"source ancestorがsymlinkです: {current}")
+
+    if any(part in {"", ".", ".."} or "\\" in part for part in raw_parts[2:]):
+        fail(f"catalog sourceは./plugins/<canonical segments>形式でなければなりません: {plugin_name}")
+    return root.joinpath(*raw_parts[1:])
+
+
 def resolve_declared_path(source_root: Path, value: object, label: str) -> Path:
     if not isinstance(value, str) or not value:
         fail(f"{label}が未宣言です: {source_root}")
@@ -210,11 +234,7 @@ def validate_repository(root: Path) -> int:
     reject_symlink_ancestors(root, plugins_declared)
     plugins_root = plugins_declared.resolve(strict=True)
     for name, (version, source) in codex.items():
-        source_path = Path(source)
-        if source_path.is_absolute():
-            fail(f"catalog sourceは相対pathでなければなりません: {name}")
-        normalized_source = Path(os.path.normpath(source))
-        source_declared = root / normalized_source
+        source_declared = declared_catalog_source(root, source, name)
         reject_symlink_ancestors(root, source_declared)
         source_root = source_declared.resolve(strict=True)
         if source_root == plugins_root or plugins_root not in source_root.parents:
@@ -255,6 +275,21 @@ def write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def replace_catalog_source(root: Path, plugin_name: str, source: str) -> None:
+    for runtime, relative in (
+        ("claude", ".claude-plugin/marketplace.json"),
+        ("codex", ".agents/plugins/marketplace.json"),
+    ):
+        catalog_path = root / relative
+        catalog = load_json(catalog_path)
+        entry = next(item for item in catalog["plugins"] if item["name"] == plugin_name)
+        if runtime == "claude":
+            entry["source"] = source
+        else:
+            entry["source"]["path"] = source
+        write_json(catalog_path, catalog)
+
+
 def expect_mutation_rejected(root: Path, mutation: str, expected_error: str) -> None:
     with tempfile.TemporaryDirectory(prefix="distribution-negative-") as temporary:
         fixture = Path(temporary) / "repository"
@@ -272,14 +307,23 @@ def expect_mutation_rejected(root: Path, mutation: str, expected_error: str) -> 
                 write_json(catalog_path, catalog)
         elif mutation == "source-absolute":
             source_absolute = os.fspath(skills_root)
-            claude_path = fixture / ".claude-plugin/marketplace.json"
-            claude_catalog = load_json(claude_path)
-            claude_catalog["plugins"][0]["source"] = source_absolute
-            write_json(claude_path, claude_catalog)
-            codex_path = fixture / ".agents/plugins/marketplace.json"
-            codex_catalog = load_json(codex_path)
-            codex_catalog["plugins"][0]["source"]["path"] = source_absolute
-            write_json(codex_path, codex_catalog)
+            replace_catalog_source(fixture, skills_name, source_absolute)
+        elif mutation == "source-missing-dot-prefix":
+            original = entries[skills_name][1]
+            replace_catalog_source(fixture, skills_name, original.removeprefix("./"))
+        elif mutation == "source-repeated-slash":
+            original = entries[skills_name][1]
+            replace_catalog_source(fixture, skills_name, original.replace("./plugins/", "./plugins//", 1))
+        elif mutation == "source-dot-segment":
+            original = entries[skills_name][1]
+            replace_catalog_source(fixture, skills_name, original.replace("./plugins/", "./plugins/./", 1))
+        elif mutation == "source-trailing-slash":
+            replace_catalog_source(fixture, skills_name, f"{entries[skills_name][1]}/")
+        elif mutation == "raw-source-symlink-dotdot":
+            original = entries[skills_name][1]
+            source_tail = original.removeprefix("./plugins/")
+            (fixture / "plugins/pivot").symlink_to(".", target_is_directory=True)
+            replace_catalog_source(fixture, skills_name, f"./plugins/pivot/../{source_tail}")
         elif mutation == "source-ancestor-symlink":
             physical_plugins = fixture / "plugins-real"
             (fixture / "plugins").rename(physical_plugins)
@@ -441,6 +485,11 @@ def expect_mutation_rejected(root: Path, mutation: str, expected_error: str) -> 
 def self_test(root: Path) -> int:
     expect_mutation_rejected(root, "catalog-empty", "catalog plugins配列")
     expect_mutation_rejected(root, "source-absolute", "sourceは相対path")
+    expect_mutation_rejected(root, "source-missing-dot-prefix", "./plugins/<canonical segments>")
+    expect_mutation_rejected(root, "source-repeated-slash", "./plugins/<canonical segments>")
+    expect_mutation_rejected(root, "source-dot-segment", "./plugins/<canonical segments>")
+    expect_mutation_rejected(root, "source-trailing-slash", "./plugins/<canonical segments>")
+    expect_mutation_rejected(root, "raw-source-symlink-dotdot", "ancestorがsymlink")
     expect_mutation_rejected(root, "source-ancestor-symlink", "ancestor")
     expect_mutation_rejected(root, "skills-deleted", "skills path")
     expect_mutation_rejected(root, "physical-skills-deleted", "skills")
@@ -454,7 +503,7 @@ def self_test(root: Path) -> int:
     expect_mutation_rejected(root, "scripts-without-content", "non-empty regular script")
     expect_mutation_rejected(root, "physical-scripts-without-capability", "Scripts capability")
     expect_mutation_rejected(root, "hook-command-whitespace", "strip後非空")
-    print("Distribution negative tests: passed (15 mutations)")
+    print("Distribution negative tests: passed (20 mutations)")
     return 0
 
 
