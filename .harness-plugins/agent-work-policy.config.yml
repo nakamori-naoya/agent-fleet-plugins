@@ -22,7 +22,7 @@ verification:
 pull_request:
   draft: true
 merge:
-  method: rebase
+  method: fast-forward
   delete_branch: true
   delete_worktree: false
   readiness:
