@@ -18,7 +18,7 @@ gates:
   before_pull_request: false
   before_merge: false
 verification:
-  commands: ["bash scripts/validate.sh"]
+  commands: ["git diff --check", "bash scripts/validate.sh"]
 pull_request:
   draft: true
 merge:

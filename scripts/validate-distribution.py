@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -52,11 +55,81 @@ def require_regular_file(path: Path) -> None:
         fail(f"regular fileではありません: {path}")
 
 
-def main() -> int:
-    if len(sys.argv) != 2:
-        print(f"usage: {Path(sys.argv[0]).name} REPOSITORY_ROOT", file=sys.stderr)
-        return 2
-    root = Path(sys.argv[1]).resolve(strict=True)
+def resolve_declared_path(source_root: Path, value: object, label: str) -> Path:
+    if not isinstance(value, str) or not value:
+        fail(f"{label}が未宣言です: {source_root}")
+    declared = source_root / value
+    resolved = declared.resolve(strict=False)
+    if resolved == source_root or source_root not in resolved.parents:
+        fail(f"{label}がplugin root外を指しています: {source_root}")
+    if declared.is_symlink():
+        fail(f"{label}がsymlinkです: {source_root}")
+    return resolved
+
+
+def validate_skills(source_root: Path, manifests: dict[str, dict]) -> None:
+    bundled_skills = source_root / "skills"
+    if not bundled_skills.is_dir():
+        return
+    for runtime, manifest in manifests.items():
+        skills_root = resolve_declared_path(source_root, manifest.get("skills"), f"{runtime} skills path")
+        if not skills_root.is_dir():
+            fail(f"{runtime} skills pathが実在directoryではありません: {source_root}")
+        skill_files = [
+            path
+            for path in skills_root.rglob("SKILL.md")
+            if path.is_file() and not path.is_symlink() and skills_root in path.resolve().parents
+        ]
+        if not skill_files:
+            fail(f"{runtime} skills pathにSKILL.mdがありません: {source_root}")
+    capabilities = manifests["codex"].get("interface", {}).get("capabilities")
+    if not isinstance(capabilities, list) or "Skills" not in capabilities:
+        fail(f"Codex interface.capabilitiesにSkillsがありません: {source_root}")
+
+
+def validate_hook_document(path: Path, plugin_name: str) -> None:
+    document = load_json(path)
+    hooks = document.get("hooks")
+    if not isinstance(hooks, dict) or not hooks:
+        fail(f"hooks fileにhook定義がありません: {plugin_name}")
+    if plugin_name == "agent-fleet-session-hooks":
+        required_events = {"UserPromptSubmit", "SessionStart"}
+        if not required_events.issubset(hooks):
+            fail(f"session-hooksに必須eventがありません: {plugin_name}")
+    for event, groups in hooks.items():
+        if not isinstance(groups, list) or not groups:
+            fail(f"hooks eventが空です: {plugin_name}/{event}")
+        for group in groups:
+            commands = group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(commands, list) or not commands:
+                fail(f"hooks command groupが空です: {plugin_name}/{event}")
+            if not all(
+                isinstance(command, dict)
+                and command.get("type") == "command"
+                and isinstance(command.get("command"), str)
+                and bool(command["command"])
+                for command in commands
+            ):
+                fail(f"hooks command契約が不正です: {plugin_name}/{event}")
+
+
+def validate_hooks(source_root: Path, plugin_name: str, manifests: dict[str, dict]) -> None:
+    capabilities = manifests["codex"].get("interface", {}).get("capabilities")
+    hooks_capability = isinstance(capabilities, list) and "Hooks" in capabilities
+    hooks_declared = any("hooks" in manifest for manifest in manifests.values())
+    if hooks_declared and not hooks_capability:
+        fail(f"hooks宣言に対応するHooks capabilityがありません: {plugin_name}")
+    if plugin_name == "agent-fleet-session-hooks" and not hooks_capability:
+        fail(f"session-hooksにHooks capabilityがありません: {plugin_name}")
+    if not hooks_capability:
+        return
+    for runtime, manifest in manifests.items():
+        hooks_path = resolve_declared_path(source_root, manifest.get("hooks"), f"{runtime} hooks path")
+        require_regular_file(hooks_path)
+        validate_hook_document(hooks_path, plugin_name)
+
+
+def validate_repository(root: Path) -> int:
     root_license = root / "LICENSE"
     require_regular_file(root_license)
     license_bytes = root_license.read_bytes()
@@ -79,12 +152,16 @@ def main() -> int:
         require_regular_file(source_license)
         if source_license.read_bytes() != license_bytes:
             fail(f"source LICENSEがrepository rootと一致しません: {name}")
+        manifests: dict[str, dict] = {}
         for runtime in ("claude", "codex"):
             manifest = source_root / f".{runtime}-plugin/plugin.json"
             require_regular_file(manifest)
             identity = load_json(manifest)
             if identity.get("name") != name or identity.get("version") != version:
                 fail(f"{runtime} manifestのname/versionがcatalogと一致しません: {name}")
+            manifests[runtime] = identity
+        validate_skills(source_root, manifests)
+        validate_hooks(source_root, name, manifests)
 
     discovered: set[Path] = set()
     for manifest in plugins_root.rglob("plugin.json"):
@@ -98,6 +175,84 @@ def main() -> int:
 
     print(f"Distribution: passed ({len(expected_roots)} plugins)")
     return 0
+
+
+def write_json(path: Path, value: dict) -> None:
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def expect_mutation_rejected(root: Path, mutation: str, expected_error: str) -> None:
+    with tempfile.TemporaryDirectory(prefix="distribution-negative-") as temporary:
+        fixture = Path(temporary) / "repository"
+        shutil.copytree(root, fixture, ignore=shutil.ignore_patterns(".git"), symlinks=True)
+        _, entries = catalog_entries(fixture / ".agents/plugins/marketplace.json", "codex")
+        skills_name = next(
+            name for name, (_, source) in entries.items() if (fixture / source / "skills").is_dir()
+        )
+        skills_root = (fixture / entries[skills_name][1]).resolve(strict=True)
+        if mutation == "skills-deleted":
+            manifest_path = skills_root / ".claude-plugin/plugin.json"
+            manifest = load_json(manifest_path)
+            manifest.pop("skills", None)
+            write_json(manifest_path, manifest)
+        elif mutation == "capabilities-empty":
+            manifest_path = skills_root / ".codex-plugin/plugin.json"
+            manifest = load_json(manifest_path)
+            manifest.setdefault("interface", {})["capabilities"] = []
+            write_json(manifest_path, manifest)
+        elif mutation == "hooks-invalid":
+            hook_name = next(
+                (
+                    name
+                    for name, (_, source) in entries.items()
+                    if "Hooks"
+                    in load_json((fixture / source / ".codex-plugin/plugin.json")).get("interface", {}).get(
+                        "capabilities", []
+                    )
+                ),
+                skills_name,
+            )
+            hook_root = (fixture / entries[hook_name][1]).resolve(strict=True)
+            for runtime in ("claude", "codex"):
+                manifest_path = hook_root / f".{runtime}-plugin/plugin.json"
+                manifest = load_json(manifest_path)
+                manifest["hooks"] = "../outside-hooks.json"
+                if runtime == "codex":
+                    capabilities = manifest.setdefault("interface", {}).setdefault("capabilities", [])
+                    if "Hooks" not in capabilities:
+                        capabilities.append("Hooks")
+                write_json(manifest_path, manifest)
+        else:
+            fail(f"未知のmutationです: {mutation}")
+
+        result = subprocess.run(
+            [sys.executable, os.fspath(fixture / "scripts/validate-distribution.py"), os.fspath(fixture)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 or expected_error not in result.stderr:
+            fail(
+                f"改変負例を期待した理由で拒否できません: mutation={mutation}, "
+                f"exit={result.returncode}, stderr={result.stderr.strip()}"
+            )
+
+
+def self_test(root: Path) -> int:
+    expect_mutation_rejected(root, "skills-deleted", "skills path")
+    expect_mutation_rejected(root, "capabilities-empty", "interface.capabilitiesにSkills")
+    expect_mutation_rejected(root, "hooks-invalid", "hooks path")
+    print("Distribution negative tests: passed (3 mutations)")
+    return 0
+
+
+def main() -> int:
+    if len(sys.argv) == 2:
+        return validate_repository(Path(sys.argv[1]).resolve(strict=True))
+    if len(sys.argv) == 3 and sys.argv[1] == "--self-test":
+        return self_test(Path(sys.argv[2]).resolve(strict=True))
+    print(f"usage: {Path(sys.argv[0]).name} [--self-test] REPOSITORY_ROOT", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
