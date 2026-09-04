@@ -148,6 +148,16 @@ class FakeRunner:
 
 
 class FleetRuntimeTest(unittest.TestCase):
+    def test_interactive_shell_ignores_untrusted_shell_path(self):
+        with mock.patch.dict(os.environ, {"SHELL": "/private/tmp/untrusted/bash"}):
+            argv = fleet_runtime.FleetRuntime._interactive_shell_argv(
+                "codex-personal", ["plugin", "list", "--json"]
+            )
+
+        self.assertEqual("/bin/bash", argv[0])
+        self.assertEqual("-lic", argv[1])
+        self.assertEqual("codex-personal plugin list --json", argv[2])
+
     def test_agent_core_command_preserves_an_executable_path_with_spaces(self):
         executable = self.root / "fixed runtime/core/fleet-control"
         executable.parent.mkdir(parents=True)

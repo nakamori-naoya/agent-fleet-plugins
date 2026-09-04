@@ -280,10 +280,24 @@ class FleetRuntime:
             raise FleetRuntimeError(
                 "an interactive shell is required to resolve AgentCommandProfile commands"
             )
-        shell = Path(shell_value)
-        if not shell.is_file() or not os.access(shell, os.X_OK):
+        shell_name = Path(shell_value).name
+        supported_shells = {
+            "bash": (Path("/bin/bash"), Path("/usr/bin/bash")),
+            "zsh": (Path("/bin/zsh"), Path("/usr/bin/zsh")),
+        }
+        candidates = supported_shells.get(shell_name, ())
+        shell = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.is_file() and os.access(candidate, os.X_OK)
+            ),
+            None,
+        )
+        if shell is None:
             raise FleetRuntimeError(
-                f"configured interactive shell is unavailable: {shell_value}"
+                "AgentCommandProfile aliases require an executable /bin or /usr/bin "
+                f"bash/zsh shell (configured shell={shell_value!r})"
             )
         return [str(shell), "-lic", shlex.join([command, *arguments])]
 
