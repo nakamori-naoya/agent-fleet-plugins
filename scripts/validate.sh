@@ -17,10 +17,10 @@ python3 "$ROOT/scripts/validate-distribution.py" --self-test || failed=1
 for manifest in \
   "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json" \
   "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.6.1" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.7.0" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
 done
 for manifest in "$HOOK_PLUGIN/.codex-plugin/plugin.json" "$HOOK_PLUGIN/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.6.1" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.7.0" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
 done
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact|fork" and .hooks.SessionStart[0].hooks[0].timeout==12' \
   "$HOOK_PLUGIN/hooks/claude-hooks.json" >/dev/null || failed=1
@@ -39,17 +39,24 @@ test ! -e "$HERDR/view-profiles" || failed=1
 if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
   failed=1
 fi
-jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.6.1")' \
+jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.7.0")' \
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \
   "$HERDR/adapter/schema/launch-profile.schema.yml" \
+  "$HERDR/adapter/schema/agent-command-profile.schema.yml" \
   "$HERDR/adapter/schema/view-profile.schema.yml" \
   "$ROOT/configs/fleets/development-squad.yml" "$ROOT/configs/fleets/quick-review.yml" \
   "$ROOT/configs/fleets/release-readiness.yml" \
   "$ROOT/configs/herdr-launch-profiles/development-squad.yml" \
+  "$ROOT/configs/herdr-launch-profiles/development-squad-personal.yml" \
+  "$ROOT/configs/herdr-launch-profiles/development-squad-work.yml" \
   "$ROOT/configs/herdr-launch-profiles/quick-review.yml" \
   "$ROOT/configs/herdr-launch-profiles/release-readiness.yml" \
+  "$ROOT/configs/agent-command-profiles/codex-personal.v1.yml" \
+  "$ROOT/configs/agent-command-profiles/codex-work.v1.yml" \
+  "$ROOT/configs/agent-command-profiles/claude-personal.v1.yml" \
+  "$ROOT/configs/agent-command-profiles/claude-work.v1.yml" \
   "$ROOT/configs/view-profiles/development-focus.v1.yml" \
   "$ROOT/configs/view-profiles/review-grid.v1.yml" \
   "$ROOT/configs/view-profiles/role-columns.v1.yml"; do
@@ -173,15 +180,17 @@ fi
   --core-command "$CORE/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
   --launch-dir "$ROOT/configs/herdr-launch-profiles" \
+  --agent-command-profile-dir "$ROOT/configs/agent-command-profiles" \
   --profile-dir "$ROOT/configs/view-profiles" \
   --state-dir "$TMP_ROOT/runtime-state" > "$TMP_ROOT/fleet-list.json" || failed=1
-jq -e '.ok==true and (.result|length)==3 and all(.result[]; .profile_resolved==true)' \
+jq -e '.ok==true and (.result|length)==5 and all(.result[]; .profile_resolved==true)' \
   "$TMP_ROOT/fleet-list.json" >/dev/null || failed=1
 "$HERDR/adapter/scripts/fleet-runtime" plan development-squad \
   --role-catalog "$ROLE_CATALOG" \
   --core-command "$CORE/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
   --launch-dir "$ROOT/configs/herdr-launch-profiles" \
+  --agent-command-profile-dir "$ROOT/configs/agent-command-profiles" \
   --profile-dir "$ROOT/configs/view-profiles" \
   --state-dir "$TMP_ROOT/runtime-state" --cwd "$ROOT" \
   > "$TMP_ROOT/fleet-plan.json" || failed=1
@@ -191,6 +200,22 @@ jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.start:worker-imp
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
 jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.start:manager" or .id=="agent.start:advisor" or .id=="agent.start:reviewer"); (.argv|index("claude")) != null and (.argv|index("claude-fable-5-1")) != null and (.argv|index("--plugin-dir")) != null and (.argv|index("high")) != null and (.argv|index("{\"switchModelsOnFlag\":false}")) != null)' \
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
+
+"$HERDR/adapter/scripts/fleet-runtime" plan development-squad-personal \
+  --role-catalog "$ROLE_CATALOG" \
+  --core-command "$CORE/core/scripts/fleet-control" \
+  --fleet-dir "$ROOT/configs/fleets" \
+  --launch-dir "$ROOT/configs/herdr-launch-profiles" \
+  --agent-command-profile-dir "$ROOT/configs/agent-command-profiles" \
+  --profile-dir "$ROOT/configs/view-profiles" \
+  --state-dir "$TMP_ROOT/runtime-state" --cwd "$ROOT" \
+  > "$TMP_ROOT/personal-fleet-plan.json" || failed=1
+jq -e '.ok==true and .result.agent_command_profiles.manager.command=="claude-personal" and .result.agent_command_profiles["worker-implementation"].command=="codex-personal"' \
+  "$TMP_ROOT/personal-fleet-plan.json" >/dev/null || failed=1
+jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.run:manager" or .id=="agent.run:advisor" or .id=="agent.run:reviewer"); .argv[4]=="claude-personal" and (.argv|index("claude-fable-5-1")) != null)' \
+  "$TMP_ROOT/personal-fleet-plan.json" >/dev/null || failed=1
+jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.run:worker-implementation" or .id=="agent.run:worker-verification"); .argv[4]=="codex-personal" and (.argv|index("gpt-5.6-sol")) != null)' \
+  "$TMP_ROOT/personal-fleet-plan.json" >/dev/null || failed=1
 test ! -e "$TMP_ROOT/runtime-state" || failed=1
 
 mkdir -p "$TMP_ROOT/separate/core" "$TMP_ROOT/separate/herdr"
@@ -201,9 +226,10 @@ cp -R "$HERDR/." "$TMP_ROOT/separate/herdr/"
   --core-command "$TMP_ROOT/separate/core/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
   --launch-dir "$ROOT/configs/herdr-launch-profiles" \
+  --agent-command-profile-dir "$ROOT/configs/agent-command-profiles" \
   --profile-dir "$ROOT/configs/view-profiles" \
   --state-dir "$TMP_ROOT/separate-state" > "$TMP_ROOT/separate-list.json" || failed=1
-jq -e '.ok==true and (.result|length)==3' "$TMP_ROOT/separate-list.json" >/dev/null || failed=1
+jq -e '.ok==true and (.result|length)==5' "$TMP_ROOT/separate-list.json" >/dev/null || failed=1
 test ! -e "$TMP_ROOT/separate-state" || failed=1
 
 bash -n "$CORE/core/scripts/fleet-control" || failed=1

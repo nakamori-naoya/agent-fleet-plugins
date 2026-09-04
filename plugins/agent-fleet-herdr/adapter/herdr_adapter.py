@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from agent_command_profiles import COMMAND_PATTERN, PROFILE_REF_PATTERN
 from launch_profiles import validate_document as validate_launch_profile
 from view_profiles import (
     ViewProfileError,
@@ -639,6 +640,32 @@ class Herdr08Commands:
             argv.extend(safe_token(arg, "agent arg") for arg in agent_args)
         return argv
 
+    def agent_run(
+        self, command: str, pane_id: str, agent_args: Sequence[str] = ()
+    ) -> list[str]:
+        return [
+            self.binary,
+            "pane",
+            "run",
+            safe_token(pane_id, "pane_id"),
+            safe_token(command, "agent command"),
+            *(safe_token(arg, "agent arg") for arg in agent_args),
+        ]
+
+    def agent_wait(self, pane_id: str, timeout_ms: int = 30_000) -> list[str]:
+        if timeout_ms <= 0:
+            raise HerdrAdapterError("agent wait timeout must be positive")
+        return [
+            self.binary,
+            "agent",
+            "wait",
+            safe_token(pane_id, "pane_id"),
+            "--until",
+            "idle",
+            "--timeout",
+            str(timeout_ms),
+        ]
+
     def pane_get(self, pane_id: str) -> list[str]:
         return [self.binary, "pane", "get", safe_token(pane_id, "pane_id")]
 
@@ -822,6 +849,7 @@ class HerdrAdapter:
         view_profile: Mapping[str, Any],
         launch_profile: Mapping[str, Any],
         agent_environment: Mapping[str, str] | None = None,
+        agent_command_profiles: Mapping[str, Any] | None = None,
     ) -> ProvisionPlan:
         (
             fleet_id,
@@ -834,6 +862,50 @@ class HerdrAdapter:
             raise HerdrAdapterError(
                 f"per-member model selection is not supported for agent kind {agent_kind!r}"
             )
+
+        command_profiles = dict(agent_command_profiles or {})
+        member_products = {
+            agent_ref: member_runtimes.get(agent_ref, {}).get("product", agent_kind)
+            for agent_ref, _ in members
+        }
+        member_refs = set(member_products)
+        for agent_ref, profile in command_profiles.items():
+            if agent_ref not in member_refs:
+                raise HerdrAdapterError(
+                    f"AgentCommandProfile targets unknown Fleet member {agent_ref!r}"
+                )
+            if not isinstance(profile, Mapping):
+                raise HerdrAdapterError(
+                    f"AgentCommandProfile for {agent_ref!r} must be a JSON object"
+                )
+            unknown = set(profile) - {"profile_ref", "product", "command"}
+            if unknown:
+                raise HerdrAdapterError(
+                    f"AgentCommandProfile for {agent_ref!r} has unsupported fields: "
+                    + ", ".join(sorted(unknown))
+                )
+            profile_ref = profile.get("profile_ref")
+            product = profile.get("product")
+            command = profile.get("command")
+            if (
+                not isinstance(profile_ref, str)
+                or PROFILE_REF_PATTERN.fullmatch(profile_ref) is None
+            ):
+                raise HerdrAdapterError(
+                    f"AgentCommandProfile for {agent_ref!r} has an invalid profile_ref"
+                )
+            if product != member_products[agent_ref]:
+                raise HerdrAdapterError(
+                    f"AgentCommandProfile product for {agent_ref!r} does not match "
+                    "Fleet runtime product"
+                )
+            if (
+                not isinstance(command, str)
+                or COMMAND_PATTERN.fullmatch(command) is None
+            ):
+                raise HerdrAdapterError(
+                    f"AgentCommandProfile for {agent_ref!r} has an invalid command"
+                )
 
         hook_trust = "review"
         provision_environment = dict(agent_environment or {})
@@ -869,6 +941,33 @@ class HerdrAdapter:
                 else:
                     args.extend(["--config", f'model_reasoning_effort="{effort}"'])
             return product, tuple(args)
+
+        def agent_operations(
+            agent_ref: str, pane_ref: str
+        ) -> list[Mapping[str, Any]]:
+            product, args = member_execution(agent_ref)
+            profile = command_profiles.get(agent_ref)
+            if profile is None:
+                return [
+                    {
+                        "id": f"agent.start:{agent_ref}",
+                        "argv": self.commands.agent_start(
+                            agent_ref, product, pane_ref, args
+                        ),
+                    }
+                ]
+            return [
+                {
+                    "id": f"agent.run:{agent_ref}",
+                    "argv": self.commands.agent_run(
+                        str(profile["command"]), pane_ref, args
+                    ),
+                },
+                {
+                    "id": f"agent.wait:{agent_ref}",
+                    "argv": self.commands.agent_wait(pane_ref),
+                },
+            ]
         profile_errors = validate_document(view_profile)
         if profile_errors:
             raise HerdrAdapterError("invalid View Profile: " + "; ".join(profile_errors))
@@ -890,6 +989,17 @@ class HerdrAdapter:
         if launch_spec["view_profile_ref"] != profile_ref:
             raise HerdrAdapterError(
                 "LaunchProfile view_profile_ref does not match ViewProfile identity"
+            )
+        requested_command_profiles = dict(
+            launch_spec.get("agent_command_profiles", {})
+        )
+        actual_command_profile_refs = {
+            agent_ref: profile["profile_ref"]
+            for agent_ref, profile in command_profiles.items()
+        }
+        if requested_command_profiles != actual_command_profile_refs:
+            raise HerdrAdapterError(
+                "resolved AgentCommandProfiles do not match LaunchProfile references"
             )
         hook_trust = launch_spec["codex_hook_trust"]
         if not member_runtimes or "codex" in configured_products:
@@ -914,7 +1024,6 @@ class HerdrAdapter:
         root_pane = "$workspace.root_pane"
         workspace_label = f"agent-fleet:{fleet_id}:<operation-id>"
         root_agent_ref = groups[0].member_refs[0]
-        root_product, root_args = member_execution(root_agent_ref)
         operations: list[Mapping[str, Any]] = [
             {
                 "id": "workspace.create",
@@ -923,18 +1032,12 @@ class HerdrAdapter:
                 ),
                 "produces": ["workspace_id", "tab_id", "root_pane_id"],
             },
-            {
-                "id": f"agent.start:{root_agent_ref}",
-                "argv": self.commands.agent_start(
-                    root_agent_ref, root_product, root_pane, root_args
-                ),
-            },
         ]
+        operations.extend(agent_operations(root_agent_ref, root_pane))
         group_leader_panes = {groups[0].group_id: root_pane}
         split_target = root_pane
         for group_index, group in enumerate(groups[1:], 1):
             agent_ref = group.member_refs[0]
-            product, args = member_execution(agent_ref)
             pane_ref = f"$pane:{agent_ref}"
             remaining_weight = sum(item.weight for item in groups[group_index - 1 :])
             existing_fraction = groups[group_index - 1].weight / remaining_weight
@@ -951,14 +1054,7 @@ class HerdrAdapter:
                     "produces": [pane_ref],
                 }
             )
-            operations.append(
-                {
-                    "id": f"agent.start:{agent_ref}",
-                    "argv": self.commands.agent_start(
-                        agent_ref, product, pane_ref, args
-                    ),
-                }
-            )
+            operations.extend(agent_operations(agent_ref, pane_ref))
             group_leader_panes[group.group_id] = pane_ref
             split_target = pane_ref
 
@@ -966,7 +1062,6 @@ class HerdrAdapter:
             split_target = group_leader_panes[group.group_id]
             count = len(group.member_refs)
             for position, agent_ref in enumerate(group.member_refs[1:], 1):
-                product, args = member_execution(agent_ref)
                 pane_ref = f"$pane:{agent_ref}"
                 operations.append(
                     {
@@ -981,14 +1076,7 @@ class HerdrAdapter:
                         "produces": [pane_ref],
                     }
                 )
-                operations.append(
-                    {
-                        "id": f"agent.start:{agent_ref}",
-                        "argv": self.commands.agent_start(
-                            agent_ref, product, pane_ref, args
-                        ),
-                    }
-                )
+                operations.extend(agent_operations(agent_ref, pane_ref))
                 split_target = pane_ref
 
         placements: list[Mapping[str, Any]] = []
@@ -1028,6 +1116,7 @@ class HerdrAdapter:
                 "cwd": cwd,
                 "agent_kind": agent_kind,
                 "agent_environment": provision_environment,
+                "agent_command_profiles": command_profiles,
             }
         )
         return ProvisionPlan(
@@ -1212,6 +1301,7 @@ class HerdrAdapter:
         *,
         execute: bool = False,
         agent_environment: Mapping[str, str] | None = None,
+        agent_command_profiles: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         plan = self.plan_provision(
             fleet,
@@ -1220,6 +1310,7 @@ class HerdrAdapter:
             view_profile,
             launch_profile,
             agent_environment,
+            agent_command_profiles,
         )
         with self.state.fleet_lock(plan.fleet_id):
             return self._provision_locked(plan, execute=execute)
@@ -1327,7 +1418,9 @@ class HerdrAdapter:
             completed = self._execute_argv(
                 argv,
                 f"herdr {operation_id}",
-                retry_new_pane_busy=operation_id.startswith("agent.start:"),
+                retry_new_pane_busy=operation_id.startswith(
+                    ("agent.start:", "agent.run:")
+                ),
             )
             if operation_id.startswith("pane.split:"):
                 worker_ref = operation_id.split(":", 1)[1]
@@ -1574,6 +1667,7 @@ def build_parser() -> argparse.ArgumentParser:
     provision.add_argument("--fleet-json", type=json_object, required=True)
     provision.add_argument("--view-profile-json", type=json_object, required=True)
     provision.add_argument("--launch-profile-json", type=json_object, required=True)
+    provision.add_argument("--agent-command-profiles-json", type=json_object, default={})
     provision.add_argument("--cwd", required=True)
     provision.add_argument("--agent-kind", default="codex", help=argparse.SUPPRESS)
     provision.add_argument("--agent-core-command")
@@ -1650,6 +1744,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.view_profile_json,
                 args.launch_profile_json,
                 provision_environment,
+                args.agent_command_profiles_json,
             )
         if args.action in {"provision", "deprovision"} and not args.execute:
             state = (
@@ -1671,6 +1766,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.launch_profile_json,
                 execute=args.execute,
                 agent_environment=provision_environment,
+                agent_command_profiles=args.agent_command_profiles_json,
             )
         elif args.action == "deprovision":
             result = adapter.deprovision(args.fleet, execute=args.execute)

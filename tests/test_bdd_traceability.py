@@ -160,6 +160,19 @@ COVERAGE = {
     "Herdr起動設定が艦隊と表示プロファイルを一方向に合成する": (
         (RUNTIME_TESTS, "test_launch_profile_composes_fleet_and_versioned_view_profile"),
     ),
+    "利用者が選んだアカウント用コマンドへ艦隊の実行条件を合成する": (
+        (RUNTIME_TESTS, "test_launch_resolves_agent_commands_and_passes_composed_json_to_adapter"),
+        (ADAPTER_TESTS, "test_member_command_profile_runs_shell_alias_then_waits_for_detected_agent"),
+    ),
+    "起動プロファイルの製品と艦隊メンバーの製品が異なる間は起動しない": (
+        (ADAPTER_TESTS, "test_member_command_profile_must_match_declared_agent_and_product"),
+    ),
+    "参照した起動コマンドを対話シェルで利用できない間は起動しない": (
+        (RUNTIME_TESTS, "test_start_rejects_unavailable_agent_command_before_state_creation"),
+    ),
+    "Claude用起動コマンドが未認証の間は複数のログイン画面を作らない": (
+        (RUNTIME_TESTS, "test_start_rejects_unauthenticated_claude_command_before_state_creation"),
+    ),
     "三つの役割群を三列へ配置する": (
         (ADAPTER_TESTS, "test_role_groups_compile_to_three_columns_with_equal_vertical_stacks"),
     ),

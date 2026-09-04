@@ -342,6 +342,112 @@ class HerdrAdapterTest(unittest.TestCase):
         self.assertEqual("gpt-5.6-sol", worker[worker.index("--model") + 1])
         self.assertIn('model_reasoning_effort="medium"', worker)
 
+    def test_member_command_profile_runs_shell_alias_then_waits_for_detected_agent(self):
+        launch = json.loads(json.dumps(LAUNCH_PROFILE))
+        launch["spec"]["agent_command_profiles"] = {
+            "manager-1": "local/codex-personal@1"
+        }
+        profiles = {
+            "manager-1": {
+                "profile_ref": "local/codex-personal@1",
+                "product": "codex",
+                "command": "codex-personal",
+            }
+        }
+
+        plan = herdr_adapter.HerdrAdapter(self.state).plan_provision(
+            FLEET,
+            "/repo",
+            "codex",
+            VIEW_PROFILE,
+            launch,
+            agent_command_profiles=profiles,
+        )
+
+        run = next(
+            operation["argv"]
+            for operation in plan.operations
+            if operation["id"] == "agent.run:manager-1"
+        )
+        wait = next(
+            operation["argv"]
+            for operation in plan.operations
+            if operation["id"] == "agent.wait:manager-1"
+        )
+        self.assertEqual(
+            ["herdr", "pane", "run", "$workspace.root_pane", "codex-personal"],
+            run[:5],
+        )
+        self.assertIn("plugins.agent-fleet-session-hooks@agent-fleet.enabled=true", run)
+        self.assertIn("gpt-5.6-sol", run)
+        self.assertEqual(
+            [
+                "herdr",
+                "agent",
+                "wait",
+                "$workspace.root_pane",
+                "--until",
+                "idle",
+                "--timeout",
+                "30000",
+            ],
+            wait,
+        )
+        self.assertFalse(
+            any(
+                operation["id"] == "agent.start:manager-1"
+                for operation in plan.operations
+            )
+        )
+
+    def test_member_command_profile_must_match_declared_agent_and_product(self):
+        adapter = herdr_adapter.HerdrAdapter(self.state)
+        missing_agent = {
+            "missing": {
+                "profile_ref": "local/codex-personal@1",
+                "product": "codex",
+                "command": "codex-personal",
+            }
+        }
+        missing_launch = json.loads(json.dumps(LAUNCH_PROFILE))
+        missing_launch["spec"]["agent_command_profiles"] = {
+            "missing": "local/codex-personal@1"
+        }
+        with self.assertRaisesRegex(
+            herdr_adapter.HerdrAdapterError, "unknown Fleet member"
+        ):
+            adapter.plan_provision(
+                FLEET,
+                "/repo",
+                "codex",
+                VIEW_PROFILE,
+                missing_launch,
+                agent_command_profiles=missing_agent,
+            )
+
+        wrong_product = {
+            "manager-1": {
+                "profile_ref": "local/claude-personal@1",
+                "product": "claude",
+                "command": "claude-personal",
+            }
+        }
+        wrong_launch = json.loads(json.dumps(LAUNCH_PROFILE))
+        wrong_launch["spec"]["agent_command_profiles"] = {
+            "manager-1": "local/claude-personal@1"
+        }
+        with self.assertRaisesRegex(
+            herdr_adapter.HerdrAdapterError, "does not match Fleet runtime product"
+        ):
+            adapter.plan_provision(
+                FLEET,
+                "/repo",
+                "codex",
+                VIEW_PROFILE,
+                wrong_launch,
+                agent_command_profiles=wrong_product,
+            )
+
     def test_portable_fleet_requires_runtime_for_every_member(self):
         fleet = json.loads(json.dumps(FLEET))
         fleet["spec"]["members"][1].pop("runtime")

@@ -1,0 +1,33 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://agent-fleet.local/schema/agent-command-profile.schema.yml
+title: Agent Command Profile
+type: object
+additionalProperties: false
+required: [apiVersion, kind, metadata, spec]
+properties:
+  apiVersion:
+    const: fleet.runtime.harness/v1
+  kind:
+    const: AgentCommandProfile
+  metadata:
+    type: object
+    additionalProperties: false
+    required: [id, version]
+    properties:
+      id:
+        type: string
+        pattern: ^[a-z][a-z0-9]*(-[a-z0-9]+)*(/[a-z][a-z0-9]*(-[a-z0-9]+)*)?$
+      version:
+        type: integer
+        minimum: 1
+  spec:
+    type: object
+    additionalProperties: false
+    required: [product, command]
+    properties:
+      product:
+        type: string
+        enum: [codex, claude]
+      command:
+        type: string
+        pattern: ^([A-Za-z_][A-Za-z0-9_.+-]*|/([A-Za-z0-9_.+-]+/)*[A-Za-z0-9_.+-]+)$
