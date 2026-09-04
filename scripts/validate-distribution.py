@@ -494,11 +494,6 @@ def repository_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def validate_self_test_request(requested_root: Path) -> None:
-    if requested_root != repository_root():
-        fail("--self-testは実行中のrepository rootだけを対象にできます")
-
-
 def validate_self_test_sentinels(root: Path) -> None:
     for relative in SELF_TEST_SENTINELS:
         sentinel = root / relative
@@ -552,12 +547,14 @@ def self_test() -> int:
 
 
 def main() -> int:
+    if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
+        return self_test()
     if len(sys.argv) == 2:
         return validate_repository(Path(sys.argv[1]).resolve(strict=True))
-    if len(sys.argv) == 3 and sys.argv[1] == "--self-test":
-        validate_self_test_request(Path(sys.argv[2]).resolve(strict=True))
-        return self_test()
-    print(f"usage: {Path(sys.argv[0]).name} [--self-test] REPOSITORY_ROOT", file=sys.stderr)
+    print(
+        f"usage: {Path(sys.argv[0]).name} (--self-test | REPOSITORY_ROOT)",
+        file=sys.stderr,
+    )
     return 2
 
 

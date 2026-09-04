@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import os
 import subprocess
 import tempfile
@@ -50,14 +51,16 @@ class DistributionSelfTestSecurityTest(unittest.TestCase):
                 )
                 self.assertEqual(1, result.returncode)
 
-    def test_self_test_rejects_another_root_before_copy(self):
+    def test_self_test_rejects_an_extra_root_before_copy(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
             validate_distribution.shutil, "copytree"
         ) as copytree:
-            with self.assertRaisesRegex(ValueError, "実行中のrepository root"):
-                validate_distribution.validate_self_test_request(
-                    Path(temporary).resolve()
-                )
+            with mock.patch.object(
+                validate_distribution.sys,
+                "argv",
+                ["validate-distribution.py", "--self-test", temporary],
+            ), mock.patch.object(validate_distribution.sys, "stderr", io.StringIO()):
+                self.assertEqual(2, validate_distribution.main())
 
         copytree.assert_not_called()
 
