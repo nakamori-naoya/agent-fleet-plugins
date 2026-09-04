@@ -469,7 +469,7 @@ class FleetRuntime:
                 or args != ["-c", expected_script]
                 or not isinstance(handler.get("timeout"), int)
                 or isinstance(handler.get("timeout"), bool)
-                or handler["timeout"] <= 0
+                or handler["timeout"] != 12
             ):
                 raise FleetRuntimeError(
                     f"Claude hook registration has an invalid {event_name} command"
@@ -688,7 +688,12 @@ class FleetRuntime:
         ):
             raise FleetRuntimeError("immutable execution snapshot has unsafe ownership or mode")
         identity = bundle.source_identity
-        if identity.get("format_version") != 1:
+        format_version = identity.get("format_version")
+        if (
+            not isinstance(format_version, int)
+            or isinstance(format_version, bool)
+            or format_version != 1
+        ):
             raise FleetRuntimeError("unsupported immutable execution snapshot format")
         if identity.get("hook_sha256") != hashlib.sha256(hook_payload).hexdigest():
             raise FleetRuntimeError("immutable execution snapshot hook identity changed")
@@ -1232,7 +1237,13 @@ class FleetRuntime:
             raise FleetRuntimeError(f"ViewProfile metadata is missing: {path}")
         profile_id = metadata.get("id")
         version = metadata.get("version")
-        if not isinstance(profile_id, str) or not profile_id or not isinstance(version, int):
+        if (
+            not isinstance(profile_id, str)
+            or not profile_id
+            or not isinstance(version, int)
+            or isinstance(version, bool)
+            or version < 1
+        ):
             raise FleetRuntimeError(f"ViewProfile identity is invalid: {path}")
         return f"{profile_id}@{version}"
 
@@ -1629,43 +1640,27 @@ class FleetRuntime:
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         descriptor = os.open(temporary, flags, 0o600)
+        completed = False
         try:
             os.write(descriptor, b"stop\n")
             os.fsync(descriptor)
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             temporary.replace(request_path)
             yield request_path
+            completed = True
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
             temporary.unlink(missing_ok=True)
-            self._clear_stop_request(request_path)
+            if completed:
+                self._clear_stop_requests(request_dir)
 
     def _stop_requested(self, state_dir: Path, launch_id: str) -> bool:
         request_dir = self._stop_request_dir(state_dir, launch_id)
         if not request_dir.is_dir():
             return False
         for request_path in request_dir.glob("*.request"):
-            if request_path.is_symlink():
-                return True
-            flags = os.O_RDONLY
-            if hasattr(os, "O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
-            try:
-                descriptor = os.open(request_path, flags)
-            except OSError:
-                return True
-            try:
-                try:
-                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    return True
-                request_path.unlink(missing_ok=True)
-            finally:
-                try:
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
-                finally:
-                    os.close(descriptor)
+            return True
         try:
             request_dir.rmdir()
             request_dir.parent.rmdir()
@@ -1679,11 +1674,12 @@ class FleetRuntime:
                 f"Fleet launch {launch_id!r} was cancelled by a stop request"
             )
 
-    def _clear_stop_request(self, request_path: Path) -> None:
-        request_path.unlink(missing_ok=True)
+    def _clear_stop_requests(self, request_dir: Path) -> None:
+        for request_path in request_dir.glob("*.request"):
+            request_path.unlink(missing_ok=True)
         try:
-            request_path.parent.rmdir()
-            request_path.parent.parent.rmdir()
+            request_dir.rmdir()
+            request_dir.parent.rmdir()
         except OSError:
             pass
 
@@ -1922,9 +1918,9 @@ class FleetRuntime:
             raise FleetRuntimeError(f"cannot validate materialized hook runtime: {exc}") from exc
         if (
             metadata.st_uid != os.getuid()
-            or metadata.st_mode & 0o777 != 0o400
+            or metadata.st_mode & 0o7777 != 0o400
             or directory_metadata.st_uid != os.getuid()
-            or directory_metadata.st_mode & 0o777 != 0o500
+            or directory_metadata.st_mode & 0o7777 != 0o500
             or metadata.st_nlink != 1
             or entries != [resolved]
         ):

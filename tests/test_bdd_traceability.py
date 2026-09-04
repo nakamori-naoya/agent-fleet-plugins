@@ -276,6 +276,9 @@ COVERAGE = {
         (RUNTIME_TESTS, "test_resolve_rejects_fleet_changed_while_core_validates_it"),
         (RUNTIME_TESTS, "test_start_rejects_config_changed_during_preflight_before_state_creation"),
     ),
+    "真偽値を表示プロファイルの版番号として扱わない": (
+        (RUNTIME_TESTS, "test_boolean_view_profile_version_is_not_an_integer_identity"),
+    ),
     "実行できない制御処理を含む固定版では状態を作らない": (
         (
             RUNTIME_TESTS,
@@ -290,10 +293,18 @@ COVERAGE = {
             RUNTIME_TESTS,
             "test_start_rejects_a_noop_claude_hook_registration_before_state_creation",
         ),
+        (
+            RUNTIME_TESTS,
+            "test_start_rejects_a_claude_hook_timeout_above_the_nfr_limit",
+        ),
     ),
     "起動途中の停止要求を進捗更新で失わない": (
         (RUNTIME_TESTS, "test_stop_during_core_provision_is_not_overwritten_by_start"),
         (RUNTIME_TESTS, "test_stop_during_pre_manifest_validation_cancels_start"),
+        (
+            RUNTIME_TESTS,
+            "test_timed_out_stop_request_prevents_start_until_stop_is_retried",
+        ),
     ),
     "停止済みの艦隊を再度停止しても外部操作を繰り返さない": (
         (RUNTIME_TESTS, "test_repeated_stop_is_idempotent_without_repeating_external_changes"),
@@ -320,6 +331,7 @@ COVERAGE = {
         ),
         (RUNTIME_TESTS, "test_status_rejects_a_non_string_manifest_phase"),
         (RUNTIME_TESTS, "test_status_rejects_a_manifest_with_another_launch_identity"),
+        (RUNTIME_TESTS, "test_status_rejects_special_permission_bits_on_hook_runtime"),
     ),
     "起動中に導入元の実行物が変わっても固定版だけを使う": (
         (RUNTIME_TESTS, "test_start_uses_snapshot_when_executable_changes_after_capture"),

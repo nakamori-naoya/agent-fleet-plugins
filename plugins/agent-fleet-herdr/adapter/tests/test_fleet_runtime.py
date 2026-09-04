@@ -302,6 +302,19 @@ class FleetRuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "duplicate"):
             runtime.resolve("review", [self.fleets], [self.profiles], self.state)
 
+    def test_boolean_view_profile_version_is_not_an_integer_identity(self):
+        profile = json.loads(json.dumps(PROFILE))
+        profile["metadata"]["version"] = True
+        (self.profiles / "review-grid.yml").write_text(
+            json.dumps(profile), encoding="utf-8"
+        )
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
+        )
+
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "identity is invalid"):
+            runtime.resolve("review", [self.fleets], [self.profiles], self.state)
+
     def test_portable_fleet_without_launch_profile_is_not_startable(self):
         (self.launches / "review.yml").unlink()
         runtime = fleet_runtime.FleetRuntime(
@@ -980,6 +993,26 @@ class FleetRuntimeTest(unittest.TestCase):
         self.assertFalse((self.state / "runtimes/review.json").exists())
         self.assertFalse((self.state / "fleets/review").exists())
 
+    def test_start_rejects_a_claude_hook_timeout_above_the_nfr_limit(self):
+        registration = self.root / "session-hooks-plugin/hooks/claude-hooks.json"
+        document = json.loads(registration.read_text(encoding="utf-8"))
+        document["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = 999
+        registration.write_text(json.dumps(document), encoding="utf-8")
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"],
+            runner=FakeRunner(),
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "invalid SessionStart command"
+        ):
+            runtime.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
+
+        self.assertFalse((self.state / "runtimes/review.json").exists())
+
     def test_stop_during_pre_manifest_validation_cancels_start(self):
         validation_started = threading.Event()
         release_validation = threading.Event()
@@ -1037,7 +1070,7 @@ class FleetRuntimeTest(unittest.TestCase):
         self.assertFalse((self.state / "fleets/review").exists())
         self.assertFalse(request_dir.exists())
 
-    def test_live_stop_request_is_observed_and_crashed_request_is_removed(self):
+    def test_stop_request_survives_a_crash_until_a_successful_stop_clears_it(self):
         runtime = fleet_runtime.FleetRuntime(
             ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
         )
@@ -1052,8 +1085,45 @@ class FleetRuntimeTest(unittest.TestCase):
         stale_request = request_dir / "crashed.request"
         stale_request.write_text("stop\n", encoding="utf-8")
 
+        self.assertTrue(runtime._stop_requested(self.state, "review"))
+        self.assertTrue(stale_request.exists())
+        with runtime._publish_stop_request(self.state, "review"):
+            pass
         self.assertFalse(runtime._stop_requested(self.state, "review"))
         self.assertFalse(stale_request.exists())
+        self.assertFalse(request_dir.exists())
+
+    def test_timed_out_stop_request_prevents_start_until_stop_is_retried(self):
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
+        )
+
+        @contextmanager
+        def timed_out_lock(*args, **kwargs):
+            raise fleet_runtime.FleetRuntimeError("did not stop within 30 seconds")
+            yield
+
+        with (
+            mock.patch.object(runtime, "_hold_launch_lock", new=timed_out_lock),
+            self.assertRaisesRegex(
+                fleet_runtime.FleetRuntimeError, "did not stop within 30 seconds"
+            ),
+        ):
+            runtime.stop("review", self.state, execute=True)
+
+        request_dir = self.state / "stop-requests/review"
+        self.assertTrue(any(request_dir.glob("*.request")))
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "cancelled by a stop request"
+        ):
+            runtime.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
+        self.assertFalse((self.state / "runtimes/review.json").exists())
+
+        stopped = runtime.stop("review", self.state, execute=True)
+        self.assertEqual("inactive", stopped["status"])
         self.assertFalse(request_dir.exists())
 
     def test_remove_holds_fleet_lock_through_stop_and_core_removal(self):
@@ -1277,6 +1347,37 @@ class FleetRuntimeTest(unittest.TestCase):
         runner.calls.clear()
 
         with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "hook runtime"):
+            runtime.status("review", self.state)
+
+        self.assertEqual([], runner.calls)
+
+    def test_status_rejects_special_permission_bits_on_hook_runtime(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        started = runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        hook_runtime = Path(started["hook_runtime"])
+        runner.calls.clear()
+        original_stat = Path.stat
+
+        def stat_with_setuid(path, *args, **kwargs):
+            metadata = original_stat(path, *args, **kwargs)
+            if str(path) == str(hook_runtime):
+                values = list(metadata)
+                values[0] |= 0o4000
+                return os.stat_result(values)
+            return metadata
+
+        with (
+            mock.patch.object(Path, "stat", autospec=True, side_effect=stat_with_setuid),
+            self.assertRaisesRegex(
+                fleet_runtime.FleetRuntimeError, "unsafe ownership or mode"
+            ),
+        ):
             runtime.status("review", self.state)
 
         self.assertEqual([], runner.calls)
