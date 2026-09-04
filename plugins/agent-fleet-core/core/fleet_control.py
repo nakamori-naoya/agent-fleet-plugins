@@ -92,7 +92,6 @@ CREATE TABLE IF NOT EXISTS fleets (
     fleet_id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     config_hash TEXT NOT NULL,
-    profile_ref TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS members (
@@ -286,12 +285,6 @@ class FleetStore:
             raise FleetError("members must be a sequence")
         if not isinstance(tasks, Sequence) or isinstance(tasks, (str, bytes)):
             raise FleetError("tasks must be a sequence")
-        view = spec.get("view")
-        profile_ref = (
-            str(view.get("profile_ref") or "").strip()
-            if isinstance(view, Mapping)
-            else ""
-        )
         config_hash = hashlib.sha256(
             json.dumps(
                 config,
@@ -310,10 +303,6 @@ class FleetStore:
             if "config_hash" not in fleet_columns:
                 db.execute(
                     "ALTER TABLE fleets ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''"
-                )
-            if "profile_ref" not in fleet_columns:
-                db.execute(
-                    "ALTER TABLE fleets ADD COLUMN profile_ref TEXT NOT NULL DEFAULT ''"
                 )
             context_columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(member_context_state)")
@@ -352,11 +341,18 @@ class FleetStore:
                     "tasks": counts["tasks"],
                     "idempotent": True,
                 }
-            db.execute(
-                "INSERT INTO fleets(fleet_id,title,config_hash,profile_ref,created_at) "
-                "VALUES(?,?,?,?,?)",
-                (fleet_id, title, config_hash, profile_ref, created_at),
-            )
+            if "profile_ref" in fleet_columns:
+                db.execute(
+                    "INSERT INTO fleets(fleet_id,title,config_hash,profile_ref,created_at) "
+                    "VALUES(?,?,?,?,?)",
+                    (fleet_id, title, config_hash, "", created_at),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO fleets(fleet_id,title,config_hash,created_at) "
+                    "VALUES(?,?,?,?)",
+                    (fleet_id, title, config_hash, created_at),
+                )
             db.execute(
                 "INSERT INTO fleet_contexts(fleet_id,objective,completion_criteria_json,"
                 "stop_conditions_json,manager_ref) VALUES(?,?,?,?,?)",
@@ -2244,7 +2240,10 @@ class FleetStore:
 
     def status(self, fleet_id: str) -> dict[str, Any]:
         with self.connect() as db:
-            fleet = db.execute("SELECT * FROM fleets WHERE fleet_id=?", (fleet_id,)).fetchone()
+            fleet = db.execute(
+                "SELECT fleet_id,title,config_hash,created_at FROM fleets WHERE fleet_id=?",
+                (fleet_id,),
+            ).fetchone()
             if fleet is None:
                 raise FleetError(f"unknown fleet: {fleet_id}")
             members = [dict(row) for row in db.execute(

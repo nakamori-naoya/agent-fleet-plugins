@@ -24,7 +24,7 @@ role catalogは別marketplaceの`agent-roles`を使う。Coreだけを使う場�
 
 ## 依存関係
 
-外部pluginは`plugin@marketplace`のidentityで指定する。install commandではversionを固定しない。現在のFleet pluginは0.5.1であり、`roles.harness/v1`のcatalog version 1とHerdr 0.8.xのCLI surfaceを前提とする。
+外部pluginは`plugin@marketplace`のidentityで指定する。install commandではversionを固定しない。現在のFleet pluginは0.6.0であり、`roles.harness/v1`のcatalog version 1とHerdr 0.8.xのCLI surfaceを前提とする。
 
 | 依存 | 必須度 | 用途 |
 |---|---|---|
@@ -95,13 +95,13 @@ Claude Codeでは`agent-fleet-session-hooks`を通常pluginとしてinstallし�
 
 Coreだけを利用する場合、Herdr CLIと`agent-fleet-herdr`は不要である。Adapterのdry-runはHerdrを実行しないが、`--execute`を使う前に`herdr --version`が0.8.xであることを確認する。
 
-Fleet YAMLの形式例は[manager 1・worker 2の利用者設定](configs/fleets/release-readiness.yml)にある。最初にCore validatorへFleet YAMLと検査済みRole Catalogを渡す。Coreは各`role_ref`を解決し、RoleDefinitionとCatalogのidentity・内容hashを含むnormalized JSONへ変換してHerdr Adapterへ渡す。`provision`はdry-runが既定であり、`--execute`を付けない限りHerdrを変更しない。
+Fleet YAMLの形式例は[manager 1・worker 2の利用者設定](configs/fleets/release-readiness.yml)にある。最初にCore validatorへFleet YAMLと検査済みRole Catalogを渡す。Coreは各`role_ref`を解決し、RoleDefinitionとCatalogのidentity・内容hashを含むnormalized JSONへ変換する。`fleet-runtime`はこれをHerdr起動設定と表示プロファイルに合成してHerdr Adapterへ渡す。`provision`はdry-runが既定であり、`--execute`を付けない限りHerdrを変更しない。
 
 各メンバーの`runtime`へAI製品、モデル、思考量、代替モデル方針を指定する。開始例はCodexに`gpt-5.6-sol`、Claudeに`claude-fable-5-1`を使い、`fallback: fail`で古いモデルへの暗黙切替を許さない。Herdr Adapterはメンバーごとに`--kind codex`または`--kind claude`を選ぶため、同じ艦隊で両製品を混在できる。Role Catalogは役割の意味だけを持ち、AI製品やモデルを持たない。
 
-艦隊編成とpane配置の正本はplugin外の利用者設定である。既定では`~/.config/agent-fleet/fleets`と`~/.config/agent-fleet/view-profiles`を読む。repositoryの[艦隊設定例](configs/fleets/development-squad.yml)と[表示設定例](configs/view-profiles/development-focus.v1.yml)は手元へ複製して編集するための例であり、pluginは自動読込しない。実行時SQLiteもrepository外のstate directoryへ保存する。
+艦隊編成、Herdr起動設定、pane配置の正本はplugin外の利用者設定である。既定では`~/.config/agent-fleet/fleets`、`~/.config/agent-fleet/herdr-launch-profiles`、`~/.config/agent-fleet/view-profiles`を読む。repositoryの[艦隊設定例](configs/fleets/development-squad.yml)、[Herdr起動設定例](configs/herdr-launch-profiles/development-squad.yml)、[表示設定例](configs/view-profiles/role-columns.v1.yml)は手元へ複製して編集するための例であり、pluginは自動読込しない。実行時SQLiteもrepository外のstate directoryへ保存する。
 
-Codex艦隊では`spec.runtime.codex_hook_trust: preapproved`を明示すると、Herdrから起動する各Codexだけに`--dangerously-bypass-hook-trust`を渡し、役割文脈Hookの起動時レビューを省略する。これはHookの信頼確認だけを省略し、tool承認やsandboxを無効にしない。省略時と`review`指定時は対話確認を維持し、プラグイン更新で旧実行ファイルが消えた場合も未確認の新版へ自動移行しない。利用者設定例3件は、毎回の艦隊起動を止めないよう`preapproved`を明示している。
+Herdr起動設定で`spec.codex_hook_trust: preapproved`を明示すると、Herdrから起動する各Codexだけに`--dangerously-bypass-hook-trust`を渡し、役割文脈Hookの起動時レビューを省略する。これはHookの信頼確認だけを省略し、tool承認やsandboxを無効にしない。`review`指定時は対話確認を維持し、プラグイン更新で旧実行ファイルが消えた場合も未確認の新版へ自動移行しない。利用者向けHerdr起動設定例3件は、毎回の艦隊起動を止めないよう`preapproved`を明示している。
 
 Hook登録は`agent-fleet-session-hooks`へ分離し、通常セッションでは読み込まない。Hookの実体は艦隊起動時に艦隊stateへ内容address付きで固定配置し、各paneへ`AGENT_FLEET_HOOK_RUNTIME`として渡す。`fleet-runtime`は起動時と再開時に固定版をSHA-256照合する。Hook plugin内の`hooks/*.json`は検査済みの固定版を起動する一行だけを持つ。既存sessionは起動時の実体を使い続けるため、plugin cacheの旧versionが削除されても実行pathを失わない。Hook実体を更新する場合は、既存runtimeを削除するか新しいfleet IDで起動する。
 

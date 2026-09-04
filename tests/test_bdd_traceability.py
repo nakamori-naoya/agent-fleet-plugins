@@ -151,6 +151,35 @@ COVERAGE = {
     "AI実行設定がないメンバーを含む艦隊を起動しない": (
         (SPEC_TESTS, "test_member_runtime_is_required_and_legacy_top_level_model_is_rejected"),
     ),
+    "Herdrを参照しない艦隊設定を別の実行基盤でも再利用できる": (
+        (SPEC_TESTS, "test_fleet_rejects_herdr_runtime_and_view_configuration"),
+    ),
+    "Herdr起動設定が艦隊と表示プロファイルを一方向に合成する": (
+        (RUNTIME_TESTS, "test_launch_profile_composes_fleet_and_versioned_view_profile"),
+    ),
+    "三つの役割群を三列へ配置する": (
+        (ADAPTER_TESTS, "test_role_groups_compile_to_three_columns_with_equal_vertical_stacks"),
+    ),
+    "起動名と艦隊IDが異なっても論理状態と実行状態を混同しない": (
+        (RUNTIME_TESTS, "test_launch_identity_may_differ_from_fleet_identity_without_mixing_state_paths"),
+    ),
+    "同じ艦隊を別の起動設定から同時に起動しない": (
+        (RUNTIME_TESTS, "test_second_launch_profile_for_active_fleet_is_rejected_before_new_state"),
+        (RUNTIME_TESTS, "test_same_launch_is_locked_even_when_its_fleet_reference_changes"),
+    ),
+    "起動設定と参照先が一致しない間は状態を変えない": (
+        (ADAPTER_TESTS, "test_provision_rejects_launch_reference_mismatch_before_herdr_calls"),
+        (ADAPTER_TESTS, "test_provision_cli_rejects_invalid_composition_before_state_creation"),
+    ),
+    "表示条件がメンバーを重複または未割当にする間は起動しない": (
+        (ADAPTER_TESTS, "test_role_groups_reject_duplicate_and_unassigned_members"),
+    ),
+    "起動済み配置へ同じ版名の異なる表示内容を適用しない": (
+        (ADAPTER_TESTS, "test_provision_rejects_changed_view_content_with_same_profile_identity"),
+    ),
+    "旧Fleet v1を暗黙に新しい起動設定として扱わない": (
+        (RUNTIME_TESTS, "test_legacy_fleet_requires_explicit_compatibility_switch"),
+    ),
     "再開した艦隊会話へ現在の役割文脈を戻す": (
         (HOOK_TESTS, "test_fleet_prompt_binds_session_and_compaction_restores_context"),
     ),
@@ -239,6 +268,13 @@ COVERAGE = {
     ),
     "状態確認は管理対象を変更しない": (
         (ADAPTER_TESTS, "test_status_is_read_only_and_reports_profile_bindings_and_placements"),
+    ),
+    "起動前の検査中に設定が変わった場合は状態を作らない": (
+        (RUNTIME_TESTS, "test_resolve_rejects_fleet_changed_while_core_validates_it"),
+        (RUNTIME_TESTS, "test_start_rejects_config_changed_during_preflight_before_state_creation"),
+    ),
+    "起動途中の停止要求を進捗更新で失わない": (
+        (RUNTIME_TESTS, "test_stop_during_core_provision_is_not_overwritten_by_start"),
     ),
     "期限確認の一時失敗でも保存済み指示の配送を止めない": (
         (CONTROLLER_TESTS, "test_deadline_check_failure_does_not_starve_existing_delivery_work"),

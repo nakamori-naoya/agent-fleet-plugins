@@ -1,6 +1,6 @@
 {
   "name": "agent-fleet-herdr",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Agent FleetのRuntime/View操作をHerdr 0.8へ変換するadapter",
   "author": {"name": "NaoyaNakamori"},
   "skills": "./skills/"

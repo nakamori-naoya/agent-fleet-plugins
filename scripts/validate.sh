@@ -16,10 +16,10 @@ python3 "$ROOT/scripts/validate-distribution.py" --self-test "$ROOT" || failed=1
 for manifest in \
   "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json" \
   "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.5.2" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.6.0" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
 done
 for manifest in "$HOOK_PLUGIN/.codex-plugin/plugin.json" "$HOOK_PLUGIN/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.5.2" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
+  jq -e '.version=="0.6.0" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
 done
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact|fork" and .hooks.SessionStart[0].hooks[0].timeout==12' \
   "$HOOK_PLUGIN/hooks/claude-hooks.json" >/dev/null || failed=1
@@ -38,17 +38,24 @@ test ! -e "$HERDR/view-profiles" || failed=1
 if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
   failed=1
 fi
-jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.5.2")' \
+jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.6.0")' \
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \
+  "$HERDR/adapter/schema/launch-profile.schema.yml" \
   "$HERDR/adapter/schema/view-profile.schema.yml" \
   "$ROOT/configs/fleets/development-squad.yml" "$ROOT/configs/fleets/quick-review.yml" \
   "$ROOT/configs/fleets/release-readiness.yml" \
+  "$ROOT/configs/herdr-launch-profiles/development-squad.yml" \
+  "$ROOT/configs/herdr-launch-profiles/quick-review.yml" \
+  "$ROOT/configs/herdr-launch-profiles/release-readiness.yml" \
   "$ROOT/configs/view-profiles/development-focus.v1.yml" \
-  "$ROOT/configs/view-profiles/review-grid.v1.yml"; do
+  "$ROOT/configs/view-profiles/review-grid.v1.yml" \
+  "$ROOT/configs/view-profiles/role-columns.v1.yml"; do
   yq -e '.' "$config" >/dev/null || failed=1
 done
+yq -e '.["$defs"].layoutGroup.properties.selector.additionalProperties == false and .["$defs"].layoutGroup.properties.selector.properties.role_ids.type == "array" and .["$defs"].layoutGroup.properties.selector.properties.agent_refs.type == "array" and .["$defs"].layoutGroup.properties.selector.properties.remaining.const == true' \
+  "$HERDR/adapter/schema/view-profile.schema.yml" >/dev/null || failed=1
 
 python3 -m unittest discover -s "$CORE/spec/tests" -p 'test_*.py' >/dev/null || failed=1
 python3 -m unittest discover -s "$CORE/core/tests" -p 'test_*.py' >/dev/null || failed=1
@@ -58,7 +65,8 @@ python3 -m unittest discover -s "$ROOT/tests" -p 'test_*.py' >/dev/null || faile
 fleet_json=$(python3 -S "$CORE/spec/scripts/validate_fleet.py" \
   "$ROOT/configs/fleets/development-squad.yml" \
   --role-catalog "$ROLE_CATALOG" --output-json) || failed=1
-view_profile_json=$(yq -o=json '.' "$ROOT/configs/view-profiles/development-focus.v1.yml") || failed=1
+launch_profile_json=$(yq -o=json '.' "$ROOT/configs/herdr-launch-profiles/development-squad.yml") || failed=1
+view_profile_json=$(yq -o=json '.' "$ROOT/configs/view-profiles/role-columns.v1.yml") || failed=1
 if [ -n "${fleet_json:-}" ]; then
   "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" \
     fleet.provision --config "$ROOT/configs/fleets/development-squad.yml" \
@@ -137,7 +145,8 @@ if [ -n "${fleet_json:-}" ]; then
     "$TMP_ROOT/hook-result.json" >/dev/null || failed=1
 
   "$HERDR/adapter/scripts/fleet-herdr" --state-db "$TMP_ROOT/herdr.sqlite3" \
-    provision --fleet-json "$fleet_json" --view-profile-json "$view_profile_json" \
+    provision --fleet-json "$fleet_json" --launch-profile-json "$launch_profile_json" \
+    --view-profile-json "$view_profile_json" \
     --cwd "$ROOT" \
     > "$TMP_ROOT/herdr-plan.json" || failed=1
   jq -e '.ok==true and .result.mode=="dry-run" and .result.status=="planned" and (.result.plan.operations|length)==10 and (.result.plan.placements|length)==5' \
@@ -148,6 +157,7 @@ fi
   --role-catalog "$ROLE_CATALOG" \
   --core-command "$CORE/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
+  --launch-dir "$ROOT/configs/herdr-launch-profiles" \
   --profile-dir "$ROOT/configs/view-profiles" \
   --state-dir "$TMP_ROOT/runtime-state" > "$TMP_ROOT/fleet-list.json" || failed=1
 jq -e '.ok==true and (.result|length)==3 and all(.result[]; .profile_resolved==true)' \
@@ -156,10 +166,11 @@ jq -e '.ok==true and (.result|length)==3 and all(.result[]; .profile_resolved==t
   --role-catalog "$ROLE_CATALOG" \
   --core-command "$CORE/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
+  --launch-dir "$ROOT/configs/herdr-launch-profiles" \
   --profile-dir "$ROOT/configs/view-profiles" \
   --state-dir "$TMP_ROOT/runtime-state" --cwd "$ROOT" \
   > "$TMP_ROOT/fleet-plan.json" || failed=1
-jq -e '.ok==true and .result.status=="planned" and .result.profile_ref=="local/development-focus@1" and (.result.herdr.plan.placements|length)==5' \
+jq -e '.ok==true and .result.status=="planned" and .result.profile_ref=="local/role-columns@1" and (.result.herdr.plan.placements|length)==5' \
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
 jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.start:worker-implementation" or .id=="agent.start:worker-verification"); (.argv|index("codex")) != null and (.argv|index("gpt-5.6-sol")) != null and (.argv|index("plugins.agent-fleet-session-hooks@agent-fleet.enabled=true")) != null and (.argv|index("model_reasoning_effort=\"medium\"")) != null)' \
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
@@ -174,6 +185,7 @@ cp -R "$HERDR/." "$TMP_ROOT/separate/herdr/"
   --role-catalog "$ROLE_CATALOG" \
   --core-command "$TMP_ROOT/separate/core/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
+  --launch-dir "$ROOT/configs/herdr-launch-profiles" \
   --profile-dir "$ROOT/configs/view-profiles" \
   --state-dir "$TMP_ROOT/separate-state" > "$TMP_ROOT/separate-list.json" || failed=1
 jq -e '.ok==true and (.result|length)==3' "$TMP_ROOT/separate-list.json" >/dev/null || failed=1

@@ -1,0 +1,35 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://agent-fleet.local/schema/herdr-launch-profile.schema.yml
+title: Herdr Launch Profile
+type: object
+additionalProperties: false
+required: [apiVersion, kind, metadata, spec]
+properties:
+  apiVersion:
+    const: fleet.herdr.harness/v1
+  kind:
+    const: LaunchProfile
+  metadata:
+    type: object
+    additionalProperties: false
+    required: [id]
+    properties:
+      id:
+        $ref: "#/$defs/identifier"
+  spec:
+    type: object
+    additionalProperties: false
+    required: [fleet_ref, view_profile_ref, codex_hook_trust]
+    properties:
+      fleet_ref:
+        $ref: "#/$defs/identifier"
+      view_profile_ref:
+        type: string
+        pattern: ^[a-z][a-z0-9]*(-[a-z0-9]+)*(/[a-z][a-z0-9]*(-[a-z0-9]+)*)?@[1-9][0-9]*$
+      codex_hook_trust:
+        type: string
+        enum: [preapproved, review]
+$defs:
+  identifier:
+    type: string
+    pattern: ^[a-z][a-z0-9]*(-[a-z0-9]+)*$

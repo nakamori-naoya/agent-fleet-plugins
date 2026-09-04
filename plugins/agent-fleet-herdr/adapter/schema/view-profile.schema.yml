@@ -6,7 +6,7 @@ additionalProperties: false
 required: [apiVersion, kind, metadata, spec]
 properties:
   apiVersion:
-    const: fleet.herdr.harness/v1
+    enum: [fleet.herdr.harness/v1, fleet.herdr.harness/v2]
   kind:
     const: ViewProfile
   metadata:
@@ -16,7 +16,7 @@ properties:
     properties:
       id:
         type: string
-        pattern: ^[a-z][a-z0-9-]*(/[a-z][a-z0-9-]*)?$
+        pattern: ^[a-z][a-z0-9]*(-[a-z0-9]+)*(/[a-z][a-z0-9]*(-[a-z0-9]+)*)?$
       version:
         type: integer
         minimum: 1
@@ -30,43 +30,129 @@ properties:
         additionalProperties: false
         required: [min_members, max_members]
         properties:
-          min_members: {type: integer, minimum: 1}
-          max_members: {type: integer, minimum: 1}
+          min_members:
+            type: integer
+            minimum: 1
+          max_members:
+            type: integer
+            minimum: 1
       layout:
-        $ref: '#/$defs/layout'
+        type: object
+        additionalProperties: false
+        required: [type, direction, children]
+        properties:
+          type:
+            const: split
+          direction:
+            enum: [horizontal, vertical]
+          children:
+            type: array
+allOf:
+  - if:
+      properties:
+        apiVersion:
+          const: fleet.herdr.harness/v1
+    then:
+      properties:
+        spec:
+          properties:
+            layout:
+              properties:
+                children:
+                  minItems: 2
+                  maxItems: 2
+                  prefixItems:
+                    - $ref: "#/$defs/managerSlot"
+                    - $ref: "#/$defs/memberStack"
+  - if:
+      properties:
+        apiVersion:
+          const: fleet.herdr.harness/v2
+    then:
+      properties:
+        spec:
+          properties:
+            layout:
+              properties:
+                children:
+                  minItems: 2
+                  maxItems: 8
+                  items:
+                    $ref: "#/$defs/layoutGroup"
 $defs:
-  positiveWeight: {type: integer, minimum: 1}
-  layout:
-    type: object
-    additionalProperties: false
-    required: [type, direction, children]
-    properties:
-      type: {const: split}
-      direction: {enum: [horizontal, vertical]}
-      children:
-        type: array
-        minItems: 2
-        maxItems: 2
-        prefixItems:
-          - $ref: '#/$defs/managerSlot'
-          - $ref: '#/$defs/memberStack'
+  identifier:
+    type: string
+    pattern: ^[a-z][a-z0-9]*(-[a-z0-9]+)*$
+  positiveWeight:
+    type: integer
+    minimum: 1
   managerSlot:
     type: object
     additionalProperties: false
     required: [type, selector, weight]
     properties:
-      type: {const: slot}
-      selector: {const: manager}
-      weight: {$ref: '#/$defs/positiveWeight'}
-      pane_slot: {type: string, minLength: 1}
+      type:
+        const: slot
+      selector:
+        const: manager
+      weight:
+        $ref: "#/$defs/positiveWeight"
+      pane_slot:
+        type: string
+        minLength: 1
   memberStack:
     type: object
     additionalProperties: false
     required: [type, selector, weight, direction, distribution]
     properties:
-      type: {const: stack}
-      selector: {const: non-manager}
-      weight: {$ref: '#/$defs/positiveWeight'}
-      direction: {enum: [horizontal, vertical]}
-      distribution: {const: equal}
-      pane_slot_prefix: {type: string, minLength: 1}
+      type:
+        const: stack
+      selector:
+        const: non-manager
+      weight:
+        $ref: "#/$defs/positiveWeight"
+      direction:
+        enum: [horizontal, vertical]
+      distribution:
+        const: equal
+      pane_slot_prefix:
+        type: string
+        minLength: 1
+  layoutGroup:
+    type: object
+    additionalProperties: false
+    required: [type, id, selector, weight, direction, distribution]
+    properties:
+      type:
+        const: stack
+      id:
+        $ref: "#/$defs/identifier"
+      selector:
+        type: object
+        additionalProperties: false
+        properties:
+          role_ids:
+            type: array
+            minItems: 1
+            uniqueItems: true
+            items:
+              $ref: "#/$defs/identifier"
+          agent_refs:
+            type: array
+            minItems: 1
+            uniqueItems: true
+            items:
+              $ref: "#/$defs/identifier"
+          remaining:
+            const: true
+        oneOf:
+          - required: [role_ids]
+          - required: [agent_refs]
+          - required: [remaining]
+      weight:
+        type: integer
+        minimum: 1
+      direction:
+        enum: [horizontal, vertical]
+      distribution:
+        const: equal

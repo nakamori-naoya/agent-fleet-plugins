@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -23,7 +24,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
-from view_profiles import ViewProfileError, profile_identity, validate_document
+from launch_profiles import validate_document as validate_launch_profile
+from view_profiles import (
+    ViewProfileError,
+    profile_identity,
+    resolve_layout_groups,
+    validate_document,
+)
 
 
 COMMAND_TYPES = frozenset(
@@ -56,6 +63,14 @@ def safe_token(value: str, label: str) -> str:
     if not value or "\x00" in value:
         raise HerdrAdapterError(f"{label} must be a non-empty string without NUL")
     return value
+
+
+def content_hash(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 ADAPTER_SCHEMA = """
@@ -96,6 +111,11 @@ CREATE TABLE IF NOT EXISTS workspace_intents (
     workspace_label TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS provision_specs (
+    fleet_id TEXT PRIMARY KEY,
+    composition_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -133,7 +153,9 @@ class ProvisionPlan:
     fleet_id: str
     profile_ref: str
     manager_ref: str
-    worker_refs: tuple[str, ...]
+    root_agent_ref: str
+    member_refs: tuple[str, ...]
+    composition_hash: str
     operations: tuple[Mapping[str, Any], ...]
     placements: tuple[Mapping[str, Any], ...]
 
@@ -142,7 +164,9 @@ class ProvisionPlan:
             "fleet_id": self.fleet_id,
             "profile_ref": self.profile_ref,
             "manager_ref": self.manager_ref,
-            "worker_refs": list(self.worker_refs),
+            "root_agent_ref": self.root_agent_ref,
+            "member_refs": list(self.member_refs),
+            "composition_hash": self.composition_hash,
             "operations": [dict(operation) for operation in self.operations],
             "placements": [dict(placement) for placement in self.placements],
         }
@@ -207,7 +231,7 @@ class AdapterState:
         """同じadapter stateに対する一艦隊一操作をプロセス間で保証する。"""
 
         safe_token(fleet_id, "fleet_id")
-        if self.db_path == ":memory:":
+        if self.db_path == ":memory:" or self.read_only:
             yield
             return
         lock_dir = Path(self.db_path).parent / ".locks"
@@ -336,18 +360,46 @@ class AdapterState:
                 placement = dict(row)
                 placement["metadata"] = json.loads(placement.pop("metadata_json"))
                 placements.append(placement)
+            try:
+                provision_spec = db.execute(
+                    "SELECT composition_hash FROM provision_specs WHERE fleet_id=?",
+                    (fleet_id,),
+                ).fetchone()
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc):
+                    raise
+                provision_spec = None
         profile_refs = sorted({item["profile_ref"] for item in placements})
         return {
             "fleet_id": fleet_id,
             "profile_ref": profile_refs[0] if len(profile_refs) == 1 else None,
+            "composition_hash": (
+                provision_spec["composition_hash"]
+                if provision_spec is not None
+                else None
+            ),
             "bindings": bindings,
             "placements": placements,
         }
+
+    def save_provision_spec(self, fleet_id: str, composition_hash: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO provision_specs(fleet_id,composition_hash,updated_at) "
+                "VALUES(?,?,?) ON CONFLICT(fleet_id) DO UPDATE SET "
+                "composition_hash=excluded.composition_hash,updated_at=excluded.updated_at",
+                (
+                    safe_token(fleet_id, "fleet_id"),
+                    safe_token(composition_hash, "composition_hash"),
+                    utc_now(),
+                ),
+            )
 
     def save_provision(
         self,
         bindings: Sequence[RuntimeBinding],
         placements: Sequence[Mapping[str, Any]],
+        composition_hash: str,
     ) -> None:
         """Persist a completed provision atomically after all Herdr calls succeed."""
 
@@ -391,6 +443,12 @@ class AdapterState:
                 "UPDATE provisioning_journal SET state='complete',updated_at=? "
                 "WHERE fleet_id=?",
                 (now, bindings[0].fleet_id),
+            )
+            db.execute(
+                "INSERT INTO provision_specs(fleet_id,composition_hash,updated_at) "
+                "VALUES(?,?,?) ON CONFLICT(fleet_id) DO UPDATE SET "
+                "composition_hash=excluded.composition_hash,updated_at=excluded.updated_at",
+                (bindings[0].fleet_id, composition_hash, now),
             )
 
     def save_workspace_journal(
@@ -469,6 +527,7 @@ class AdapterState:
             db.execute("DELETE FROM view_placements WHERE fleet_id=?", (fleet_id,))
             db.execute("DELETE FROM provisioning_journal WHERE fleet_id=?", (fleet_id,))
             db.execute("DELETE FROM workspace_intents WHERE fleet_id=?", (fleet_id,))
+            db.execute("DELETE FROM provision_specs WHERE fleet_id=?", (fleet_id,))
 
 
 class Herdr08Commands:
@@ -619,6 +678,10 @@ class Herdr08Commands:
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+FLEET_IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+ROLE_REFERENCE_PATTERN = re.compile(
+    r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*@[1-9][0-9]*$"
+)
 
 
 class HerdrAdapter:
@@ -640,13 +703,13 @@ class HerdrAdapter:
     ) -> tuple[
         str,
         str,
-        tuple[str, ...],
-        str,
+        tuple[tuple[str, str], ...],
         Mapping[str, Mapping[str, str]],
         Mapping[str, str],
     ]:
-        if fleet.get("apiVersion") != "fleet.harness/v1" or fleet.get("kind") != "Fleet":
-            raise HerdrAdapterError("provision requires a fleet.harness/v1 Fleet document")
+        api_version = fleet.get("apiVersion")
+        if api_version not in {"fleet.harness/v1", "fleet.harness/v2"} or fleet.get("kind") != "Fleet":
+            raise HerdrAdapterError("provision requires a supported Fleet document")
         metadata = fleet.get("metadata")
         fleet_spec = fleet.get("spec")
         if not isinstance(metadata, Mapping) or not isinstance(fleet_spec, Mapping):
@@ -654,24 +717,27 @@ class HerdrAdapter:
         fleet_id = metadata.get("id")
         members = fleet_spec.get("members")
         collaboration = fleet_spec.get("collaboration")
-        runtime = fleet_spec.get("runtime")
-        view = fleet_spec.get("view")
-        if not isinstance(fleet_id, str) or not fleet_id:
-            raise HerdrAdapterError("Fleet metadata.id must be a non-empty string")
+        if (
+            not isinstance(fleet_id, str)
+            or FLEET_IDENTIFIER_PATTERN.fullmatch(fleet_id) is None
+        ):
+            raise HerdrAdapterError("Fleet metadata.id must be a safe identifier")
         if not isinstance(members, list):
             raise HerdrAdapterError("Fleet spec.members must be a list")
         if not isinstance(collaboration, Mapping):
             raise HerdrAdapterError("Fleet spec.collaboration must be a JSON object")
-        if not isinstance(runtime, Mapping) or runtime.get("provider") != "herdr":
-            raise HerdrAdapterError("Fleet spec.runtime.provider must be herdr")
-        profile_ref = view.get("profile_ref") if isinstance(view, Mapping) else None
-        if not isinstance(profile_ref, str) or not profile_ref:
-            raise HerdrAdapterError("Fleet spec.view.profile_ref must be versioned")
+        if api_version == "fleet.harness/v2" and (
+            "runtime" in fleet_spec or "view" in fleet_spec
+        ):
+            raise HerdrAdapterError(
+                "portable Fleet v2 must not contain adapter runtime or view configuration"
+            )
         manager_ref = collaboration.get("manager")
         if not isinstance(manager_ref, str) or not manager_ref:
             raise HerdrAdapterError("Fleet spec.collaboration.manager must be an agent_ref")
 
         refs: list[str] = []
+        member_roles: list[tuple[str, str]] = []
         member_runtimes: dict[str, Mapping[str, str]] = {}
         models: dict[str, str] = {}
         for index, member in enumerate(members):
@@ -679,14 +745,33 @@ class HerdrAdapter:
                 raise HerdrAdapterError(f"Fleet spec.members[{index}] must be a JSON object")
             agent_ref = member.get("agent_ref")
             role_ref = member.get("role_ref")
-            if not isinstance(agent_ref, str) or not agent_ref:
-                raise HerdrAdapterError(f"Fleet spec.members[{index}].agent_ref is required")
-            if not isinstance(role_ref, str) or not role_ref:
-                raise HerdrAdapterError(f"Fleet spec.members[{index}].role_ref is required")
+            if (
+                not isinstance(agent_ref, str)
+                or FLEET_IDENTIFIER_PATTERN.fullmatch(agent_ref) is None
+            ):
+                raise HerdrAdapterError(
+                    f"Fleet spec.members[{index}].agent_ref must be a safe identifier"
+                )
+            if (
+                not isinstance(role_ref, str)
+                or ROLE_REFERENCE_PATTERN.fullmatch(role_ref) is None
+            ):
+                raise HerdrAdapterError(
+                    f"Fleet spec.members[{index}].role_ref must be a versioned role reference"
+                )
             if agent_ref in refs:
                 raise HerdrAdapterError(f"duplicate Fleet member agent_ref: {agent_ref}")
             refs.append(agent_ref)
+            member_roles.append((agent_ref, role_ref))
             member_runtime = member.get("runtime")
+            if api_version == "fleet.harness/v2" and member_runtime is None:
+                raise HerdrAdapterError(
+                    f"Fleet spec.members[{index}].runtime is required for portable Fleet v2"
+                )
+            if api_version == "fleet.harness/v2" and "model" in member:
+                raise HerdrAdapterError(
+                    f"Fleet spec.members[{index}].model is legacy; use runtime.model"
+                )
             if member_runtime is not None:
                 if not isinstance(member_runtime, Mapping):
                     raise HerdrAdapterError(
@@ -727,8 +812,7 @@ class HerdrAdapter:
                 models[agent_ref] = model
         if refs.count(manager_ref) != 1:
             raise HerdrAdapterError("Fleet must contain exactly one declared manager member")
-        workers = tuple(agent_ref for agent_ref in refs if agent_ref != manager_ref)
-        return fleet_id, manager_ref, workers, profile_ref, member_runtimes, models
+        return fleet_id, manager_ref, tuple(member_roles), member_runtimes, models
 
     def plan_provision(
         self,
@@ -736,13 +820,13 @@ class HerdrAdapter:
         cwd: str,
         agent_kind: str,
         view_profile: Mapping[str, Any],
+        launch_profile: Mapping[str, Any],
         agent_environment: Mapping[str, str] | None = None,
     ) -> ProvisionPlan:
         (
             fleet_id,
             manager_ref,
-            workers,
-            profile_ref,
+            members,
             member_runtimes,
             models,
         ) = self._fleet_parts(fleet)
@@ -751,17 +835,7 @@ class HerdrAdapter:
                 f"per-member model selection is not supported for agent kind {agent_kind!r}"
             )
 
-        spec = fleet.get("spec")
-        runtime = spec.get("runtime") if isinstance(spec, Mapping) else None
-        hook_trust = (
-            runtime.get("codex_hook_trust", "review")
-            if isinstance(runtime, Mapping)
-            else "review"
-        )
-        if hook_trust not in {"preapproved", "review"}:
-            raise HerdrAdapterError(
-                "Fleet spec.runtime.codex_hook_trust must be preapproved or review"
-            )
+        hook_trust = "review"
         provision_environment = dict(agent_environment or {})
         configured_products = {
             runtime["product"] for runtime in member_runtimes.values()
@@ -802,31 +876,45 @@ class HerdrAdapter:
             resolved_profile_ref = profile_identity(view_profile)
         except ViewProfileError as exc:
             raise HerdrAdapterError(str(exc)) from exc
-        if resolved_profile_ref != profile_ref:
+        profile_ref = resolved_profile_ref
+        launch_errors = validate_launch_profile(launch_profile)
+        if launch_errors:
             raise HerdrAdapterError(
-                f"View Profile {resolved_profile_ref!r} does not match Fleet reference {profile_ref!r}"
+                "invalid LaunchProfile: " + "; ".join(launch_errors)
             )
+        launch_spec = launch_profile["spec"]
+        if launch_spec["fleet_ref"] != fleet_id:
+            raise HerdrAdapterError(
+                "LaunchProfile fleet_ref does not match Fleet metadata.id"
+            )
+        if launch_spec["view_profile_ref"] != profile_ref:
+            raise HerdrAdapterError(
+                "LaunchProfile view_profile_ref does not match ViewProfile identity"
+            )
+        hook_trust = launch_spec["codex_hook_trust"]
+        if not member_runtimes or "codex" in configured_products:
+            provision_environment["AGENT_FLEET_CODEX_HOOK_TRUST"] = hook_trust
         profile_spec = view_profile["spec"]
         constraints = profile_spec["constraints"]
-        member_count = len(workers) + 1
+        member_count = len(members)
         if not constraints["min_members"] <= member_count <= constraints["max_members"]:
             raise HerdrAdapterError(
                 f"View Profile {profile_ref!r} does not support {member_count} members"
             )
-        if not workers:
-            raise HerdrAdapterError("View Profile non-manager stack requires at least one member")
         layout = profile_spec["layout"]
-        manager_slot, member_stack = layout["children"]
+        try:
+            groups = resolve_layout_groups(view_profile, members, manager_ref)
+        except ViewProfileError as exc:
+            raise HerdrAdapterError(str(exc)) from exc
         split_direction = {"horizontal": "right", "vertical": "down"}
-        total_weight = manager_slot["weight"] + member_stack["weight"]
-        member_fraction = member_stack["weight"] / total_weight
         safe_token(cwd, "cwd")
         safe_token(agent_kind, "agent_kind")
         for product in configured_products:
             safe_token(product, "member runtime product")
         root_pane = "$workspace.root_pane"
         workspace_label = f"agent-fleet:{fleet_id}:<operation-id>"
-        manager_product, manager_args = member_execution(manager_ref)
+        root_agent_ref = groups[0].member_refs[0]
+        root_product, root_args = member_execution(root_agent_ref)
         operations: list[Mapping[str, Any]] = [
             {
                 "id": "workspace.create",
@@ -836,46 +924,28 @@ class HerdrAdapter:
                 "produces": ["workspace_id", "tab_id", "root_pane_id"],
             },
             {
-                "id": f"agent.start:{manager_ref}",
+                "id": f"agent.start:{root_agent_ref}",
                 "argv": self.commands.agent_start(
-                    manager_ref, manager_product, root_pane, manager_args
+                    root_agent_ref, root_product, root_pane, root_args
                 ),
             },
         ]
-        placements: list[Mapping[str, Any]] = [
-            {
-                "agent_ref": manager_ref,
-                "workspace_slot": fleet_id,
-                "tab_slot": profile_ref,
-                "pane_slot": manager_slot.get("pane_slot", "manager"),
-                "profile_ref": profile_ref,
-                "metadata": {
-                    "profile_ref": profile_ref,
-                    "fraction": manager_slot["weight"] / total_weight,
-                    "order": 0,
-                },
-            }
-        ]
+        group_leader_panes = {groups[0].group_id: root_pane}
         split_target = root_pane
-        for index, worker_ref in enumerate(workers, 1):
-            worker_product, worker_args = member_execution(worker_ref)
-            pane_ref = f"$pane:{worker_ref}"
+        for group_index, group in enumerate(groups[1:], 1):
+            agent_ref = group.member_refs[0]
+            product, args = member_execution(agent_ref)
+            pane_ref = f"$pane:{agent_ref}"
+            remaining_weight = sum(item.weight for item in groups[group_index - 1 :])
+            existing_fraction = groups[group_index - 1].weight / remaining_weight
             operations.append(
                 {
-                    "id": f"pane.split:{worker_ref}",
+                    "id": f"pane.split:{agent_ref}",
                     "argv": self.commands.pane_split(
                         split_target,
-                        split_direction[
-                            layout["direction"]
-                            if index == 1
-                            else member_stack["direction"]
-                        ],
+                        split_direction[layout["direction"]],
                         cwd,
-                        (
-                            member_fraction
-                            if index == 1
-                            else (len(workers) - index + 1) / (len(workers) - index + 2)
-                        ),
+                        existing_fraction,
                         provision_environment,
                     ),
                     "produces": [pane_ref],
@@ -883,28 +953,90 @@ class HerdrAdapter:
             )
             operations.append(
                 {
-                    "id": f"agent.start:{worker_ref}",
+                    "id": f"agent.start:{agent_ref}",
                     "argv": self.commands.agent_start(
-                        worker_ref, worker_product, pane_ref, worker_args
+                        agent_ref, product, pane_ref, args
                     ),
                 }
             )
-            placements.append(
-                {
-                    "agent_ref": worker_ref,
-                    "workspace_slot": fleet_id,
-                    "tab_slot": profile_ref,
-                    "pane_slot": f"{member_stack.get('pane_slot_prefix', 'members')}.{index}",
-                    "profile_ref": profile_ref,
-                    "metadata": {"profile_ref": profile_ref, "order": index},
-                }
-            )
+            group_leader_panes[group.group_id] = pane_ref
             split_target = pane_ref
+
+        for group in groups:
+            split_target = group_leader_panes[group.group_id]
+            count = len(group.member_refs)
+            for position, agent_ref in enumerate(group.member_refs[1:], 1):
+                product, args = member_execution(agent_ref)
+                pane_ref = f"$pane:{agent_ref}"
+                operations.append(
+                    {
+                        "id": f"pane.split:{agent_ref}",
+                        "argv": self.commands.pane_split(
+                            split_target,
+                            split_direction[group.direction],
+                            cwd,
+                            1 / (count - position + 1),
+                            provision_environment,
+                        ),
+                        "produces": [pane_ref],
+                    }
+                )
+                operations.append(
+                    {
+                        "id": f"agent.start:{agent_ref}",
+                        "argv": self.commands.agent_start(
+                            agent_ref, product, pane_ref, args
+                        ),
+                    }
+                )
+                split_target = pane_ref
+
+        placements: list[Mapping[str, Any]] = []
+        placement_order = 0
+        total_weight = sum(group.weight for group in groups)
+        legacy_view_profile = (
+            view_profile["apiVersion"] == "fleet.herdr.harness/v1"
+        )
+        for group in groups:
+            for position, agent_ref in enumerate(group.member_refs, 1):
+                pane_slot = (
+                    group.group_id
+                    if legacy_view_profile and agent_ref == manager_ref
+                    else f"{group.group_id}.{position}"
+                )
+                placements.append(
+                    {
+                        "agent_ref": agent_ref,
+                        "workspace_slot": fleet_id,
+                        "tab_slot": profile_ref,
+                        "pane_slot": pane_slot,
+                        "profile_ref": profile_ref,
+                        "metadata": {
+                            "profile_ref": profile_ref,
+                            "group_fraction": group.weight / total_weight,
+                            "order": placement_order,
+                        },
+                    }
+                )
+                placement_order += 1
+        member_refs = tuple(agent_ref for agent_ref, _ in members)
+        composition_hash = content_hash(
+            {
+                "fleet": fleet,
+                "launch_profile": launch_profile,
+                "view_profile": view_profile,
+                "cwd": cwd,
+                "agent_kind": agent_kind,
+                "agent_environment": provision_environment,
+            }
+        )
         return ProvisionPlan(
             fleet_id,
             profile_ref,
             manager_ref,
-            workers,
+            root_agent_ref,
+            member_refs,
+            composition_hash,
             tuple(operations),
             tuple(placements),
         )
@@ -1076,12 +1208,18 @@ class HerdrAdapter:
         cwd: str,
         agent_kind: str,
         view_profile: Mapping[str, Any],
+        launch_profile: Mapping[str, Any],
         *,
         execute: bool = False,
         agent_environment: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         plan = self.plan_provision(
-            fleet, cwd, agent_kind, view_profile, agent_environment
+            fleet,
+            cwd,
+            agent_kind,
+            view_profile,
+            launch_profile,
+            agent_environment,
         )
         with self.state.fleet_lock(plan.fleet_id):
             return self._provision_locked(plan, execute=execute)
@@ -1125,7 +1263,7 @@ class HerdrAdapter:
             else {"bindings": [], "placements": [], "profile_ref": None}
         )
         if observed["bindings"] or observed["placements"]:
-            expected_refs = {plan.manager_ref, *plan.worker_refs}
+            expected_refs = set(plan.member_refs)
             bound_refs = {item["agent_ref"] for item in observed["bindings"]}
             placed_refs = {item["agent_ref"] for item in observed["placements"]}
             observed_profile_ref = observed["profile_ref"]
@@ -1133,6 +1271,18 @@ class HerdrAdapter:
                 raise HerdrAdapterError(
                     f"View Profile conflict for fleet {plan.fleet_id!r}: "
                     f"observed {observed_profile_ref!r}, requested {plan.profile_ref!r}"
+                )
+            observed_composition_hash = observed.get("composition_hash")
+            if observed_composition_hash is None:
+                raise HerdrAdapterError(
+                    f"fleet {plan.fleet_id!r} predates composition identity; "
+                    "deprovision it before provisioning with the current adapter"
+                )
+            if observed_composition_hash != plan.composition_hash:
+                raise HerdrAdapterError(
+                    f"composition conflict for fleet {plan.fleet_id!r}; "
+                    "deprovision it before changing Fleet, LaunchProfile, ViewProfile, "
+                    "working directory, or agent launch settings"
                 )
             if (
                 observed_profile_ref == plan.profile_ref
@@ -1169,7 +1319,7 @@ class HerdrAdapter:
             plan.fleet_id, workspace_id, tab_id, root_pane_id
         )
         pane_ids: dict[str, str] = {"$workspace.root_pane": root_pane_id}
-        binding_panes: dict[str, str] = {plan.manager_ref: root_pane_id}
+        binding_panes: dict[str, str] = {plan.root_agent_ref: root_pane_id}
 
         for operation in plan.operations[1:]:
             operation_id = str(operation["id"])
@@ -1185,7 +1335,7 @@ class HerdrAdapter:
                 pane_ids[f"$pane:{worker_ref}"] = pane_id
                 binding_panes[worker_ref] = pane_id
 
-        ordered_refs = (plan.manager_ref, *plan.worker_refs)
+        ordered_refs = plan.member_refs
         bindings = [
             RuntimeBinding(
                 agent_ref,
@@ -1198,7 +1348,9 @@ class HerdrAdapter:
             )
             for agent_ref in ordered_refs
         ]
-        self.state.save_provision(bindings, plan.placements)
+        self.state.save_provision(
+            bindings, plan.placements, plan.composition_hash
+        )
         return {
             "mode": "execute",
             "status": "provisioned",
@@ -1421,6 +1573,7 @@ def build_parser() -> argparse.ArgumentParser:
     provision = sub.add_parser("provision")
     provision.add_argument("--fleet-json", type=json_object, required=True)
     provision.add_argument("--view-profile-json", type=json_object, required=True)
+    provision.add_argument("--launch-profile-json", type=json_object, required=True)
     provision.add_argument("--cwd", required=True)
     provision.add_argument("--agent-kind", default="codex", help=argparse.SUPPRESS)
     provision.add_argument("--agent-core-command")
@@ -1470,6 +1623,34 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        commands = Herdr08Commands(args.herdr_binary)
+        provision_environment: dict[str, str] = {}
+        if args.action == "provision":
+            if bool(args.agent_core_command) != bool(args.agent_core_db):
+                raise HerdrAdapterError(
+                    "--agent-core-command and --agent-core-db must be provided together"
+                )
+            if args.agent_core_command:
+                provision_environment.update(
+                    {
+                        "AGENT_FLEET_CORE_COMMAND": args.agent_core_command,
+                        "AGENT_FLEET_CORE_DB": args.agent_core_db,
+                    }
+                )
+            if args.agent_hook_runtime:
+                provision_environment["AGENT_FLEET_HOOK_RUNTIME"] = (
+                    args.agent_hook_runtime
+                )
+            # Validate and compile entirely in memory before the execute path creates
+            # the adapter DB, lock directory, or any Herdr resource.
+            HerdrAdapter(AdapterState(":memory:"), commands).plan_provision(
+                args.fleet_json,
+                args.cwd,
+                args.agent_kind,
+                args.view_profile_json,
+                args.launch_profile_json,
+                provision_environment,
+            )
         if args.action in {"provision", "deprovision"} and not args.execute:
             state = (
                 AdapterState(args.state_db, initialize=False)
@@ -1480,29 +1661,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             state = AdapterState(args.state_db, initialize=False)
         else:
             state = AdapterState(args.state_db)
-        adapter = HerdrAdapter(state, Herdr08Commands(args.herdr_binary))
+        adapter = HerdrAdapter(state, commands)
         if args.action == "provision":
-            if bool(args.agent_core_command) != bool(args.agent_core_db):
-                raise HerdrAdapterError(
-                    "--agent-core-command and --agent-core-db must be provided together"
-                )
-            agent_environment = (
-                {
-                    "AGENT_FLEET_CORE_COMMAND": args.agent_core_command,
-                    "AGENT_FLEET_CORE_DB": args.agent_core_db,
-                }
-                if args.agent_core_command
-                else {}
-            )
-            if args.agent_hook_runtime:
-                agent_environment["AGENT_FLEET_HOOK_RUNTIME"] = args.agent_hook_runtime
             result = adapter.provision(
                 args.fleet_json,
                 args.cwd,
                 args.agent_kind,
                 args.view_profile_json,
+                args.launch_profile_json,
                 execute=args.execute,
-                agent_environment=agent_environment,
+                agent_environment=provision_environment,
             )
         elif args.action == "deprovision":
             result = adapter.deprovision(args.fleet, execute=args.execute)

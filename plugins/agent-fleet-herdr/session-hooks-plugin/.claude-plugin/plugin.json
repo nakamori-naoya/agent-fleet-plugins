@@ -1,6 +1,6 @@
 {
   "name": "agent-fleet-session-hooks",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "艦隊agent sessionだけで役割文脈Hookを有効にする",
   "author": {"name": "NaoyaNakamori"},
   "hooks": "./hooks/claude-hooks.json"

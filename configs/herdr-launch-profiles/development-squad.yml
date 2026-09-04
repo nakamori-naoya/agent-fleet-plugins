@@ -1,0 +1,8 @@
+apiVersion: fleet.herdr.harness/v1
+kind: LaunchProfile
+metadata:
+  id: development-squad
+spec:
+  fleet_ref: development-squad
+  view_profile_ref: local/role-columns@1
+  codex_hook_trust: preapproved

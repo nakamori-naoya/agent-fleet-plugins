@@ -6,7 +6,7 @@ additionalProperties: false
 required: [apiVersion, kind, metadata, spec]
 properties:
   apiVersion:
-    const: fleet.harness/v1
+    enum: [fleet.harness/v1, fleet.harness/v2]
   kind:
     const: Fleet
   metadata:
@@ -39,9 +39,22 @@ properties:
       collaboration:
         $ref: "#/$defs/collaboration"
       runtime:
-        $ref: "#/$defs/runtimeBinding"
+        $ref: "#/$defs/legacyRuntimeBinding"
       view:
-        $ref: "#/$defs/viewPlacement"
+        $ref: "#/$defs/legacyViewPlacement"
+allOf:
+  - if:
+      properties:
+        apiVersion:
+          const: fleet.harness/v2
+      required: [apiVersion]
+    then:
+      properties:
+        spec:
+          not:
+            anyOf:
+              - required: [runtime]
+              - required: [view]
 $defs:
   nonEmptyString:
     type: string
@@ -125,8 +138,8 @@ $defs:
             const: manager
           include_task_updates:
             type: boolean
-  runtimeBinding:
-    description: Requested runtime binding, never live process or session state.
+  legacyRuntimeBinding:
+    description: Deprecated v1-only Herdr binding. New Fleet v2 documents must use a Herdr LaunchProfile.
     type: object
     additionalProperties: false
     required: [provider]
@@ -134,15 +147,14 @@ $defs:
       provider:
         $ref: "#/$defs/nonEmptyString"
       codex_hook_trust:
-        description: Whether Herdr-started Codex members review hooks interactively or use the fleet's preapproved hooks without a prompt.
         type: string
         enum: [preapproved, review]
-  viewPlacement:
-    description: Versioned logical presentation reference, never Herdr geometry or a file path.
+  legacyViewPlacement:
+    description: Deprecated v1-only ViewProfile reference.
     type: object
     additionalProperties: false
     required: [profile_ref]
     properties:
       profile_ref:
         type: string
-        pattern: ^[a-z][a-z0-9-]*(/[a-z][a-z0-9-]*)?@[1-9][0-9]*$
+        pattern: ^[a-z][a-z0-9]*(-[a-z0-9]+)*(/[a-z][a-z0-9]*(-[a-z0-9]+)*)?@[1-9][0-9]*$

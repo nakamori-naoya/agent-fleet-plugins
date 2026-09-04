@@ -110,25 +110,29 @@ class FleetValidatorTest(unittest.TestCase):
         errors = self.errors_for(use_legacy_model)
         self.assertIn("spec.members[0].model: is not allowed", errors)
 
-    def test_codex_hook_trust_accepts_only_preapproved_or_review(self) -> None:
-        for value in ("preapproved", "review"):
-            with self.subTest(value=value):
-                errors = self.errors_for(
-                    lambda doc, selected=value: doc["spec"]["runtime"].__setitem__(
-                        "codex_hook_trust", selected
-                    )
-                )
-                self.assertEqual([], errors)
+    def test_fleet_rejects_herdr_runtime_and_view_configuration(self) -> None:
+        def add_adapter_configuration(doc):
+            doc["spec"]["runtime"] = {
+                "provider": "herdr",
+                "codex_hook_trust": "preapproved",
+            }
+            doc["spec"]["view"] = {"profile_ref": "local/review-grid@1"}
 
-        errors = self.errors_for(
-            lambda doc: doc["spec"]["runtime"].__setitem__(
-                "codex_hook_trust", "bypass-everything"
-            )
-        )
-        self.assertIn(
-            "spec.runtime.codex_hook_trust: must be 'preapproved' or 'review'",
-            errors,
-        )
+        errors = self.errors_for(add_adapter_configuration)
+
+        self.assertIn("spec.runtime: is not allowed", errors)
+        self.assertIn("spec.view: is not allowed", errors)
+
+    def test_legacy_v1_accepts_adapter_fields_during_migration(self) -> None:
+        def use_legacy_contract(doc):
+            doc["apiVersion"] = "fleet.harness/v1"
+            doc["spec"]["runtime"] = {
+                "provider": "herdr",
+                "codex_hook_trust": "preapproved",
+            }
+            doc["spec"]["view"] = {"profile_ref": "local/review-grid@1"}
+
+        self.assertEqual([], self.errors_for(use_legacy_contract))
 
     def test_requires_fleet_and_task_completion_contracts(self) -> None:
         def mutate(doc):
@@ -167,7 +171,7 @@ class FleetValidatorTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("", result.stderr)
         normalized = json.loads(result.stdout)
-        self.assertEqual("fleet.harness/v1", normalized["apiVersion"])
+        self.assertEqual("fleet.harness/v2", normalized["apiVersion"])
         self.assertEqual("Fleet", normalized["kind"])
         self.assertEqual("release-readiness", normalized["metadata"]["id"])
         self.assertEqual("manager-1", normalized["spec"]["members"][0]["agent_ref"])
@@ -356,56 +360,6 @@ class FleetValidatorTest(unittest.TestCase):
             doc["spec"]["collaboration"]["advisor"] = "worker-2"
 
         self.assertEqual([], self.errors_for(use_catalog_owned_names))
-
-    def test_runtime_is_adapter_neutral_but_rejects_unknown_fields(self) -> None:
-        def add_state(doc):
-            doc["spec"]["runtime"]["status"] = "running"
-
-        self.assertIn("spec.runtime.status: is not allowed", self.errors_for(add_state))
-        provider_errors = self.errors_for(
-            lambda doc: doc["spec"]["runtime"].__setitem__("provider", "unknown")
-        )
-        self.assertEqual([], provider_errors)
-
-    def test_headless_core_fleet_does_not_require_runtime_or_view(self) -> None:
-        def mutate(doc):
-            doc["spec"].pop("runtime")
-            doc["spec"].pop("view")
-
-        self.assertEqual([], self.errors_for(mutate))
-
-    def test_rejects_concrete_pane_id(self) -> None:
-        errors = self.errors_for(
-            lambda doc: doc["spec"]["view"].__setitem__("pane_id", "pane-42")
-        )
-        self.assertIn("spec.view.pane_id: is not allowed", errors)
-
-    def test_requires_versioned_view_profile_reference(self) -> None:
-        def old_layout(doc):
-            doc["spec"]["view"] = {"layout": "tiled"}
-
-        errors = self.errors_for(old_layout)
-        self.assertIn("spec.view.profile_ref: is required", errors)
-        self.assertIn("spec.view.layout: is not allowed", errors)
-
-        for invalid in ("command-deck", "command-deck@0", "../deck@1", "deck@latest"):
-            with self.subTest(profile_ref=invalid):
-                errors = self.errors_for(
-                    lambda doc, ref=invalid: doc["spec"]["view"].__setitem__(
-                        "profile_ref", ref
-                    )
-                )
-                self.assertTrue(
-                    any("spec.view.profile_ref: must match" in error for error in errors)
-                )
-
-    def test_core_accepts_unknown_but_well_formed_view_profile_reference(self) -> None:
-        errors = self.errors_for(
-            lambda doc: doc["spec"]["view"].__setitem__(
-                "profile_ref", "local/team-grid@9"
-            )
-        )
-        self.assertEqual([], errors)
 
     def test_rejects_role_definition_or_task_state_fields(self) -> None:
         def mutate(doc):

@@ -20,7 +20,7 @@ SPEC.loader.exec_module(fleet_control)
 
 
 NORMALIZED = {
-    "apiVersion": "fleet.harness/v1",
+    "apiVersion": "fleet.harness/v2",
     "kind": "Fleet",
     "metadata": {"id": "demo"},
     "spec": {
@@ -64,7 +64,6 @@ NORMALIZED = {
             }
         ],
         "collaboration": {"manager": "manager"},
-        "view": {"profile_ref": "local/test-deck@1"},
     },
 }
 
@@ -101,12 +100,55 @@ class FleetStoreTest(unittest.TestCase):
                 for row in db.execute(f"PRAGMA table_info({table})")
             }
         self.assertNotIn("pane_id", columns)
+        self.assertNotIn("profile_ref", columns)
         self.assertEqual(2, len(self.store.status("demo")["members"]))
-        self.assertEqual(
-            "local/test-deck@1", self.store.status("demo")["fleet"]["profile_ref"]
-        )
+        self.assertNotIn("profile_ref", self.store.status("demo")["fleet"])
         self.assertEqual(0o600, stat.S_IMODE(self.db.stat().st_mode))
         self.assertEqual(0o700, stat.S_IMODE(self.root.stat().st_mode))
+
+    def test_portable_fleet_can_use_database_created_by_legacy_core(self):
+        legacy_db = self.root / "legacy.sqlite3"
+        with closing(sqlite3.connect(legacy_db)) as db:
+            db.execute(
+                "CREATE TABLE fleets ("
+                "fleet_id TEXT PRIMARY KEY, title TEXT NOT NULL, "
+                "config_hash TEXT NOT NULL, profile_ref TEXT NOT NULL, "
+                "created_at TEXT NOT NULL)"
+            )
+        legacy_store = fleet_control.FleetStore(legacy_db)
+
+        result = legacy_store.initialize(NORMALIZED)
+
+        self.assertEqual("demo", result["fleet_id"])
+        with closing(sqlite3.connect(legacy_db)) as db:
+            profile_ref = db.execute(
+                "SELECT profile_ref FROM fleets WHERE fleet_id='demo'"
+            ).fetchone()[0]
+        self.assertEqual("", profile_ref)
+        self.assertNotIn("profile_ref", legacy_store.status("demo")["fleet"])
+
+    def test_legacy_fleet_does_not_restore_view_profile_into_legacy_database(self):
+        legacy_db = self.root / "legacy-v1.sqlite3"
+        with closing(sqlite3.connect(legacy_db)) as db:
+            db.execute(
+                "CREATE TABLE fleets ("
+                "fleet_id TEXT PRIMARY KEY, title TEXT NOT NULL, "
+                "config_hash TEXT NOT NULL, profile_ref TEXT NOT NULL, "
+                "created_at TEXT NOT NULL)"
+            )
+        legacy_fleet = copy.deepcopy(NORMALIZED)
+        legacy_fleet["apiVersion"] = "fleet.harness/v1"
+        legacy_fleet["spec"]["view"] = {
+            "profile_ref": "local/review-grid@1"
+        }
+
+        fleet_control.FleetStore(legacy_db).initialize(legacy_fleet)
+
+        with closing(sqlite3.connect(legacy_db)) as db:
+            profile_ref = db.execute(
+                "SELECT profile_ref FROM fleets WHERE fleet_id='demo'"
+            ).fetchone()[0]
+        self.assertEqual("", profile_ref)
 
     def test_role_definition_snapshot_is_in_session_context(self):
         with self.store.connect() as db:

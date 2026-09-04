@@ -33,6 +33,46 @@ PROFILE = {
 }
 
 
+ROLE_COLUMNS_PROFILE = {
+    "apiVersion": "fleet.herdr.harness/v2",
+    "kind": "ViewProfile",
+    "metadata": {"id": "local/role-columns", "version": 1},
+    "spec": {
+        "constraints": {"min_members": 3, "max_members": 7},
+        "layout": {
+            "type": "split",
+            "direction": "horizontal",
+            "children": [
+                {
+                    "type": "stack",
+                    "id": "management",
+                    "selector": {"role_ids": ["manager"]},
+                    "weight": 34,
+                    "direction": "vertical",
+                    "distribution": "equal",
+                },
+                {
+                    "type": "stack",
+                    "id": "workers",
+                    "selector": {"role_ids": ["worker"]},
+                    "weight": 33,
+                    "direction": "vertical",
+                    "distribution": "equal",
+                },
+                {
+                    "type": "stack",
+                    "id": "support",
+                    "selector": {"remaining": True},
+                    "weight": 33,
+                    "direction": "vertical",
+                    "distribution": "equal",
+                },
+            ],
+        },
+    },
+}
+
+
 class ViewProfileTest(unittest.TestCase):
     def test_missing_user_directory_does_not_create_a_fallback_profile(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -45,6 +85,48 @@ class ViewProfileTest(unittest.TestCase):
     def test_valid_profile_has_versioned_identity(self):
         self.assertEqual([], view_profiles.validate_document(PROFILE))
         self.assertEqual("local/team-grid@2", view_profiles.profile_identity(PROFILE))
+
+    def test_profile_rejects_ambiguous_identity_segments(self):
+        invalid = json.loads(json.dumps(PROFILE))
+        invalid["metadata"]["id"] = "local/team-"
+
+        errors = view_profiles.validate_document(invalid)
+
+        self.assertTrue(any("metadata.id" in error for error in errors))
+
+    def test_role_group_profile_has_versioned_identity(self):
+        self.assertEqual([], view_profiles.validate_document(ROLE_COLUMNS_PROFILE))
+        self.assertEqual(
+            "local/role-columns@1",
+            view_profiles.profile_identity(ROLE_COLUMNS_PROFILE),
+        )
+
+    def test_role_group_profile_requires_exactly_one_selector_kind(self):
+        invalid = json.loads(json.dumps(ROLE_COLUMNS_PROFILE))
+        invalid["spec"]["layout"]["children"][0]["selector"]["agent_refs"] = [
+            "manager"
+        ]
+
+        errors = view_profiles.validate_document(invalid)
+
+        self.assertTrue(any("exactly one" in error for error in errors))
+
+    def test_role_group_profile_rejects_duplicate_group_ids(self):
+        invalid = json.loads(json.dumps(ROLE_COLUMNS_PROFILE))
+        invalid["spec"]["layout"]["children"][1]["id"] = "management"
+
+        errors = view_profiles.validate_document(invalid)
+
+        self.assertTrue(any("duplicate" in error for error in errors))
+
+    def test_role_group_profile_requires_remaining_selector_to_be_last(self):
+        invalid = json.loads(json.dumps(ROLE_COLUMNS_PROFILE))
+        children = invalid["spec"]["layout"]["children"]
+        children[1], children[2] = children[2], children[1]
+
+        errors = view_profiles.validate_document(invalid)
+
+        self.assertTrue(any("remaining" in error and "last" in error for error in errors))
 
     def test_profile_rejects_reverse_fleet_and_concrete_pane_references(self):
         invalid = json.loads(json.dumps(PROFILE))
