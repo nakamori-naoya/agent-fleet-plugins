@@ -6,9 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shlex
-import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -167,27 +166,144 @@ def _block(reason: str) -> dict[str, Any]:
     return {"decision": "block", "reason": reason}
 
 
-def _trusted_core_command() -> list[str]:
-    configured = os.environ.get("AGENT_FLEET_CORE_COMMAND")
-    if configured:
-        argv = shlex.split(configured)
-        if argv:
-            return argv
-    discovered = shutil.which("fleet-control")
-    if discovered:
-        return [discovered]
-    raise ActivationError(
-        "fleet-controlが見つかりません。AGENT_FLEET_CORE_COMMANDを設定してください。"
+def _trusted_regular_path(
+    configured: str,
+    label: str,
+    *,
+    allowed_root: Path,
+    executable: bool = False,
+    private: bool = False,
+) -> Path:
+    candidate = Path(configured).expanduser()
+    if not candidate.is_absolute():
+        raise ActivationError(f"{label}は絶対pathで指定してください。")
+    try:
+        trusted_root = allowed_root.resolve(strict=True)
+        resolved = candidate.resolve(strict=True)
+        metadata = candidate.lstat()
+    except (OSError, RuntimeError) as exc:
+        raise ActivationError(f"{label}を安全に確認できませんでした: {exc}") from exc
+    if resolved == trusted_root or trusted_root not in resolved.parents:
+        raise ActivationError(f"{label}が現在の艦隊state外を指しています。")
+    if candidate != resolved or candidate.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise ActivationError(
+            f"{label}はsymlinkを含まないcanonicalなregular fileでなければなりません。"
+        )
+    permitted_owners = {os.getuid(), 0} if executable else {os.getuid()}
+    if metadata.st_uid not in permitted_owners or metadata.st_mode & 0o022:
+        raise ActivationError(f"{label}の所有者または書き込み権限が安全ではありません。")
+    if private and metadata.st_mode & 0o077:
+        raise ActivationError(f"{label}は所有者以外から読取り・実行できない必要があります。")
+    for ancestor in candidate.parents:
+        try:
+            ancestor_metadata = ancestor.lstat()
+        except OSError as exc:
+            raise ActivationError(
+                f"{label}の親directoryを安全に確認できませんでした: {exc}"
+            ) from exc
+        if ancestor.is_symlink() or not stat.S_ISDIR(ancestor_metadata.st_mode):
+            raise ActivationError(f"{label}の親pathが安全なdirectoryではありません。")
+        if ancestor_metadata.st_uid not in {0, os.getuid()}:
+            raise ActivationError(f"{label}の親directoryの所有者が安全ではありません。")
+        writable_by_others = bool(ancestor_metadata.st_mode & 0o022)
+        root_owned_sticky = (
+            ancestor_metadata.st_uid == 0
+            and bool(ancestor_metadata.st_mode & stat.S_ISVTX)
+        )
+        if writable_by_others and not root_owned_sticky:
+            raise ActivationError(
+                f"{label}の親directoryへ第三者が書き込み可能です。"
+            )
+    if executable and not os.access(candidate, os.X_OK):
+        raise ActivationError(f"{label}を現在の利用者が実行できません。")
+    return resolved
+
+
+def _fleet_state_root() -> Path:
+    try:
+        runtime_file = Path(__file__)
+        resolved = runtime_file.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ActivationError(f"固定Hookの配置を確認できませんでした: {exc}") from exc
+    digest = resolved.parent.name
+    if (
+        runtime_file != resolved
+        or resolved.name != "role_context.py"
+        or resolved.parent.parent.name != "hook-runtimes"
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise ActivationError("固定Hookが艦隊stateの内容address付き配置にありません。")
+    fleet_state = resolved.parents[2]
+    if fleet_state.parent.name != "fleets":
+        raise ActivationError("固定Hookの艦隊state境界を確認できません。")
+    return fleet_state
+
+
+def _runtime_manifest(fleet_state: Path) -> Mapping[str, Any]:
+    state_root = fleet_state.parents[1]
+    manifest_path = state_root / "runtimes" / f"{fleet_state.name}.json"
+    trusted_manifest = _trusted_regular_path(
+        str(manifest_path),
+        "現在の艦隊runtime manifest",
+        allowed_root=state_root / "runtimes",
+        private=True,
     )
+    try:
+        document = json.loads(trusted_manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ActivationError(
+            f"現在の艦隊runtime manifestを読み取れませんでした: {exc}"
+        ) from exc
+    if not isinstance(document, Mapping):
+        raise ActivationError("現在の艦隊runtime manifestがobjectではありません。")
+    return document
+
+
+def _trusted_core_command() -> list[str]:
+    fleet_state = _fleet_state_root()
+    runtime_commands = _runtime_manifest(fleet_state).get("runtime_commands")
+    core_argv = (
+        runtime_commands.get("core")
+        if isinstance(runtime_commands, Mapping)
+        else None
+    )
+    if (
+        not isinstance(core_argv, list)
+        or len(core_argv) != 1
+        or not isinstance(core_argv[0], str)
+        or not core_argv[0]
+    ):
+        raise ActivationError(
+            "現在の艦隊runtime manifestに単一のCore実行pathがありません。"
+        )
+    manifest_value = core_argv[0]
+    configured = os.environ.get("AGENT_FLEET_CORE_COMMAND")
+    if configured != manifest_value:
+        raise ActivationError(
+            "AGENT_FLEET_CORE_COMMANDが現在の艦隊runtime manifestと一致しません。"
+        )
+    command = _trusted_regular_path(
+        manifest_value,
+        "現在の艦隊Core command",
+        allowed_root=fleet_state / "execution-runtimes",
+        executable=True,
+    )
+    return [str(command)]
 
 
 def _trusted_core_db() -> Path:
+    fleet_state = _fleet_state_root()
+    expected = fleet_state / "core.sqlite3"
     configured = os.environ.get("AGENT_FLEET_CORE_DB")
-    if configured:
-        return Path(configured).expanduser()
-    state_root = os.environ.get("XDG_STATE_HOME")
-    base = Path(state_root).expanduser() if state_root else Path.home() / ".local/state"
-    return base / "agent-fleet" / "core.sqlite3"
+    if configured and configured != str(expected):
+        raise ActivationError("AGENT_FLEET_CORE_DBが現在の艦隊stateと一致しません。")
+    return _trusted_regular_path(
+        str(expected),
+        "現在のFleet Core DB",
+        allowed_root=fleet_state,
+        private=True,
+    )
 
 
 def _consume_activation(

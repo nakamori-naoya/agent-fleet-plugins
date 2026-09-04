@@ -242,6 +242,10 @@ class FleetRuntime:
 
     def _agent_core_command(self) -> str:
         argv = list(self.core_command)
+        if len(argv) != 1:
+            raise FleetRuntimeError(
+                "agent Core command must be one executable path without arguments"
+            )
         executable = Path(argv[0])
         if executable.is_file():
             argv[0] = str(executable.resolve())
@@ -249,7 +253,7 @@ class FleetRuntime:
             discovered = shutil.which(argv[0])
             if discovered:
                 argv[0] = discovered
-        return shlex.join(argv)
+        return argv[0]
 
     def _with_execution_bundle(self, bundle: ExecutionBundle) -> FleetRuntime:
         runtime = FleetRuntime(
