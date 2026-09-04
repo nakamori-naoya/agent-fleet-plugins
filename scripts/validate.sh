@@ -69,7 +69,21 @@ fleet_json=$(python3 -S "$CORE/spec/scripts/validate_fleet.py" \
 launch_profile_json=$(yq -o=json '.' "$ROOT/configs/herdr-launch-profiles/development-squad.yml") || failed=1
 view_profile_json=$(yq -o=json '.' "$ROOT/configs/view-profiles/role-columns.v1.yml") || failed=1
 if [ -n "${fleet_json:-}" ]; then
-  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" \
+  fleet_state="$TMP_ROOT/hook-state/fleets/development-squad"
+  hook_runtime_dir="$fleet_state/hook-runtimes/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  fixed_core_root="$fleet_state/execution-runtimes/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/agent-fleet-core"
+  runtime_manifest="$TMP_ROOT/hook-state/runtimes/development-squad.json"
+  mkdir -p "$hook_runtime_dir" "$fixed_core_root" "$(dirname "$runtime_manifest")" || failed=1
+  cp "$HERDR/hooks/role_context.py" "$hook_runtime_dir/role_context.py" || failed=1
+  cp -R "$CORE/." "$fixed_core_root/" || failed=1
+  chmod 0400 "$hook_runtime_dir/role_context.py" || failed=1
+  fleet_core_command="$fixed_core_root/core/scripts/fleet-control"
+  fleet_core_db="$fleet_state/core.sqlite3"
+  jq -n --arg core "$fleet_core_command" \
+    '{runtime_commands:{core:[$core]}}' > "$runtime_manifest" || failed=1
+  chmod 0600 "$runtime_manifest" || failed=1
+
+  "$fleet_core_command" --db "$fleet_core_db" \
     fleet.provision --config "$ROOT/configs/fleets/development-squad.yml" \
     --role-catalog "$ROLE_CATALOG" \
     > "$TMP_ROOT/core.json" || failed=1
@@ -106,41 +120,41 @@ if [ -n "${fleet_json:-}" ]; then
   jq -e '.result.outbox[] | select(.spec.payload.notification_type=="task.progress.user_decision_required") | .spec.target.ref=="manager"' \
     "$TMP_ROOT/progress-status.json" >/dev/null || failed=1
 
-  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" outbox \
+  "$fleet_core_command" --db "$fleet_core_db" outbox \
     --fleet development-squad --sender-ref manager --target-agent-ref worker-implementation \
     --type message.send --command-id validation-message \
     --payload '{"text":"role context gate"}' >/dev/null || failed=1
-  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" delivery.claim \
+  "$fleet_core_command" --db "$fleet_core_db" delivery.claim \
     --fleet development-squad --worker-id validation-controller \
     > "$TMP_ROOT/unconfirmed-claim.json" || failed=1
   jq -e '.ok==true and .result==null' "$TMP_ROOT/unconfirmed-claim.json" >/dev/null || failed=1
-  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" context.confirm \
+  "$fleet_core_command" --db "$fleet_core_db" context.confirm \
     --fleet development-squad --agent-ref worker-implementation --revision 1 >/dev/null || failed=1
-  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" delivery.claim \
+  "$fleet_core_command" --db "$fleet_core_db" delivery.claim \
     --fleet development-squad --worker-id validation-controller \
     > "$TMP_ROOT/confirmed-claim.json" || failed=1
   jq -e '.ok==true and .result.command.spec.type=="message.send"' \
     "$TMP_ROOT/confirmed-claim.json" >/dev/null || failed=1
 
-  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" outbox \
+  "$fleet_core_command" --db "$fleet_core_db" outbox \
     --fleet development-squad --sender-ref manager --target-agent-ref manager \
     --type context.sync --command-id validation-context \
     --payload '{"reason":"subprocess integration"}' >/dev/null || failed=1
-  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" delivery.claim \
+  "$fleet_core_command" --db "$fleet_core_db" delivery.claim \
     --fleet development-squad --worker-id validation-hook \
     > "$TMP_ROOT/context-claim.json" || failed=1
   context_command=$(jq -c '.result.command' "$TMP_ROOT/context-claim.json") || failed=1
   context_lease=$(jq -r '.result.delivery.lease_token' "$TMP_ROOT/context-claim.json") || failed=1
-  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/core.sqlite3" delivery.begin \
+  "$fleet_core_command" --db "$fleet_core_db" delivery.begin \
     --fleet development-squad --command-id validation-context \
     --lease-token "$context_lease" >/dev/null || failed=1
   context_prompt=$(printf 'AGENT_FLEET_COMMAND_V1\n%s' "$context_command")
   jq -n --arg prompt "$context_prompt" \
     '{hook_event_name:"UserPromptSubmit",session_id:"validation-session",prompt:$prompt}' \
-    | env AGENT_FLEET_CORE_COMMAND="$CORE/core/scripts/fleet-control" \
-      AGENT_FLEET_CORE_DB="$TMP_ROOT/core.sqlite3" \
+    | env AGENT_FLEET_CORE_COMMAND="$fleet_core_command" \
+      AGENT_FLEET_CORE_DB="$fleet_core_db" \
       AGENT_FLEET_SESSION_CONTEXT_DB="$TMP_ROOT/session-context.sqlite3" \
-      python3 "$HERDR/hooks/role_context.py" --runtime-product codex \
+      python3 "$hook_runtime_dir/role_context.py" --runtime-product codex \
       > "$TMP_ROOT/hook-result.json" || failed=1
   jq -e '.hookSpecificOutput.additionalContext | contains("development-squad")' \
     "$TMP_ROOT/hook-result.json" >/dev/null || failed=1

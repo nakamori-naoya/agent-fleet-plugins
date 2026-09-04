@@ -144,6 +144,29 @@ class FakeRunner:
 
 
 class FleetRuntimeTest(unittest.TestCase):
+    def test_agent_core_command_preserves_an_executable_path_with_spaces(self):
+        executable = self.root / "fixed runtime/core/fleet-control"
+        executable.parent.mkdir(parents=True)
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o500)
+        runtime = fleet_runtime.FleetRuntime(
+            [str(executable)], ["fleet-herdr"], ["fleet-controller"]
+        )
+
+        self.assertEqual(str(executable.resolve()), runtime._agent_core_command())
+
+    def test_agent_core_command_rejects_arguments_in_environment_value(self):
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control", "--unsafe-extra"],
+            ["fleet-herdr"],
+            ["fleet-controller"],
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "one executable path"
+        ):
+            runtime._agent_core_command()
+
     def test_monitor_backs_off_only_while_idle_and_resets_after_delivery(self):
         manifest = self.state / "runtimes" / "review.json"
         manifest.parent.mkdir(parents=True)
