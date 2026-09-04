@@ -1093,6 +1093,24 @@ class FleetRuntimeTest(unittest.TestCase):
         self.assertFalse(stale_request.exists())
         self.assertFalse(request_dir.exists())
 
+    def test_one_completed_stop_does_not_clear_another_live_stop_request(self):
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
+        )
+        first = runtime._publish_stop_request(self.state, "review")
+        second = runtime._publish_stop_request(self.state, "review")
+        first_request = first.__enter__()
+        second_request = second.__enter__()
+        try:
+            first.__exit__(None, None, None)
+            self.assertFalse(first_request.exists())
+            self.assertTrue(second_request.exists())
+            self.assertTrue(runtime._stop_requested(self.state, "review"))
+        finally:
+            second.__exit__(None, None, None)
+
+        self.assertFalse(runtime._stop_requested(self.state, "review"))
+
     def test_timed_out_stop_request_prevents_start_until_stop_is_retried(self):
         runtime = fleet_runtime.FleetRuntime(
             ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
@@ -1401,6 +1419,23 @@ class FleetRuntimeTest(unittest.TestCase):
             )
 
         self.assertEqual([], list(outside.iterdir()))
+
+    def test_start_rejects_special_permission_bits_on_execution_runtime_directory(self):
+        fleet_state = self.state / "fleets/review"
+        execution_runtimes = fleet_state / "execution-runtimes"
+        execution_runtimes.mkdir(parents=True, mode=0o700)
+        execution_runtimes.chmod(0o1700)
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "unsafe ownership or mode"
+        ):
+            runtime.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
 
     def test_start_rejects_symlink_hook_runtime_directory(self):
         outside = self.root / "outside-hook"
@@ -1840,6 +1875,28 @@ class FleetRuntimeTest(unittest.TestCase):
         ):
             runtime.start("review", [self.fleets], [self.profiles], self.state,
                           str(self.root), "codex", execute=True, once=True)
+        self.assertEqual([], runner.calls)
+
+    def test_boolean_manifest_format_version_is_rejected(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        manifest_path = self.state / "runtimes/review.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["manifest_format_version"] = True
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        runner.calls.clear()
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "manifest format is unsupported"
+        ):
+            runtime.status("review", self.state)
+
         self.assertEqual([], runner.calls)
 
     def test_status_rejects_manifest_without_a_known_phase(self):

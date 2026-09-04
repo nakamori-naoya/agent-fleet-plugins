@@ -305,6 +305,10 @@ COVERAGE = {
             RUNTIME_TESTS,
             "test_timed_out_stop_request_prevents_start_until_stop_is_retried",
         ),
+        (
+            RUNTIME_TESTS,
+            "test_one_completed_stop_does_not_clear_another_live_stop_request",
+        ),
     ),
     "停止済みの艦隊を再度停止しても外部操作を繰り返さない": (
         (RUNTIME_TESTS, "test_repeated_stop_is_idempotent_without_repeating_external_changes"),
@@ -323,6 +327,10 @@ COVERAGE = {
             RUNTIME_TESTS,
             "test_start_rejects_an_allowlisted_file_reached_through_a_symlink_directory",
         ),
+        (
+            RUNTIME_TESTS,
+            "test_start_rejects_special_permission_bits_on_execution_runtime_directory",
+        ),
         (RUNTIME_TESTS, "test_status_rejects_unexpected_file_in_execution_snapshot_before_runner"),
         (RUNTIME_TESTS, "test_status_rejects_execution_snapshot_mode_change_before_runner"),
         (
@@ -330,6 +338,7 @@ COVERAGE = {
             "test_status_rejects_special_permission_bits_on_an_execution_file",
         ),
         (RUNTIME_TESTS, "test_status_rejects_a_non_string_manifest_phase"),
+        (RUNTIME_TESTS, "test_boolean_manifest_format_version_is_rejected"),
         (RUNTIME_TESTS, "test_status_rejects_a_manifest_with_another_launch_identity"),
         (RUNTIME_TESTS, "test_status_rejects_special_permission_bits_on_hook_runtime"),
     ),

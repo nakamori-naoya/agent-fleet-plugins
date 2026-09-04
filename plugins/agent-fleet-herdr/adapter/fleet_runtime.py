@@ -603,7 +603,7 @@ class FleetRuntime:
         if (
             not stat.S_ISDIR(metadata.st_mode)
             or metadata.st_uid != os.getuid()
-            or metadata.st_mode & 0o777 != 0o700
+            or metadata.st_mode & 0o7777 != 0o700
         ):
             raise FleetRuntimeError(f"{label} directory has unsafe ownership or mode")
         return child.resolve()
@@ -885,7 +885,12 @@ class FleetRuntime:
 
     @staticmethod
     def _validate_runtime_manifest(manifest: Mapping[str, Any]) -> None:
-        if manifest.get("manifest_format_version") != MANIFEST_FORMAT_VERSION:
+        manifest_format_version = manifest.get("manifest_format_version")
+        if (
+            not isinstance(manifest_format_version, int)
+            or isinstance(manifest_format_version, bool)
+            or manifest_format_version != MANIFEST_FORMAT_VERSION
+        ):
             raise FleetRuntimeError(
                 "runtime manifest format is unsupported; remove it with its original "
                 "plugin version and start it again"
@@ -1653,7 +1658,7 @@ class FleetRuntime:
             os.close(descriptor)
             temporary.unlink(missing_ok=True)
             if completed:
-                self._clear_stop_requests(request_dir)
+                self._clear_completed_stop_requests(request_dir, request_path)
 
     def _stop_requested(self, state_dir: Path, launch_id: str) -> bool:
         request_dir = self._stop_request_dir(state_dir, launch_id)
@@ -1674,9 +1679,32 @@ class FleetRuntime:
                 f"Fleet launch {launch_id!r} was cancelled by a stop request"
             )
 
-    def _clear_stop_requests(self, request_dir: Path) -> None:
+    def _clear_completed_stop_requests(
+        self, request_dir: Path, completed_request: Path
+    ) -> None:
+        completed_request.unlink(missing_ok=True)
         for request_path in request_dir.glob("*.request"):
-            request_path.unlink(missing_ok=True)
+            if request_path.is_symlink():
+                continue
+            flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                descriptor = os.open(request_path, flags)
+            except OSError:
+                continue
+            locked = False
+            try:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                except BlockingIOError:
+                    continue
+                request_path.unlink(missing_ok=True)
+            finally:
+                if locked:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
         try:
             request_dir.rmdir()
             request_dir.parent.rmdir()
