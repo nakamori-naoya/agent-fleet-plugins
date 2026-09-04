@@ -29,6 +29,13 @@ properties:
       codex_hook_trust:
         type: string
         enum: [preapproved, review]
+      agent_command_profiles:
+        type: object
+        additionalProperties:
+          type: string
+          pattern: ^[a-z][a-z0-9]*(-[a-z0-9]+)*(/[a-z][a-z0-9]*(-[a-z0-9]+)*)?@[1-9][0-9]*$
+        propertyNames:
+          $ref: "#/$defs/identifier"
 $defs:
   identifier:
     type: string

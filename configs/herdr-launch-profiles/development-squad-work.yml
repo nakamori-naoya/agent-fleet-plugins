@@ -1,0 +1,14 @@
+apiVersion: fleet.herdr.harness/v1
+kind: LaunchProfile
+metadata:
+  id: development-squad-work
+spec:
+  fleet_ref: development-squad
+  view_profile_ref: local/role-columns@1
+  codex_hook_trust: preapproved
+  agent_command_profiles:
+    manager: local/claude-work@1
+    worker-implementation: local/codex-work@1
+    worker-verification: local/codex-work@1
+    advisor: local/claude-work@1
+    reviewer: local/claude-work@1

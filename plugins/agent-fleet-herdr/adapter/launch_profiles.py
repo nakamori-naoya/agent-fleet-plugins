@@ -56,7 +56,12 @@ def validate_document(document: Any) -> list[str]:
         return sorted(set(errors))
     _unknown_keys(
         spec,
-        {"fleet_ref", "view_profile_ref", "codex_hook_trust"},
+        {
+            "fleet_ref",
+            "view_profile_ref",
+            "codex_hook_trust",
+            "agent_command_profiles",
+        },
         "$.spec",
         errors,
     )
@@ -71,6 +76,21 @@ def validate_document(document: Any) -> list[str]:
         errors.append(
             "$.spec.codex_hook_trust: must be 'preapproved' or 'review'"
         )
+    command_profiles = spec.get("agent_command_profiles", {})
+    if not isinstance(command_profiles, Mapping):
+        errors.append("$.spec.agent_command_profiles: must be an object")
+    else:
+        for agent_ref, profile_ref in command_profiles.items():
+            if not isinstance(agent_ref, str) or IDENTIFIER_PATTERN.fullmatch(agent_ref) is None:
+                errors.append(
+                    "$.spec.agent_command_profiles: keys must be lowercase agent identifiers"
+                )
+                continue
+            if not isinstance(profile_ref, str) or PROFILE_REF_PATTERN.fullmatch(profile_ref) is None:
+                errors.append(
+                    f"$.spec.agent_command_profiles.{agent_ref}: must match "
+                    "'<namespace/>name@<positive-version>'"
+                )
     return sorted(set(errors))
 
 

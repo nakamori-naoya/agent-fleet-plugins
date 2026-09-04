@@ -113,6 +113,10 @@ class FakeRunner:
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
+        if list(argv[:3]) == ["claude", "auth", "status"]:
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"loggedIn": True, "authMethod": "claude.ai"}), ""
+            )
         if list(argv[:3]) == ["codex", "plugin", "list"]:
             return subprocess.CompletedProcess(
                 argv,
@@ -223,11 +227,13 @@ class FleetRuntimeTest(unittest.TestCase):
         self.fleets = self.root / "fleets"
         self.profiles = self.root / "profiles"
         self.launches = self.root / "herdr-launch-profiles"
+        self.command_profiles = self.root / "agent-command-profiles"
         self.state = self.root / "state"
         self.role_catalog = self.root / "role-catalog.yml"
         self.fleets.mkdir()
         self.profiles.mkdir()
         self.launches.mkdir()
+        self.command_profiles.mkdir()
         self.role_catalog.write_text("fixture: true\n", encoding="utf-8")
         (self.fleets / "review.yml").write_text(json.dumps(FLEET), encoding="utf-8")
         (self.profiles / "review-grid.yml").write_text(
@@ -259,6 +265,8 @@ class FleetRuntimeTest(unittest.TestCase):
             "spec/config/defaults.yml": "{}\n",
             "config/defaults.yml": "{}\n",
             "adapter/launch_profiles.py": "# launch fixture\n",
+            "adapter/agent_command_profiles.py": "# command profile fixture\n",
+            "adapter/schema/agent-command-profile.schema.yml": "{}\n",
             "adapter/schema/launch-profile.schema.yml": "{}\n",
             "adapter/schema/view-profile.schema.yml": "{}\n",
             "adapter/scripts/fleet-runtime": "#!/bin/sh\n",
@@ -311,6 +319,72 @@ class FleetRuntimeTest(unittest.TestCase):
         self.assertFalse(resolved.legacy)
         self.assertEqual("local/review-grid@1", resolved.profile_ref)
         self.assertEqual((self.profiles / "review-grid.yml").resolve(), resolved.profile_path)
+
+    def test_launch_resolves_agent_commands_and_passes_composed_json_to_adapter(self):
+        launch = json.loads(json.dumps(LAUNCH_PROFILE))
+        launch["spec"]["agent_command_profiles"] = {
+            "manager": "local/claude-personal@1",
+            "worker": "local/codex-personal@1",
+        }
+        (self.launches / "review.yml").write_text(json.dumps(launch), encoding="utf-8")
+        for product, command in (
+            ("claude", "claude-personal"),
+            ("codex", "codex-personal"),
+        ):
+            document = {
+                "apiVersion": "fleet.runtime.harness/v1",
+                "kind": "AgentCommandProfile",
+                "metadata": {"id": f"local/{command}", "version": 1},
+                "spec": {"product": product, "command": command},
+            }
+            (self.command_profiles / f"{command}.yml").write_text(
+                json.dumps(document), encoding="utf-8"
+            )
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"],
+            ["fleet-herdr"],
+            ["fleet-controller"],
+            runner=runner,
+            role_catalog=self.role_catalog,
+            agent_command_profile_dirs=[self.command_profiles],
+        )
+
+        result = runtime.plan(
+            "review", [self.fleets], [self.profiles], self.state, str(self.root), "codex"
+        )
+
+        provision = next(call for call in runner.calls if "provision" in call)
+        profiles = json.loads(
+            provision[provision.index("--agent-command-profiles-json") + 1]
+        )
+        self.assertEqual("claude-personal", profiles["manager"]["command"])
+        self.assertEqual("codex-personal", profiles["worker"]["command"])
+        self.assertEqual(
+            "local/claude-personal@1", profiles["manager"]["profile_ref"]
+        )
+        self.assertEqual("planned", result["status"])
+
+    def test_missing_agent_command_profile_is_rejected_before_state_creation(self):
+        launch = json.loads(json.dumps(LAUNCH_PROFILE))
+        launch["spec"]["agent_command_profiles"] = {
+            "worker": "local/codex-missing@1"
+        }
+        (self.launches / "review.yml").write_text(json.dumps(launch), encoding="utf-8")
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"],
+            ["fleet-herdr"],
+            ["fleet-controller"],
+            runner=FakeRunner(),
+            agent_command_profile_dirs=[self.command_profiles],
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "AgentCommandProfile not found"
+        ):
+            runtime.resolve("review", [self.fleets], [self.profiles], self.state)
+
+        self.assertFalse(self.state.exists())
 
     def test_duplicate_profile_identity_is_rejected(self):
         (self.profiles / "duplicate.yml").write_text(
@@ -446,7 +520,9 @@ class FleetRuntimeTest(unittest.TestCase):
         stdout = StringIO()
         with (
             mock.patch.object(fleet_runtime.Path, "home", return_value=self.root),
-            mock.patch.object(fleet_runtime, "FleetRuntime", return_value=runtime),
+            mock.patch.object(
+                fleet_runtime, "FleetRuntime", return_value=runtime
+            ) as runtime_type,
             mock.patch("sys.stdout", stdout),
         ):
             result = fleet_runtime.main(
@@ -458,6 +534,10 @@ class FleetRuntimeTest(unittest.TestCase):
         self.assertEqual([self.root / ".config/agent-fleet/fleets"], fleet_dirs)
         self.assertEqual([self.root / ".config/agent-fleet/view-profiles"], profile_dirs)
         self.assertNotIn("plugins", str(profile_dirs))
+        self.assertEqual(
+            (self.root / ".config/agent-fleet/agent-command-profiles",),
+            tuple(runtime_type.call_args.kwargs["agent_command_profile_dirs"]),
+        )
 
     def test_runtime_passes_immutable_role_catalog_snapshot_to_core(self):
         runner = FakeRunner()
@@ -1536,6 +1616,108 @@ class FleetRuntimeTest(unittest.TestCase):
             runtime.start(
                 "review", [self.fleets], [self.profiles], self.state,
                 str(self.root), "codex", execute=True, once=True,
+            )
+
+        self.assertFalse(self.state.exists())
+
+    def test_start_rejects_unavailable_agent_command_before_state_creation(self):
+        launch = json.loads(json.dumps(LAUNCH_PROFILE))
+        launch["spec"]["agent_command_profiles"] = {
+            "worker": "local/codex-personal@1"
+        }
+        (self.launches / "review.yml").write_text(json.dumps(launch), encoding="utf-8")
+        command_profile = {
+            "apiVersion": "fleet.runtime.harness/v1",
+            "kind": "AgentCommandProfile",
+            "metadata": {"id": "local/codex-personal", "version": 1},
+            "spec": {"product": "codex", "command": "codex-personal"},
+        }
+        (self.command_profiles / "codex-personal.yml").write_text(
+            json.dumps(command_profile), encoding="utf-8"
+        )
+
+        class MissingAliasRunner(FakeRunner):
+            def __call__(self, argv, **kwargs):
+                if len(argv) >= 3 and argv[1] == "-lic" and argv[2].startswith(
+                    "command -v "
+                ):
+                    self.calls.append(list(argv))
+                    return subprocess.CompletedProcess(argv, 1, "", "not found")
+                return super().__call__(argv, **kwargs)
+
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"],
+            ["fleet-herdr"],
+            ["fleet-controller"],
+            runner=MissingAliasRunner(),
+            agent_command_profile_dirs=[self.command_profiles],
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError,
+            "AgentCommandProfile command is unavailable.*codex-personal",
+        ):
+            runtime.start(
+                "review",
+                [self.fleets],
+                [self.profiles],
+                self.state,
+                str(self.root),
+                "codex",
+                execute=True,
+                once=True,
+            )
+
+        self.assertFalse(self.state.exists())
+
+    def test_start_rejects_unauthenticated_claude_command_before_state_creation(self):
+        launch = json.loads(json.dumps(LAUNCH_PROFILE))
+        launch["spec"]["agent_command_profiles"] = {
+            "manager": "local/claude-personal@1"
+        }
+        (self.launches / "review.yml").write_text(json.dumps(launch), encoding="utf-8")
+        command_profile = {
+            "apiVersion": "fleet.runtime.harness/v1",
+            "kind": "AgentCommandProfile",
+            "metadata": {"id": "local/claude-personal", "version": 1},
+            "spec": {"product": "claude", "command": "claude-personal"},
+        }
+        (self.command_profiles / "claude-personal.yml").write_text(
+            json.dumps(command_profile), encoding="utf-8"
+        )
+
+        class UnauthenticatedRunner(FakeRunner):
+            def __call__(self, argv, **kwargs):
+                if len(argv) >= 3 and argv[1] == "-lic" and argv[2].endswith(
+                    " auth status"
+                ):
+                    self.calls.append(list(argv))
+                    return subprocess.CompletedProcess(
+                        argv, 0, json.dumps({"loggedIn": False}), ""
+                    )
+                return super().__call__(argv, **kwargs)
+
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"],
+            ["fleet-herdr"],
+            ["fleet-controller"],
+            runner=UnauthenticatedRunner(),
+            agent_command_profile_dirs=[self.command_profiles],
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError,
+            "claude-personal is not authenticated.*claude-personal auth login",
+        ):
+            runtime.start(
+                "review",
+                [self.fleets],
+                [self.profiles],
+                self.state,
+                str(self.root),
+                "codex",
+                execute=True,
+                once=True,
             )
 
         self.assertFalse(self.state.exists())

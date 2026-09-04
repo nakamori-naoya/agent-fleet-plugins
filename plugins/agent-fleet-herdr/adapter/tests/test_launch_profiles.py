@@ -22,6 +22,10 @@ PROFILE = {
         "fleet_ref": "development-squad",
         "view_profile_ref": "local/role-columns@1",
         "codex_hook_trust": "preapproved",
+        "agent_command_profiles": {
+            "manager": "local/claude-personal@1",
+            "worker": "local/codex-personal@1",
+        },
     },
 }
 
@@ -61,6 +65,14 @@ class LaunchProfileTest(unittest.TestCase):
         errors = launch_profiles.validate_document(invalid)
 
         self.assertTrue(any("view_profile_ref" in error for error in errors))
+
+    def test_profile_requires_versioned_agent_command_profile_references(self):
+        invalid = json.loads(json.dumps(PROFILE))
+        invalid["spec"]["agent_command_profiles"]["manager"] = "claude-personal"
+
+        errors = launch_profiles.validate_document(invalid)
+
+        self.assertTrue(any("agent_command_profiles.manager" in error for error in errors))
 
     def test_catalog_rejects_duplicate_launch_identity(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -22,6 +22,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence, TextIO
 
+from agent_command_profiles import (
+    AgentCommandProfileCatalog,
+    AgentCommandProfileError,
+)
 from launch_profiles import LaunchProfileCatalog, LaunchProfileError
 
 
@@ -84,6 +88,8 @@ class ResolvedFleet:
         fleet_source_hash: str,
         role_catalog: Mapping[str, Any] | None,
         role_catalog_hash: str | None,
+        agent_command_profiles: Mapping[str, Mapping[str, str]],
+        agent_command_profile_sources: Sequence[Mapping[str, str]],
         *,
         legacy: bool = False,
     ):
@@ -100,6 +106,13 @@ class ResolvedFleet:
         self.codex_hook_trust = codex_hook_trust
         self.role_catalog = role_catalog
         self.role_catalog_hash = role_catalog_hash
+        self.agent_command_profiles = {
+            agent_ref: dict(profile)
+            for agent_ref, profile in agent_command_profiles.items()
+        }
+        self.agent_command_profile_sources = tuple(
+            dict(source) for source in agent_command_profile_sources
+        )
         self.legacy = legacy
         self._fleet_source_hash = fleet_source_hash
         self._launch_source_hash = (
@@ -140,6 +153,7 @@ class ResolvedFleet:
                 "launch": self.launch_profile,
                 "fleet": self.fleet,
                 "profile": self.profile,
+                "agent_command_profiles": self.agent_command_profiles,
             }
         )
 
@@ -216,6 +230,7 @@ class FleetRuntime:
         hook_source: Path = DEFAULT_HOOK_SOURCE,
         role_catalog: Path | None = None,
         launch_dirs: Sequence[Path] = (),
+        agent_command_profile_dirs: Sequence[Path] = (),
         allow_legacy_fleet: bool = False,
     ):
         self.core_command = tuple(core_command)
@@ -226,6 +241,7 @@ class FleetRuntime:
         self.hook_source = hook_source
         self.role_catalog = role_catalog
         self.launch_dirs = tuple(launch_dirs)
+        self.agent_command_profile_dirs = tuple(agent_command_profile_dirs)
         self.allow_legacy_fleet = allow_legacy_fleet
 
     def _launch_roots(self, fleet_dirs: Sequence[Path]) -> tuple[Path, ...]:
@@ -255,6 +271,22 @@ class FleetRuntime:
                 argv[0] = discovered
         return argv[0]
 
+    @staticmethod
+    def _interactive_shell_argv(
+        command: str, arguments: Sequence[str]
+    ) -> list[str]:
+        shell_value = os.environ.get("SHELL") or shutil.which("zsh") or shutil.which("bash")
+        if not shell_value:
+            raise FleetRuntimeError(
+                "an interactive shell is required to resolve AgentCommandProfile commands"
+            )
+        shell = Path(shell_value)
+        if not shell.is_file() or not os.access(shell, os.X_OK):
+            raise FleetRuntimeError(
+                f"configured interactive shell is unavailable: {shell_value}"
+            )
+        return [str(shell), "-lic", shlex.join([command, *arguments])]
+
     def _with_execution_bundle(self, bundle: ExecutionBundle) -> FleetRuntime:
         runtime = FleetRuntime(
             bundle.command("core"),
@@ -265,6 +297,7 @@ class FleetRuntime:
             hook_source=self.hook_source,
             role_catalog=self.role_catalog,
             launch_dirs=self.launch_dirs,
+            agent_command_profile_dirs=self.agent_command_profile_dirs,
             allow_legacy_fleet=self.allow_legacy_fleet,
         )
         # Preserve explicit instance-level test/integration seams while changing
@@ -370,10 +403,12 @@ class FleetRuntime:
                 root / "fleet_controller.py",
                 root / "herdr_adapter.py",
                 root / "launch_profiles.py",
+                root / "agent_command_profiles.py",
                 root / "view_profiles.py",
                 root / "scripts" / "fleet-controller",
                 root / "scripts" / "fleet-herdr",
                 root / "schema" / "launch-profile.schema.yml",
+                root / "schema" / "agent-command-profile.schema.yml",
                 root / "schema" / "view-profile.schema.yml",
                 hook_plugin / "hooks" / "claude-hooks.json",
                 hook_plugin / ".claude-plugin" / "plugin.json",
@@ -1021,6 +1056,7 @@ class FleetRuntime:
         cwd: str,
         *,
         require_codex_registration: bool = True,
+        require_agent_launch: bool = True,
     ) -> dict[str, Any]:
         working_directory = Path(cwd)
         if not working_directory.is_dir():
@@ -1039,59 +1075,164 @@ class FleetRuntime:
         products = sorted(
             {member["runtime"]["product"] for member in resolved.fleet["spec"]["members"]}
         )
-        missing = [product for product in products if shutil.which(product) is None]
-        if missing:
-            raise FleetRuntimeError(
-                "required agent product is unavailable: " + ", ".join(missing)
+        unprofiled_products = {
+            member["runtime"]["product"]
+            for member in resolved.fleet["spec"]["members"]
+            if str(member["agent_ref"]) not in resolved.agent_command_profiles
+        }
+        commands_by_agent: dict[str, str] = {}
+        for member in resolved.fleet["spec"]["members"]:
+            agent_ref = str(member["agent_ref"])
+            profile = resolved.agent_command_profiles.get(agent_ref)
+            command = (
+                str(profile["command"])
+                if profile is not None
+                else str(member["runtime"]["product"])
             )
+            commands_by_agent[agent_ref] = command
+        if require_agent_launch:
+            profiled_commands = sorted(
+                {
+                    profile["command"]
+                    for profile in resolved.agent_command_profiles.values()
+                }
+            )
+            for command in profiled_commands:
+                completed = self.runner(
+                    self._interactive_shell_argv("command", ["-v", command]),
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if completed.returncode != 0:
+                    raise FleetRuntimeError(
+                        "AgentCommandProfile command is unavailable in the "
+                        f"interactive shell: {command}"
+                    )
+        if require_agent_launch:
+            missing = sorted(
+                product
+                for product in unprofiled_products
+                if shutil.which(product) is None
+            )
+            if missing:
+                raise FleetRuntimeError(
+                    "required agent product is unavailable: " + ", ".join(missing)
+                )
         preflight: dict[str, Any] = {
             "herdr_version": version,
             "products": products,
+            "agent_commands": commands_by_agent,
             "cwd": str(working_directory.resolve()),
         }
-        if require_codex_registration and "codex" in products:
-            completed = self.runner(
-                ["codex", "plugin", "list", "--json"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        if require_agent_launch and "claude" in products:
+            claude_commands = sorted(
+                {
+                    commands_by_agent[str(member["agent_ref"])]
+                    for member in resolved.fleet["spec"]["members"]
+                    if member["runtime"]["product"] == "claude"
+                }
             )
-            if completed.returncode != 0:
-                raise FleetRuntimeError(
-                    "cannot inspect the Codex agent-fleet-session-hooks registration"
+            authentications = []
+            for command in claude_commands:
+                argv = (
+                    ["claude", "auth", "status"]
+                    if command == "claude"
+                    else self._interactive_shell_argv(command, ["auth", "status"])
                 )
-            try:
-                plugin_catalog = json.loads(completed.stdout)
-            except json.JSONDecodeError as exc:
-                raise FleetRuntimeError(
-                    "Codex plugin list returned invalid JSON"
-                ) from exc
-            installed = (
-                plugin_catalog.get("installed")
-                if isinstance(plugin_catalog, Mapping)
-                else None
-            )
-            registration = next(
-                (
-                    item
-                    for item in installed or []
-                    if isinstance(item, Mapping)
-                    and item.get("pluginId")
-                    == "agent-fleet-session-hooks@agent-fleet"
-                    and item.get("installed") is True
-                ),
-                None,
-            )
-            if registration is None:
-                raise FleetRuntimeError(
-                    "Codex plugin agent-fleet-session-hooks@agent-fleet must be installed "
-                    "before creating Codex panes"
+                completed = self.runner(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
                 )
-            preflight["codex_hook_registration"] = {
-                "plugin_id": "agent-fleet-session-hooks@agent-fleet",
-                "version": registration.get("version"),
-            }
+                try:
+                    authentication = json.loads(completed.stdout)
+                except json.JSONDecodeError as exc:
+                    raise FleetRuntimeError(
+                        f"Claude auth status returned invalid JSON through {command}"
+                    ) from exc
+                if (
+                    completed.returncode != 0
+                    or not isinstance(authentication, Mapping)
+                    or authentication.get("loggedIn") is not True
+                ):
+                    raise FleetRuntimeError(
+                        f"Claude command {command} is not authenticated; run "
+                        f"'{command} auth login' before starting the Fleet"
+                    )
+                authentications.append(
+                    {
+                        "command": command,
+                        "auth_method": authentication.get("authMethod"),
+                    }
+                )
+            preflight["claude_authentications"] = authentications
+        if require_agent_launch and require_codex_registration and "codex" in products:
+            codex_commands = sorted(
+                {
+                    commands_by_agent[str(member["agent_ref"])]
+                    for member in resolved.fleet["spec"]["members"]
+                    if member["runtime"]["product"] == "codex"
+                }
+            )
+            registrations = []
+            for command in codex_commands:
+                argv = (
+                    ["codex", "plugin", "list", "--json"]
+                    if command == "codex"
+                    else self._interactive_shell_argv(
+                        command, ["plugin", "list", "--json"]
+                    )
+                )
+                completed = self.runner(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                )
+                if completed.returncode != 0:
+                    raise FleetRuntimeError(
+                        "cannot inspect the Codex agent-fleet-session-hooks "
+                        f"registration through {command}"
+                    )
+                try:
+                    plugin_catalog = json.loads(completed.stdout)
+                except json.JSONDecodeError as exc:
+                    raise FleetRuntimeError(
+                        f"Codex plugin list returned invalid JSON through {command}"
+                    ) from exc
+                installed = (
+                    plugin_catalog.get("installed")
+                    if isinstance(plugin_catalog, Mapping)
+                    else None
+                )
+                registration = next(
+                    (
+                        item
+                        for item in installed or []
+                        if isinstance(item, Mapping)
+                        and item.get("pluginId")
+                        == "agent-fleet-session-hooks@agent-fleet"
+                        and item.get("installed") is True
+                    ),
+                    None,
+                )
+                if registration is None:
+                    raise FleetRuntimeError(
+                        "Codex plugin agent-fleet-session-hooks@agent-fleet must be "
+                        f"installed for {command} before creating Codex panes"
+                    )
+                registrations.append(
+                    {
+                        "command": command,
+                        "plugin_id": "agent-fleet-session-hooks@agent-fleet",
+                        "version": registration.get("version"),
+                    }
+                )
+            preflight["codex_hook_registrations"] = registrations
         return preflight
 
     @staticmethod
@@ -1118,6 +1259,14 @@ class FleetRuntime:
         if self.role_catalog is not None and resolved.role_catalog_hash is not None:
             checks.append(
                 ("role catalog", self.role_catalog, resolved.role_catalog_hash)
+            )
+        for source in resolved.agent_command_profile_sources:
+            checks.append(
+                (
+                    f"AgentCommandProfile {source['profile_ref']}",
+                    Path(source["path"]),
+                    source["hash"],
+                )
             )
         for label, path, expected in checks:
             if _content_hash(_load_document(path)) != expected:
@@ -1271,6 +1420,69 @@ class FleetRuntime:
             catalog[identity] = (path, profile)
         return catalog
 
+    def _resolve_agent_command_profiles(
+        self,
+        launch: Mapping[str, Any],
+        fleet: Mapping[str, Any],
+    ) -> tuple[dict[str, dict[str, str]], tuple[dict[str, str], ...]]:
+        launch_spec = launch.get("spec")
+        requested = (
+            launch_spec.get("agent_command_profiles", {})
+            if isinstance(launch_spec, Mapping)
+            else {}
+        )
+        if not isinstance(requested, Mapping):
+            raise FleetRuntimeError(
+                "LaunchProfile agent_command_profiles must be an object"
+            )
+        if not requested:
+            return {}, ()
+        try:
+            catalog = AgentCommandProfileCatalog.from_directories(
+                self.agent_command_profile_dirs
+            )
+        except AgentCommandProfileError as exc:
+            raise FleetRuntimeError(str(exc)) from exc
+        fleet_spec = fleet.get("spec")
+        members = (
+            fleet_spec.get("members") if isinstance(fleet_spec, Mapping) else None
+        )
+        member_products = {
+            member.get("agent_ref"): member.get("runtime", {}).get("product")
+            for member in members or []
+            if isinstance(member, Mapping)
+            and isinstance(member.get("runtime"), Mapping)
+        }
+        resolved: dict[str, dict[str, str]] = {}
+        sources: dict[str, dict[str, str]] = {}
+        for agent_ref, profile_ref in requested.items():
+            if agent_ref not in member_products:
+                raise FleetRuntimeError(
+                    f"LaunchProfile AgentCommandProfile targets unknown Fleet member: {agent_ref}"
+                )
+            try:
+                path, document = catalog.resolve(str(profile_ref))
+            except AgentCommandProfileError as exc:
+                raise FleetRuntimeError(str(exc)) from exc
+            profile_product = str(document["spec"]["product"])
+            if profile_product != member_products[agent_ref]:
+                raise FleetRuntimeError(
+                    f"AgentCommandProfile {profile_ref} product {profile_product!r} "
+                    f"does not match Fleet member {agent_ref!r} product "
+                    f"{member_products[agent_ref]!r}"
+                )
+            resolved[str(agent_ref)] = {
+                "profile_ref": str(profile_ref),
+                "product": profile_product,
+                "command": str(document["spec"]["command"]),
+            }
+            sources[str(profile_ref)] = {
+                "profile_ref": str(profile_ref),
+                "path": str(path),
+                "hash": _content_hash(document),
+            }
+        return resolved, tuple(sources[key] for key in sorted(sources))
+
     def resolve(
         self,
         fleet_name: str,
@@ -1357,6 +1569,9 @@ class FleetRuntime:
         if resolved_profile is None:
             raise FleetRuntimeError(f"ViewProfile not found: {profile_ref}")
         profile_path, profile = resolved_profile
+        agent_command_profiles, agent_command_profile_sources = (
+            self._resolve_agent_command_profiles(launch, fleet)
+        )
         metadata = fleet["metadata"]
         return ResolvedFleet(
             fleet_name,
@@ -1373,6 +1588,8 @@ class FleetRuntime:
             fleet_source_hash,
             role_catalog,
             role_catalog_hash,
+            agent_command_profiles,
+            agent_command_profile_sources,
             legacy=legacy,
         )
 
@@ -1427,6 +1644,12 @@ class FleetRuntime:
                         ensure_ascii=False,
                         sort_keys=True,
                     ),
+                    "--agent-command-profiles-json",
+                    json.dumps(
+                        resolved.agent_command_profiles,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
                     "--view-profile-json",
                     json.dumps(resolved.profile, ensure_ascii=False, sort_keys=True),
                     "--cwd",
@@ -1447,6 +1670,7 @@ class FleetRuntime:
                         member["agent_ref"]: dict(member["runtime"])
                         for member in spec["members"]
                     },
+                    "agent_command_profiles": resolved.agent_command_profiles,
                     "profile_ref": resolved.profile_ref,
                     "profile_resolved": True,
                     "legacy": resolved.legacy,
@@ -1504,6 +1728,12 @@ class FleetRuntime:
                 json.dumps(
                     resolved.launch_profile, ensure_ascii=False, sort_keys=True
                 ),
+                "--agent-command-profiles-json",
+                json.dumps(
+                    resolved.agent_command_profiles,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
                 "--view-profile-json",
                 json.dumps(resolved.profile, ensure_ascii=False, sort_keys=True),
                 "--cwd",
@@ -1534,6 +1764,7 @@ class FleetRuntime:
             "profile_ref": resolved.profile_ref,
             "profile_path": str(resolved.profile_path),
             "profile_hash": resolved.profile_hash,
+            "agent_command_profiles": resolved.agent_command_profiles,
             "composition_hash": resolved.composition_hash,
             "herdr": dict(herdr_plan),
         }
@@ -1557,6 +1788,12 @@ class FleetRuntime:
                 "--launch-profile-json",
                 json.dumps(
                     resolved.launch_profile, ensure_ascii=False, sort_keys=True
+                ),
+                "--agent-command-profiles-json",
+                json.dumps(
+                    resolved.agent_command_profiles,
+                    ensure_ascii=False,
+                    sort_keys=True,
                 ),
                 "--view-profile-json",
                 json.dumps(resolved.profile, ensure_ascii=False, sort_keys=True),
@@ -2037,6 +2274,9 @@ class FleetRuntime:
                             require_codex_registration=(
                                 known["phase"] in {"planned", "core_provisioned"}
                             ),
+                            require_agent_launch=(
+                                known["phase"] in {"planned", "core_provisioned"}
+                            ),
                         )
                         runtime_preflight = dict(known["runtime_preflight"])
                         self._assert_config_snapshot(resolved)
@@ -2193,6 +2433,10 @@ class FleetRuntime:
                 member["agent_ref"]: dict(member["runtime"])
                 for member in resolved.fleet["spec"]["members"]
             },
+            "agent_command_profiles": resolved.agent_command_profiles,
+            "agent_command_profile_sources": list(
+                resolved.agent_command_profile_sources
+            ),
             "runtime_preflight": dict(runtime_preflight),
             "fleet_snapshot_path": str(fleet_snapshot_path),
             "execution_snapshot_root": str(execution_bundle.root),
@@ -2335,6 +2579,12 @@ class FleetRuntime:
                     "--launch-profile-json",
                     json.dumps(
                         resolved.launch_profile,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    "--agent-command-profiles-json",
+                    json.dumps(
+                        resolved.agent_command_profiles,
                         ensure_ascii=False,
                         sort_keys=True,
                     ),
@@ -2703,6 +2953,7 @@ class FleetRuntime:
             *fleet_dirs,
             *profile_dirs,
             *self._launch_roots(fleet_dirs),
+            *self.agent_command_profile_dirs,
             state_dir,
         ]:
             path_existed = path.exists()
@@ -2724,6 +2975,7 @@ class FleetRuntime:
             ("fleet_dirs", fleet_dirs),
             ("profile_dirs", profile_dirs),
             ("launch_dirs", self._launch_roots(fleet_dirs)),
+            ("agent_command_profile_dirs", self.agent_command_profile_dirs),
         ):
             checks.append(
                 {
@@ -2912,6 +3164,23 @@ class FleetRuntime:
             drift = drift or _content_hash(_load_document(Path(configured_path))) != manifest.get(
                 hash_key
             )
+        command_sources = manifest.get("agent_command_profile_sources", [])
+        if not isinstance(command_sources, list):
+            drift = True
+        else:
+            for source in command_sources:
+                if not isinstance(source, Mapping):
+                    drift = True
+                    continue
+                configured_path = source.get("path")
+                expected_hash = source.get("hash")
+                if (
+                    not isinstance(configured_path, str)
+                    or not Path(configured_path).is_file()
+                    or _content_hash(_load_document(Path(configured_path)))
+                    != expected_hash
+                ):
+                    drift = True
         core = execution_runtime._run_json(
             [
                 *execution_runtime.core_command,
@@ -2958,6 +3227,9 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--fleet-dir", type=Path, action="append")
     common.add_argument("--profile-dir", type=Path, action="append", default=[])
     common.add_argument("--launch-dir", type=Path, action="append", default=[])
+    common.add_argument(
+        "--agent-command-profile-dir", type=Path, action="append", default=[]
+    )
     common.add_argument(
         "--legacy-fleet",
         action="store_true",
@@ -3019,6 +3291,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     fleet_dirs = args.fleet_dir or [config_root / "fleets"]
     profile_dirs = args.profile_dir or [config_root / "view-profiles"]
     launch_dirs = args.launch_dir or [config_root / "herdr-launch-profiles"]
+    agent_command_profile_dirs = args.agent_command_profile_dir or [
+        config_root / "agent-command-profiles"
+    ]
     try:
         if args.action in {"list", "plan", "start"} and args.role_catalog is None:
             raise FleetRuntimeError(
@@ -3030,6 +3305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             [args.controller_command],
             role_catalog=args.role_catalog,
             launch_dirs=launch_dirs,
+            agent_command_profile_dirs=agent_command_profile_dirs,
             allow_legacy_fleet=args.legacy_fleet,
         )
         if args.action == "init":

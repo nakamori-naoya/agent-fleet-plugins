@@ -11,9 +11,9 @@ Herdrは実行環境と表示のAdapterであり、Fleetの正本ではない。
 
 詳しいCLIと復旧規則は`adapter/SKILL.md`を全文読む。入口は`adapter/scripts/fleet-herdr`で、dry-runが既定である。
 
-利用者が複数の起動設定から選ぶ入口は`adapter/scripts/fleet-runtime`である。最初に`init`と`doctor`を実行し、`list`、`plan <launch_id>`、`start <launch_id> --execute`、`status <launch_id>`を使う。停止は`stop <launch_id> --execute`、設定を作り直す場合だけ`remove <launch_id> --execute`を使う。Core CLIは`--core-command`、`AGENT_FLEET_CORE_COMMAND`、`PATH`の順で明示的に解決し、別pluginの配置を推測しない。Herdr LaunchProfileだけが`fleet_ref`と版固定`view_profile_ref`を一方向参照する。
+利用者が複数の起動設定から選ぶ入口は`adapter/scripts/fleet-runtime`である。最初に`init`と`doctor`を実行し、`list`、`plan <launch_id>`、`start <launch_id> --execute`、`status <launch_id>`を使う。停止は`stop <launch_id> --execute`、設定を作り直す場合だけ`remove <launch_id> --execute`を使う。Core CLIは`--core-command`、`AGENT_FLEET_CORE_COMMAND`、`PATH`の順で明示的に解決し、別pluginの配置を推測しない。Herdr LaunchProfileだけが`fleet_ref`、版固定`view_profile_ref`、必要なメンバー別`agent_command_profiles`を一方向参照する。
 
-`provision`は別入力のPortable Fleet、Herdr LaunchProfile、ViewProfileを照合し、layout groupとweightを再現可能なsplit計画へ変換する。FleetとViewProfileを互いに参照させない。艦隊編成、起動設定、pane比率の実体をplugin内へ同梱せず、利用者の設定directoryからだけ読む。生成argvと論理エージェントの配置を確認してから、利用者が明示した場合だけ`--execute`を使う。
+`provision`は別入力のPortable Fleet、Herdr LaunchProfile、ViewProfile、解決済みAgentCommandProfileを照合し、layout groupとweightを再現可能なsplit計画へ変換する。FleetとViewProfileを互いに参照させない。艦隊編成、起動コマンド、起動設定、pane比率の実体をplugin内へ同梱せず、利用者の設定directoryからだけ読む。生成argvと論理エージェントの配置を確認してから、利用者が明示した場合だけ`--execute`を使う。
 
 ## Bindingと配送
 
