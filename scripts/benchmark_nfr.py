@@ -23,12 +23,27 @@ SPEC.loader.exec_module(fleet_control)
 
 
 def fleet_document(fleet_id: str, task_count: int) -> dict:
+    member_roles = (
+        ("manager", "manager", ["assign", "accept"]),
+        ("worker-1", "worker", ["work"]),
+        ("worker-2", "worker", ["work"]),
+        ("advisor", "advisor", ["advise"]),
+        ("reviewer", "reviewer", ["review"]),
+    )
     members = [
-        {"agent_ref": "manager", "role_ref": "manager@1"},
-        {"agent_ref": "worker-1", "role_ref": "worker@1"},
-        {"agent_ref": "worker-2", "role_ref": "worker@1"},
-        {"agent_ref": "advisor", "role_ref": "advisor@1"},
-        {"agent_ref": "reviewer", "role_ref": "reviewer@1"},
+        {
+            "agent_ref": agent_ref,
+            "role_ref": f"{role_id}@1",
+            "role_definition": {
+                "id": role_id,
+                "version": 1,
+                "mission": f"Perform the {role_id} benchmark responsibility.",
+                "responsibilities": ["Record reproducible benchmark evidence"],
+                "forbidden": ["Change the benchmark acceptance target"],
+                "authority": authority,
+            },
+        }
+        for agent_ref, role_id, authority in member_roles
     ]
     tasks = []
     workers = [member["agent_ref"] for member in members if member["agent_ref"] != "manager"]
@@ -45,7 +60,7 @@ def fleet_document(fleet_id: str, task_count: int) -> dict:
             }
         )
     return {
-        "apiVersion": "fleet.harness/v1",
+        "apiVersion": "fleet.harness/v2",
         "kind": "Fleet",
         "metadata": {"id": fleet_id},
         "spec": {
@@ -55,7 +70,6 @@ def fleet_document(fleet_id: str, task_count: int) -> dict:
             "members": members,
             "tasks": tasks,
             "collaboration": {"manager": "manager"},
-            "view": {"profile_ref": "local/benchmark@1"},
         },
     }
 

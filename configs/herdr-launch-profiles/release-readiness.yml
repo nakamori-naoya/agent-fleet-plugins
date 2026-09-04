@@ -1,0 +1,8 @@
+apiVersion: fleet.herdr.harness/v1
+kind: LaunchProfile
+metadata:
+  id: release-readiness
+spec:
+  fleet_ref: release-readiness
+  view_profile_ref: local/review-grid@1
+  codex_hook_trust: preapproved

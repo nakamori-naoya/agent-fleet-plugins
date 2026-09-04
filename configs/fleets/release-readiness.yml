@@ -1,4 +1,4 @@
-apiVersion: fleet.harness/v1
+apiVersion: fleet.harness/v2
 kind: Fleet
 metadata:
   id: release-readiness
@@ -59,8 +59,3 @@ spec:
     reporting:
       strategy: manager
       include_task_updates: true
-  runtime:
-    provider: herdr
-    codex_hook_trust: preapproved
-  view:
-    profile_ref: local/review-grid@1

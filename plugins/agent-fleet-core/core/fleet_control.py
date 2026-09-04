@@ -92,7 +92,6 @@ CREATE TABLE IF NOT EXISTS fleets (
     fleet_id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     config_hash TEXT NOT NULL,
-    profile_ref TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS members (
@@ -286,12 +285,6 @@ class FleetStore:
             raise FleetError("members must be a sequence")
         if not isinstance(tasks, Sequence) or isinstance(tasks, (str, bytes)):
             raise FleetError("tasks must be a sequence")
-        view = spec.get("view")
-        profile_ref = (
-            str(view.get("profile_ref") or "").strip()
-            if isinstance(view, Mapping)
-            else ""
-        )
         config_hash = hashlib.sha256(
             json.dumps(
                 config,
@@ -310,10 +303,6 @@ class FleetStore:
             if "config_hash" not in fleet_columns:
                 db.execute(
                     "ALTER TABLE fleets ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''"
-                )
-            if "profile_ref" not in fleet_columns:
-                db.execute(
-                    "ALTER TABLE fleets ADD COLUMN profile_ref TEXT NOT NULL DEFAULT ''"
                 )
             context_columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(member_context_state)")
@@ -352,11 +341,18 @@ class FleetStore:
                     "tasks": counts["tasks"],
                     "idempotent": True,
                 }
-            db.execute(
-                "INSERT INTO fleets(fleet_id,title,config_hash,profile_ref,created_at) "
-                "VALUES(?,?,?,?,?)",
-                (fleet_id, title, config_hash, profile_ref, created_at),
-            )
+            if "profile_ref" in fleet_columns:
+                db.execute(
+                    "INSERT INTO fleets(fleet_id,title,config_hash,profile_ref,created_at) "
+                    "VALUES(?,?,?,?,?)",
+                    (fleet_id, title, config_hash, "", created_at),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO fleets(fleet_id,title,config_hash,created_at) "
+                    "VALUES(?,?,?,?)",
+                    (fleet_id, title, config_hash, created_at),
+                )
             db.execute(
                 "INSERT INTO fleet_contexts(fleet_id,objective,completion_criteria_json,"
                 "stop_conditions_json,manager_ref) VALUES(?,?,?,?,?)",
@@ -849,10 +845,29 @@ class FleetStore:
             "status": "current",
         }
 
-    def invalidate_contexts(self, fleet_id: str) -> dict[str, Any]:
+    def invalidate_contexts(
+        self, fleet_id: str, operation_id: str | None = None
+    ) -> dict[str, Any]:
         """Close normal-command delivery until every new session confirms context."""
 
         with self.connect() as db:
+            fingerprint = json.dumps(
+                {"action": "context.invalidate"},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if operation_id:
+                existing_operation = db.execute(
+                    "SELECT fingerprint,result_json FROM operations "
+                    "WHERE fleet_id=? AND operation_id=?",
+                    (fleet_id, operation_id),
+                ).fetchone()
+                if existing_operation is not None:
+                    if existing_operation["fingerprint"] != fingerprint:
+                        raise FleetError("operation_id already has different content")
+                    result = json.loads(existing_operation["result_json"])
+                    result["idempotent"] = True
+                    return result
             fleet = db.execute(
                 "SELECT 1 FROM fleets WHERE fleet_id=?", (fleet_id,)
             ).fetchone()
@@ -877,7 +892,20 @@ class FleetStore:
                 "context.invalidated",
                 {"member_count": updated.rowcount},
             )
-        return {"fleet_id": fleet_id, "status": "invalidated"}
+            result = {"fleet_id": fleet_id, "status": "invalidated"}
+            if operation_id:
+                db.execute(
+                    "INSERT INTO operations(fleet_id,operation_id,fingerprint,result_json,created_at) "
+                    "VALUES(?,?,?,?,?)",
+                    (
+                        fleet_id,
+                        operation_id,
+                        fingerprint,
+                        json.dumps(result, sort_keys=True),
+                        utc_now(),
+                    ),
+                )
+        return result
 
     def _verify_command_receipt(
         self,
@@ -2244,7 +2272,10 @@ class FleetStore:
 
     def status(self, fleet_id: str) -> dict[str, Any]:
         with self.connect() as db:
-            fleet = db.execute("SELECT * FROM fleets WHERE fleet_id=?", (fleet_id,)).fetchone()
+            fleet = db.execute(
+                "SELECT fleet_id,title,config_hash,created_at FROM fleets WHERE fleet_id=?",
+                (fleet_id,),
+            ).fetchone()
             if fleet is None:
                 raise FleetError(f"unknown fleet: {fleet_id}")
             members = [dict(row) for row in db.execute(
@@ -2303,7 +2334,17 @@ class FleetStore:
     def remove_fleet(self, fleet_id: str, confirmation: str) -> dict[str, Any]:
         if confirmation != fleet_id:
             raise FleetError("fleet removal requires an exact --confirm-fleet value")
+        if self.db_path != ":memory:" and not Path(self.db_path).exists():
+            return {"fleet_id": fleet_id, "status": "absent", "idempotent": True}
         with self.connect() as db:
+            existing_tables = {
+                str(row["name"])
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "fleets" not in existing_tables:
+                return {"fleet_id": fleet_id, "status": "absent", "idempotent": True}
             exists = db.execute(
                 "SELECT 1 FROM fleets WHERE fleet_id=?", (fleet_id,)
             ).fetchone()
@@ -2323,7 +2364,8 @@ class FleetStore:
                 "members",
                 "fleets",
             ):
-                db.execute(f"DELETE FROM {table} WHERE fleet_id=?", (fleet_id,))
+                if table in existing_tables:
+                    db.execute(f"DELETE FROM {table} WHERE fleet_id=?", (fleet_id,))
         return {"fleet_id": fleet_id, "status": "removed"}
 
 
@@ -2415,6 +2457,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     context_invalidate = sub.add_parser("context.invalidate")
     context_invalidate.add_argument("--fleet", required=True)
+    context_invalidate.add_argument("--operation-id")
     context_consume = sub.add_parser("context.consume")
     context_consume.add_argument("--fleet", required=True)
     context_consume.add_argument("--command-id", required=True)
@@ -2518,7 +2561,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.fleet, args.agent_ref, args.session_id, args.runtime_product
             )
         elif args.action == "context.invalidate":
-            result = store.invalidate_contexts(args.fleet)
+            result = store.invalidate_contexts(args.fleet, args.operation_id)
         elif args.action == "context.consume":
             result = store.consume_context_activation(
                 args.fleet,

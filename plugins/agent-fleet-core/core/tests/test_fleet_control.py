@@ -20,7 +20,7 @@ SPEC.loader.exec_module(fleet_control)
 
 
 NORMALIZED = {
-    "apiVersion": "fleet.harness/v1",
+    "apiVersion": "fleet.harness/v2",
     "kind": "Fleet",
     "metadata": {"id": "demo"},
     "spec": {
@@ -64,7 +64,6 @@ NORMALIZED = {
             }
         ],
         "collaboration": {"manager": "manager"},
-        "view": {"profile_ref": "local/test-deck@1"},
     },
 }
 
@@ -101,12 +100,55 @@ class FleetStoreTest(unittest.TestCase):
                 for row in db.execute(f"PRAGMA table_info({table})")
             }
         self.assertNotIn("pane_id", columns)
+        self.assertNotIn("profile_ref", columns)
         self.assertEqual(2, len(self.store.status("demo")["members"]))
-        self.assertEqual(
-            "local/test-deck@1", self.store.status("demo")["fleet"]["profile_ref"]
-        )
+        self.assertNotIn("profile_ref", self.store.status("demo")["fleet"])
         self.assertEqual(0o600, stat.S_IMODE(self.db.stat().st_mode))
         self.assertEqual(0o700, stat.S_IMODE(self.root.stat().st_mode))
+
+    def test_portable_fleet_can_use_database_created_by_legacy_core(self):
+        legacy_db = self.root / "legacy.sqlite3"
+        with closing(sqlite3.connect(legacy_db)) as db:
+            db.execute(
+                "CREATE TABLE fleets ("
+                "fleet_id TEXT PRIMARY KEY, title TEXT NOT NULL, "
+                "config_hash TEXT NOT NULL, profile_ref TEXT NOT NULL, "
+                "created_at TEXT NOT NULL)"
+            )
+        legacy_store = fleet_control.FleetStore(legacy_db)
+
+        result = legacy_store.initialize(NORMALIZED)
+
+        self.assertEqual("demo", result["fleet_id"])
+        with closing(sqlite3.connect(legacy_db)) as db:
+            profile_ref = db.execute(
+                "SELECT profile_ref FROM fleets WHERE fleet_id='demo'"
+            ).fetchone()[0]
+        self.assertEqual("", profile_ref)
+        self.assertNotIn("profile_ref", legacy_store.status("demo")["fleet"])
+
+    def test_legacy_fleet_does_not_restore_view_profile_into_legacy_database(self):
+        legacy_db = self.root / "legacy-v1.sqlite3"
+        with closing(sqlite3.connect(legacy_db)) as db:
+            db.execute(
+                "CREATE TABLE fleets ("
+                "fleet_id TEXT PRIMARY KEY, title TEXT NOT NULL, "
+                "config_hash TEXT NOT NULL, profile_ref TEXT NOT NULL, "
+                "created_at TEXT NOT NULL)"
+            )
+        legacy_fleet = copy.deepcopy(NORMALIZED)
+        legacy_fleet["apiVersion"] = "fleet.harness/v1"
+        legacy_fleet["spec"]["view"] = {
+            "profile_ref": "local/review-grid@1"
+        }
+
+        fleet_control.FleetStore(legacy_db).initialize(legacy_fleet)
+
+        with closing(sqlite3.connect(legacy_db)) as db:
+            profile_ref = db.execute(
+                "SELECT profile_ref FROM fleets WHERE fleet_id='demo'"
+            ).fetchone()[0]
+        self.assertEqual("", profile_ref)
 
     def test_role_definition_snapshot_is_in_session_context(self):
         with self.store.connect() as db:
@@ -772,6 +814,59 @@ class FleetStoreTest(unittest.TestCase):
         self.store.invalidate_contexts("demo")
 
         self.assertIsNone(self.store.claim_delivery("demo", "controller"))
+
+    def test_context_invalidation_operation_is_idempotent(self):
+        first = self.store.invalidate_contexts("demo", "stop:demo:generation-1")
+        with self.store.connect() as db:
+            first_revisions = list(
+                db.execute(
+                    "SELECT agent_ref,context_revision FROM member_context_state "
+                    "WHERE fleet_id='demo' ORDER BY agent_ref"
+                )
+            )
+            first_events = db.execute(
+                "SELECT count(*) FROM events WHERE fleet_id='demo' "
+                "AND event_type='context.invalidated'"
+            ).fetchone()[0]
+
+        repeated = self.store.invalidate_contexts(
+            "demo", "stop:demo:generation-1"
+        )
+
+        with self.store.connect() as db:
+            repeated_revisions = list(
+                db.execute(
+                    "SELECT agent_ref,context_revision FROM member_context_state "
+                    "WHERE fleet_id='demo' ORDER BY agent_ref"
+                )
+            )
+            repeated_events = db.execute(
+                "SELECT count(*) FROM events WHERE fleet_id='demo' "
+                "AND event_type='context.invalidated'"
+            ).fetchone()[0]
+        self.assertEqual("invalidated", first["status"])
+        self.assertTrue(repeated["idempotent"])
+        self.assertEqual(first_revisions, repeated_revisions)
+        self.assertEqual(first_events, repeated_events)
+
+    def test_remove_fleet_is_idempotent(self):
+        first = self.store.remove_fleet("demo", "demo")
+        repeated = self.store.remove_fleet("demo", "demo")
+
+        self.assertEqual("removed", first["status"])
+        self.assertEqual("absent", repeated["status"])
+        self.assertTrue(repeated["idempotent"])
+
+    def test_remove_fleet_treats_a_schema_only_database_as_absent(self):
+        incomplete_db = self.root / "incomplete.sqlite3"
+        with closing(sqlite3.connect(incomplete_db)) as db:
+            db.execute("CREATE TABLE interrupted_initialization(marker TEXT)")
+            db.commit()
+
+        result = fleet_control.FleetStore(incomplete_db).remove_fleet("demo", "demo")
+
+        self.assertEqual("absent", result["status"])
+        self.assertTrue(result["idempotent"])
 
     def test_context_invalidation_rejects_an_activation_from_the_old_runtime(self):
         self.store.assign(

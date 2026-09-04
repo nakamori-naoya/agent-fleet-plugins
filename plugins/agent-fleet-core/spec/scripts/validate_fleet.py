@@ -22,7 +22,7 @@ ROLE_REF_PATTERN = re.compile(
     r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*@[1-9][0-9]*$"
 )
 VIEW_PROFILE_REF_PATTERN = re.compile(
-    r"^[a-z][a-z0-9-]*(?:/[a-z][a-z0-9-]*)?@[1-9][0-9]*$"
+    r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:/[a-z][a-z0-9]*(?:-[a-z0-9]+)*)?@[1-9][0-9]*$"
 )
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 
@@ -359,7 +359,7 @@ def _collaboration(
         errors.append(f"{reporting_path}.include_task_updates: must be a boolean")
 
 
-def _runtime(value: Any, errors: list[str]) -> None:
+def _legacy_runtime(value: Any, errors: list[str]) -> None:
     path = "spec.runtime"
     runtime = _mapping(value, path, errors)
     if runtime is None:
@@ -377,7 +377,7 @@ def _runtime(value: Any, errors: list[str]) -> None:
         )
 
 
-def _view(value: Any, errors: list[str]) -> None:
+def _legacy_view(value: Any, errors: list[str]) -> None:
     path = "spec.view"
     view = _mapping(value, path, errors)
     if view is None:
@@ -407,8 +407,9 @@ def validate_document(document: Any) -> list[str]:
         {"apiVersion", "kind", "metadata", "spec"},
         errors,
     )
-    if root.get("apiVersion") != "fleet.harness/v1":
-        errors.append("$.apiVersion: must be 'fleet.harness/v1'")
+    api_version = root.get("apiVersion")
+    if api_version not in {"fleet.harness/v1", "fleet.harness/v2"}:
+        errors.append("$.apiVersion: must be 'fleet.harness/v1' or 'fleet.harness/v2'")
     if root.get("kind") != "Fleet":
         errors.append("$.kind: must be 'Fleet'")
 
@@ -421,6 +422,7 @@ def validate_document(document: Any) -> list[str]:
     fleet_spec = _mapping(root.get("spec"), "spec", errors)
     if fleet_spec is None:
         return errors
+    adapter_fields = {"runtime", "view"} if api_version == "fleet.harness/v1" else set()
     _keys(
         fleet_spec,
         "spec",
@@ -439,8 +441,7 @@ def validate_document(document: Any) -> list[str]:
             "members",
             "tasks",
             "collaboration",
-            "runtime",
-            "view",
+            *adapter_fields,
         },
         errors,
     )
@@ -455,10 +456,11 @@ def validate_document(document: Any) -> list[str]:
     members_by_ref = _members(fleet_spec.get("members"), errors)
     _tasks(fleet_spec.get("tasks"), members_by_ref, errors)
     _collaboration(fleet_spec.get("collaboration"), members_by_ref, errors)
-    if "runtime" in fleet_spec:
-        _runtime(fleet_spec.get("runtime"), errors)
-    if "view" in fleet_spec:
-        _view(fleet_spec.get("view"), errors)
+    if api_version == "fleet.harness/v1":
+        if "runtime" in fleet_spec:
+            _legacy_runtime(fleet_spec.get("runtime"), errors)
+        if "view" in fleet_spec:
+            _legacy_view(fleet_spec.get("view"), errors)
     return errors
 
 

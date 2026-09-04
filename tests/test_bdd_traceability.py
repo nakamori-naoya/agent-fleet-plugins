@@ -94,11 +94,11 @@ COVERAGE = {
     "現在の役割文脈を確認していないメンバーへ新しい仕事を開始させない": (
         (CORE_TESTS, "test_work_command_waits_until_current_role_context_is_confirmed"),
     ),
-    "起動済み艦隊を異なるHook identityで再開しない": (
-        (RUNTIME_TESTS, "test_different_hook_rejects_same_fleet_id"),
+    "起動済み艦隊は導入元のHook更新へ暗黙追従しない": (
+        (RUNTIME_TESTS, "test_active_resume_keeps_saved_hook_and_stopped_restart_uses_new_hook"),
     ),
-    "異なるHookで同じfleet IDを再開しない": (
-        (RUNTIME_TESTS, "test_different_hook_rejects_same_fleet_id"),
+    "停止後の再起動で新しいHook固定版へ切り替える": (
+        (RUNTIME_TESTS, "test_active_resume_keeps_saved_hook_and_stopped_restart_uses_new_hook"),
     ),
     "異なるHookを新しいfleet IDで起動する": (
         (RUNTIME_TESTS, "test_different_hook_can_start_with_new_fleet_id"),
@@ -108,6 +108,9 @@ COVERAGE = {
     ),
     "CodexのHook確認だけを事前承認して艦隊を起動する": (
         (ADAPTER_TESTS, "test_codex_fleet_preapproves_hook_trust_without_bypassing_other_approvals"),
+    ),
+    "Codexの役割Hook登録がない間はCodexの作業枠を作らない": (
+        (RUNTIME_TESTS, "test_start_rejects_missing_codex_hook_registration_before_state_creation"),
     ),
     "役割文脈を確認できない会話へ通常指示を届けない": (
         (CORE_TESTS, "test_work_command_waits_until_current_role_context_is_confirmed"),
@@ -150,6 +153,35 @@ COVERAGE = {
     ),
     "AI実行設定がないメンバーを含む艦隊を起動しない": (
         (SPEC_TESTS, "test_member_runtime_is_required_and_legacy_top_level_model_is_rejected"),
+    ),
+    "Herdrを参照しない艦隊設定を別の実行基盤でも再利用できる": (
+        (SPEC_TESTS, "test_fleet_rejects_herdr_runtime_and_view_configuration"),
+    ),
+    "Herdr起動設定が艦隊と表示プロファイルを一方向に合成する": (
+        (RUNTIME_TESTS, "test_launch_profile_composes_fleet_and_versioned_view_profile"),
+    ),
+    "三つの役割群を三列へ配置する": (
+        (ADAPTER_TESTS, "test_role_groups_compile_to_three_columns_with_equal_vertical_stacks"),
+    ),
+    "起動名と艦隊IDが異なっても論理状態と実行状態を混同しない": (
+        (RUNTIME_TESTS, "test_launch_identity_may_differ_from_fleet_identity_without_mixing_state_paths"),
+    ),
+    "同じ艦隊を別の起動設定から同時に起動しない": (
+        (RUNTIME_TESTS, "test_second_launch_profile_for_active_fleet_is_rejected_before_new_state"),
+        (RUNTIME_TESTS, "test_same_launch_is_locked_even_when_its_fleet_reference_changes"),
+    ),
+    "起動設定と参照先が一致しない間は状態を変えない": (
+        (ADAPTER_TESTS, "test_provision_rejects_launch_reference_mismatch_before_herdr_calls"),
+        (ADAPTER_TESTS, "test_provision_cli_rejects_invalid_composition_before_state_creation"),
+    ),
+    "表示条件がメンバーを重複または未割当にする間は起動しない": (
+        (ADAPTER_TESTS, "test_role_groups_reject_duplicate_and_unassigned_members"),
+    ),
+    "起動済み配置へ同じ版名の異なる表示内容を適用しない": (
+        (ADAPTER_TESTS, "test_provision_rejects_changed_view_content_with_same_profile_identity"),
+    ),
+    "旧Fleet v1を暗黙に新しい起動設定として扱わない": (
+        (RUNTIME_TESTS, "test_legacy_fleet_requires_explicit_compatibility_switch"),
     ),
     "再開した艦隊会話へ現在の役割文脈を戻す": (
         (HOOK_TESTS, "test_fleet_prompt_binds_session_and_compaction_restores_context"),
@@ -239,6 +271,83 @@ COVERAGE = {
     ),
     "状態確認は管理対象を変更しない": (
         (ADAPTER_TESTS, "test_status_is_read_only_and_reports_profile_bindings_and_placements"),
+    ),
+    "起動前の検査中に設定が変わった場合は状態を作らない": (
+        (RUNTIME_TESTS, "test_resolve_rejects_fleet_changed_while_core_validates_it"),
+        (RUNTIME_TESTS, "test_start_rejects_config_changed_during_preflight_before_state_creation"),
+    ),
+    "真偽値を表示プロファイルの版番号として扱わない": (
+        (RUNTIME_TESTS, "test_boolean_view_profile_version_is_not_an_integer_identity"),
+    ),
+    "実行できない制御処理を含む固定版では状態を作らない": (
+        (
+            RUNTIME_TESTS,
+            "test_start_rejects_an_unrunnable_fixed_controller_before_state_creation",
+        ),
+        (RUNTIME_TESTS, "test_start_rejects_invalid_hook_syntax_before_state_creation"),
+        (
+            RUNTIME_TESTS,
+            "test_start_rejects_invalid_claude_hook_registration_before_state_creation",
+        ),
+        (
+            RUNTIME_TESTS,
+            "test_start_rejects_a_noop_claude_hook_registration_before_state_creation",
+        ),
+        (
+            RUNTIME_TESTS,
+            "test_start_rejects_a_claude_hook_timeout_above_the_nfr_limit",
+        ),
+    ),
+    "起動途中の停止要求を進捗更新で失わない": (
+        (RUNTIME_TESTS, "test_stop_during_core_provision_is_not_overwritten_by_start"),
+        (RUNTIME_TESTS, "test_stop_during_pre_manifest_validation_cancels_start"),
+        (
+            RUNTIME_TESTS,
+            "test_timed_out_stop_request_prevents_start_until_stop_is_retried",
+        ),
+        (
+            RUNTIME_TESTS,
+            "test_one_completed_stop_does_not_clear_another_live_stop_request",
+        ),
+        (
+            RUNTIME_TESTS,
+            "test_successful_stop_clears_a_dangling_stop_request_symlink",
+        ),
+    ),
+    "停止済みの艦隊を再度停止しても外部操作を繰り返さない": (
+        (RUNTIME_TESTS, "test_repeated_stop_is_idempotent_without_repeating_external_changes"),
+        (RUNTIME_TESTS, "test_stop_retry_reuses_context_invalidation_operation_identity"),
+        (CORE_TESTS, "test_context_invalidation_operation_is_idempotent"),
+    ),
+    "削除中断後に同じ削除を完了させる": (
+        (RUNTIME_TESTS, "test_remove_resumes_from_durable_removing_phase"),
+        (RUNTIME_TESTS, "test_remove_completes_when_stopped_before_core_database_existed"),
+        (RUNTIME_TESTS, "test_remove_delegates_a_partially_initialized_database_to_core"),
+        (CORE_TESTS, "test_remove_fleet_is_idempotent"),
+        (CORE_TESTS, "test_remove_fleet_treats_a_schema_only_database_as_absent"),
+    ),
+    "固定実行版の改ざんを実行前に拒否する": (
+        (
+            RUNTIME_TESTS,
+            "test_start_rejects_an_allowlisted_file_reached_through_a_symlink_directory",
+        ),
+        (
+            RUNTIME_TESTS,
+            "test_start_rejects_special_permission_bits_on_execution_runtime_directory",
+        ),
+        (RUNTIME_TESTS, "test_status_rejects_unexpected_file_in_execution_snapshot_before_runner"),
+        (RUNTIME_TESTS, "test_status_rejects_execution_snapshot_mode_change_before_runner"),
+        (
+            RUNTIME_TESTS,
+            "test_status_rejects_special_permission_bits_on_an_execution_file",
+        ),
+        (RUNTIME_TESTS, "test_status_rejects_a_non_string_manifest_phase"),
+        (RUNTIME_TESTS, "test_boolean_manifest_format_version_is_rejected"),
+        (RUNTIME_TESTS, "test_status_rejects_a_manifest_with_another_launch_identity"),
+        (RUNTIME_TESTS, "test_status_rejects_special_permission_bits_on_hook_runtime"),
+    ),
+    "起動中に導入元の実行物が変わっても固定版だけを使う": (
+        (RUNTIME_TESTS, "test_start_uses_snapshot_when_executable_changes_after_capture"),
     ),
     "期限確認の一時失敗でも保存済み指示の配送を止めない": (
         (CONTROLLER_TESTS, "test_deadline_check_failure_does_not_starve_existing_delivery_work"),

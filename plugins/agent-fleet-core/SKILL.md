@@ -5,7 +5,7 @@ description: YAML Fleet Specを検査し、論理エージェント、タスク�
 
 # control-agent-fleet
 
-Fleet Specはdesired state、SQLiteは実行時のlogical stateとして分ける。各メンバーには、役割と分離した`runtime.product`、`runtime.model`、`runtime.effort`、`runtime.fallback`を必ず指定する。Coreだけで使うFleetはspec直下のHerdr用`runtime`と`view`を省略できる。Herdr Adapterを使う場合だけ版固定`profile_ref`を指定する。pane ID、workspace ID、tab ID、比率、UI geometryをCore DBへ保存しない。
+Fleet Specはdesired state、SQLiteは実行時のlogical stateとして分ける。新規設定は`fleet.harness/v2`を使い、各メンバーには、役割と分離した`runtime.product`、`runtime.model`、`runtime.effort`、`runtime.fallback`を必ず指定する。Fleet v2へHerdr、表示プロファイル、pane ID、workspace ID、tab ID、比率、UI geometryを置かず、Core DBにも保存しない。旧Fleet v1のspec直下`runtime`と`view`は明示的な移行時だけ検査する互換契約である。
 
 ## Fleet Specを検査する
 
@@ -32,4 +32,4 @@ python3 "${PLUGIN_ROOT}/spec/scripts/validate_fleet.py" fleet.yml \
 
 ## Adapterとの境界
 
-Herdr Adapterへは`fleet.harness/v1`の指示JSONだけを渡す。相手pluginの導入先を探索・importしない。実行環境や表示の操作が必要なら`agent-fleet-herdr`を別途使う。
+Herdr Adapterへは版付きの公開JSON契約だけを渡す。相手pluginの導入先を探索・importしない。実行環境や表示の操作が必要なら`agent-fleet-herdr`を別途使い、Herdr側の起動設定でFleet v2へ接続する。
