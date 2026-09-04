@@ -15,6 +15,7 @@ SPEC = importlib.util.spec_from_file_location("role_context_hook", MODULE_PATH)
 role_context_hook = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
 SPEC.loader.exec_module(role_context_hook)
+ORIGINAL_RUNTIME_MANIFEST = role_context_hook._runtime_manifest
 
 
 class RoleContextHookTest(unittest.TestCase):
@@ -38,7 +39,15 @@ class RoleContextHookTest(unittest.TestCase):
         self.core_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         self.core_command.chmod(0o500)
         self.runtime_manifest = self.trusted_root / "state/runtimes/demo-launch.json"
-        self._write_runtime_manifest(self.core_command)
+        self.runtime_manifest_document = {
+            "runtime_commands": {"core": [str(self.core_command)]}
+        }
+        self.runtime_manifest_patcher = mock.patch.object(
+            role_context_hook,
+            "_runtime_manifest",
+            side_effect=lambda _fleet_state: self.runtime_manifest_document,
+        )
+        self.runtime_manifest_patcher.start()
         self.core_db = self.fleet_state / "core.sqlite3"
         self.core_db.touch(mode=0o600)
         self.context = {
@@ -84,19 +93,12 @@ class RoleContextHookTest(unittest.TestCase):
         )
         self.current_patcher.start()
 
-    def _write_runtime_manifest(self, command, *, argv=None):
-        self.runtime_manifest.parent.mkdir(parents=True, exist_ok=True)
-        self.runtime_manifest.write_text(
-            json.dumps(
-                {
-                    "runtime_commands": {
-                        "core": list(argv) if argv is not None else [str(command)]
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-        self.runtime_manifest.chmod(0o600)
+    def _set_runtime_manifest(self, command, *, argv=None):
+        self.runtime_manifest_document = {
+            "runtime_commands": {
+                "core": list(argv) if argv is not None else [str(command)]
+            }
+        }
 
     def _current_context(self, fleet_id, agent_ref, session_id, runtime_product):
         context = self.current_contexts[(runtime_product, session_id)]
@@ -146,6 +148,7 @@ class RoleContextHookTest(unittest.TestCase):
 
     def tearDown(self):
         self.current_patcher.stop()
+        self.runtime_manifest_patcher.stop()
         self.hook_file_patcher.stop()
         self.temp.cleanup()
 
@@ -501,7 +504,7 @@ class RoleContextHookTest(unittest.TestCase):
         outside_command.chmod(0o500)
         outside_db = self.trusted_root / "outside.sqlite3"
         outside_db.touch(mode=0o600)
-        self._write_runtime_manifest(outside_command)
+        self._set_runtime_manifest(outside_command)
 
         with mock.patch.dict(
             os.environ,
@@ -536,7 +539,7 @@ class RoleContextHookTest(unittest.TestCase):
         command = untrusted_parent / "fleet-control"
         command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         command.chmod(0o500)
-        self._write_runtime_manifest(command)
+        self._set_runtime_manifest(command)
 
         with mock.patch.dict(
             os.environ,
@@ -568,17 +571,15 @@ class RoleContextHookTest(unittest.TestCase):
             command = command_root / "fleet-control"
             command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             command.chmod(0o500)
-            runtime_manifest = trusted_root / "state/runtimes/demo-launch.json"
-            runtime_manifest.parent.mkdir(parents=True)
-            runtime_manifest.write_text(
-                json.dumps({"runtime_commands": {"core": [str(command)]}}),
-                encoding="utf-8",
-            )
-            runtime_manifest.chmod(0o600)
             database = fleet_state / "core.sqlite3"
             database.touch(mode=0o600)
             with (
                 mock.patch.object(role_context_hook, "__file__", str(hook_runtime)),
+                mock.patch.object(
+                    role_context_hook,
+                    "_runtime_manifest",
+                    return_value={"runtime_commands": {"core": [str(command)]}},
+                ),
                 mock.patch.dict(
                     os.environ,
                     {
@@ -594,7 +595,7 @@ class RoleContextHookTest(unittest.TestCase):
                 self.assertEqual(database, role_context_hook._trusted_core_db())
 
     def test_trusted_core_command_rejects_manifest_arguments(self):
-        self._write_runtime_manifest(
+        self._set_runtime_manifest(
             self.core_command,
             argv=[str(self.core_command), "--unsafe-extra"],
         )
@@ -608,15 +609,28 @@ class RoleContextHookTest(unittest.TestCase):
                 role_context_hook._trusted_core_command()
 
     def test_trusted_core_command_rejects_non_private_runtime_manifest(self):
+        self.runtime_manifest.parent.mkdir(parents=True)
+        self.runtime_manifest.write_text(
+            '{"runtime_commands":{"core":["/fixed/core"]}}',
+            encoding="utf-8",
+        )
         self.runtime_manifest.chmod(0o644)
 
-        with mock.patch.dict(
-            os.environ,
-            {"AGENT_FLEET_CORE_COMMAND": str(self.core_command)},
-            clear=True,
-        ):
-            with self.assertRaises(role_context_hook.ActivationError):
-                role_context_hook._trusted_core_command()
+        with self.assertRaises(role_context_hook.ActivationError):
+            ORIGINAL_RUNTIME_MANIFEST(self.fleet_state)
+
+    def test_runtime_manifest_loads_private_document_from_hook_derived_path(self):
+        self.runtime_manifest.parent.mkdir(parents=True)
+        self.runtime_manifest.write_text(
+            '{"runtime_commands":{"core":["/fixed/core"]}}',
+            encoding="utf-8",
+        )
+        self.runtime_manifest.chmod(0o600)
+
+        self.assertEqual(
+            {"runtime_commands": {"core": ["/fixed/core"]}},
+            ORIGINAL_RUNTIME_MANIFEST(self.fleet_state),
+        )
 
     def test_trusted_core_db_rejects_non_private_database(self):
         for mode in (0o640, 0o644, 0o666):
