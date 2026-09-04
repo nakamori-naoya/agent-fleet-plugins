@@ -1,6 +1,8 @@
 import importlib.util
 import json
+import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -15,6 +17,7 @@ from unittest import mock
 
 MODULE_PATH = Path(__file__).parents[1] / "fleet_runtime.py"
 ROLE_CONTEXT = Path(__file__).parents[2] / "hooks" / "role_context.py"
+SESSION_HOOK_PLUGIN = Path(__file__).parents[2] / "session-hooks-plugin"
 sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("fleet_runtime", MODULE_PATH)
 fleet_runtime = importlib.util.module_from_spec(SPEC)
@@ -110,6 +113,23 @@ class FakeRunner:
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
+        if list(argv[:3]) == ["codex", "plugin", "list"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {
+                        "installed": [
+                            {
+                                "pluginId": "agent-fleet-session-hooks@agent-fleet",
+                                "installed": True,
+                                "version": "test",
+                            }
+                        ]
+                    }
+                ),
+                "",
+            )
         if "--version" in argv:
             return subprocess.CompletedProcess(argv, 0, "herdr 0.8.0\n", "")
         if "spec.validate" in argv:
@@ -141,15 +161,21 @@ class FleetRuntimeTest(unittest.TestCase):
         runtime = fleet_runtime.FleetRuntime(
             ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], sleeper=sleeper
         )
-        with mock.patch.object(
-            runtime,
-            "_run_json",
-            side_effect=[
-                {"status": "idle"},
-                {"status": "idle"},
-                {"status": "delivered"},
-                {"status": "idle"},
-            ],
+        with (
+            mock.patch.object(
+                runtime, "_execution_bundle_from_manifest", return_value=mock.sentinel.bundle
+            ),
+            mock.patch.object(runtime, "_with_execution_bundle", return_value=runtime),
+            mock.patch.object(
+                runtime,
+                "_run_json",
+                side_effect=[
+                    {"status": "idle"},
+                    {"status": "idle"},
+                    {"status": "delivered"},
+                    {"status": "idle"},
+                ],
+            ),
         ):
             result = runtime.monitor("review", self.state, once=False, poll_seconds=0.25)
 
@@ -203,6 +229,31 @@ class FleetRuntimeTest(unittest.TestCase):
             self.commands[name] = command
         (self.root / "adapter" / "view_profiles.py").write_text("# view fixture\n", encoding="utf-8")
         (self.root / "adapter" / "fleet_runtime.py").write_text("# runtime fixture\n", encoding="utf-8")
+        required_fixtures = {
+            "spec/scripts/validate_fleet.py": "# validator fixture\n",
+            "spec/schema/envelopes.schema.yml": "{}\n",
+            "spec/schema/fleet.schema.yml": "{}\n",
+            "spec/config/defaults.yml": "{}\n",
+            "config/defaults.yml": "{}\n",
+            "adapter/launch_profiles.py": "# launch fixture\n",
+            "adapter/schema/launch-profile.schema.yml": "{}\n",
+            "adapter/schema/view-profile.schema.yml": "{}\n",
+            "adapter/scripts/fleet-runtime": "#!/bin/sh\n",
+            "session-hooks-plugin/hooks/claude-hooks.json": (
+                SESSION_HOOK_PLUGIN / "hooks" / "claude-hooks.json"
+            ).read_text(encoding="utf-8"),
+            "session-hooks-plugin/hooks/codex-hooks.json": "{}\n",
+            "session-hooks-plugin/.claude-plugin/plugin.json": (
+                SESSION_HOOK_PLUGIN / ".claude-plugin" / "plugin.json"
+            ).read_text(encoding="utf-8"),
+            "session-hooks-plugin/.codex-plugin/plugin.json": "{}\n",
+        }
+        for relative, content in required_fixtures.items():
+            fixture = self.root / relative
+            fixture.parent.mkdir(parents=True, exist_ok=True)
+            fixture.write_text(content, encoding="utf-8")
+            if fixture.parent.name == "scripts":
+                fixture.chmod(0o700)
         original_which = fleet_runtime.shutil.which
         self.which = mock.patch.object(
             fleet_runtime.shutil,
@@ -392,34 +443,22 @@ class FleetRuntimeTest(unittest.TestCase):
         self.assertFalse(catalog_snapshot.exists())
 
     def test_status_detects_role_catalog_drift(self):
-        manifest = self.state / "runtimes" / "review.json"
-        manifest.parent.mkdir(parents=True)
-        manifest.write_text(
-            json.dumps(
-                {
-                    "phase": "active",
-                    "launch_id": "review",
-                    "launch_path": str(self.launches / "review.yml"),
-                    "launch_hash": fleet_runtime._content_hash(LAUNCH_PROFILE),
-                    "fleet_id": "review",
-                    "fleet_path": str(self.fleets / "review.yml"),
-                    "fleet_source_hash": fleet_runtime._content_hash(FLEET),
-                    "profile_path": str(self.profiles / "review-grid.yml"),
-                    "profile_hash": fleet_runtime._content_hash(PROFILE),
-                    "role_catalog_path": str(self.role_catalog),
-                    "role_catalog_hash": fleet_runtime._content_hash(
-                        {"fixture": True}
-                    ),
-                }
-            ),
-            encoding="utf-8",
-        )
         runtime = fleet_runtime.FleetRuntime(
             ["fleet-control"],
             ["fleet-herdr"],
             ["fleet-controller"],
             runner=FakeRunner(),
             role_catalog=self.role_catalog,
+        )
+        runtime.start(
+            "review",
+            [self.fleets],
+            [self.profiles],
+            self.state,
+            str(self.root),
+            "codex",
+            execute=True,
+            once=True,
         )
 
         self.assertEqual("active", runtime.status("review", self.state)["status"])
@@ -472,10 +511,15 @@ class FleetRuntimeTest(unittest.TestCase):
             worker_activation[worker_activation.index("--payload") + 1]
         )
         self.assertNotIn("monitoring", worker_payload["control"])
-        controller = next(call for call in runner.calls if call[0] == "fleet-controller")
+        controller = next(
+            call
+            for call in runner.calls
+            if Path(call[0]).name == "fleet-controller" and "--execute" in call
+        )
         self.assertIn("--execute", controller)
         self.assertEqual(
-            "fleet-control", controller[controller.index("--core-command") + 1]
+            "fleet-control",
+            Path(controller[controller.index("--core-command") + 1]).name,
         )
         self.assertTrue((self.state / "runtimes/review.json").is_file())
         provision = next(
@@ -486,14 +530,18 @@ class FleetRuntimeTest(unittest.TestCase):
             provision[provision.index("--agent-hook-runtime") + 1]
         )
         self.assertEqual(ROLE_CONTEXT.read_bytes(), hook_runtime.read_bytes())
-        self.assertEqual(0o600, hook_runtime.stat().st_mode & 0o777)
+        self.assertEqual(0o400, hook_runtime.stat().st_mode & 0o777)
         self.assertTrue(
             hook_runtime.is_relative_to(
                 (self.state / "fleets/review/hook-runtimes").resolve()
             )
         )
         provision_calls = [call for call in runner.calls if "provision" in call]
-        planned_call = next(call for call in provision_calls if "--execute" not in call)
+        planned_call = next(
+            call
+            for call in provision_calls
+            if "--execute" not in call and "--agent-core-command" in call
+        )
         executed_call = next(call for call in provision_calls if "--execute" in call)
         for option in (
             "--state-db",
@@ -678,6 +726,317 @@ class FleetRuntimeTest(unittest.TestCase):
         self.assertEqual("stopped", manifest["phase"])
         self.assertFalse(request_dir.exists())
 
+    def test_repeated_stop_is_idempotent_without_repeating_external_changes(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        runtime.stop("review", self.state, execute=True)
+        runner.calls.clear()
+
+        repeated = runtime.stop("review", self.state, execute=True)
+
+        self.assertEqual("stopped", repeated["status"])
+        self.assertEqual("already_stopped", repeated["herdr"]["status"])
+        self.assertEqual([], runner.calls)
+
+    def test_stop_retry_reuses_context_invalidation_operation_identity(self):
+        class LostResponseRunner(FakeRunner):
+            response_lost = False
+
+            def __call__(self, argv, **kwargs):
+                if "context.invalidate" in argv and not self.response_lost:
+                    self.calls.append(list(argv))
+                    self.response_lost = True
+                    return subprocess.CompletedProcess(
+                        argv, 2, "", "response was lost"
+                    )
+                return super().__call__(argv, **kwargs)
+
+        runner = LostResponseRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        (self.state / "fleets/review/core.sqlite3").touch()
+
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "response was lost"):
+            runtime.stop("review", self.state, execute=True)
+        stopped = runtime.stop("review", self.state, execute=True)
+
+        invalidations = [
+            call for call in runner.calls if "context.invalidate" in call
+        ]
+        self.assertEqual("stopped", stopped["status"])
+        self.assertEqual(2, len(invalidations))
+        self.assertEqual(
+            invalidations[0][invalidations[0].index("--operation-id") + 1],
+            invalidations[1][invalidations[1].index("--operation-id") + 1],
+        )
+
+    def test_remove_resumes_from_durable_removing_phase(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        runtime.stop("review", self.state, execute=True)
+        manifest_path = self.state / "runtimes/review.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["phase"] = "removing"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        core_db = self.state / "fleets/review/core.sqlite3"
+        database = sqlite3.connect(core_db)
+        try:
+            database.execute("CREATE TABLE initialized_before_interruption(marker TEXT)")
+            database.commit()
+        finally:
+            database.close()
+        runner.calls.clear()
+
+        removed = runtime.remove("review", self.state, execute=True)
+
+        self.assertEqual("removed", removed["status"])
+        self.assertFalse(manifest_path.exists())
+        self.assertFalse(any("deprovision" in call for call in runner.calls))
+        self.assertEqual(1, sum("fleet.remove" in call for call in runner.calls))
+
+    def test_remove_completes_when_stopped_before_core_database_existed(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        manifest_path = self.state / "runtimes/review.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["phase"] = "stopped"
+        manifest["stop_from_phase"] = "planned"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        core_db = self.state / "fleets/review/core.sqlite3"
+        core_db.unlink(missing_ok=True)
+        runner.calls.clear()
+
+        removed = runtime.remove("review", self.state, execute=True)
+
+        self.assertEqual("removed", removed["status"])
+        self.assertEqual("absent", removed["core"]["status"])
+        self.assertTrue(removed["core"]["idempotent"])
+        self.assertFalse(manifest_path.exists())
+        self.assertFalse(any("fleet.remove" in call for call in runner.calls))
+
+    def test_remove_delegates_a_partially_initialized_database_to_core(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        manifest_path = self.state / "runtimes/review.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["phase"] = "stopped"
+        manifest["stop_from_phase"] = "planned"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        core_db = self.state / "fleets/review/core.sqlite3"
+        core_db.unlink(missing_ok=True)
+        database = sqlite3.connect(core_db)
+        try:
+            database.execute("CREATE TABLE interrupted_initialization(marker TEXT)")
+            database.commit()
+        finally:
+            database.close()
+        runner.calls.clear()
+
+        removed = runtime.remove("review", self.state, execute=True)
+
+        self.assertEqual("removed", removed["status"])
+        self.assertFalse(manifest_path.exists())
+        self.assertEqual(1, sum("fleet.remove" in call for call in runner.calls))
+
+    def test_start_rejects_an_allowlisted_file_reached_through_a_symlink_directory(self):
+        external_hook_plugin = self.root / "external-session-hooks-plugin"
+        (self.root / "session-hooks-plugin").rename(external_hook_plugin)
+        (self.root / "session-hooks-plugin").symlink_to(
+            external_hook_plugin, target_is_directory=True
+        )
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "symbolic or invalid directory"
+        ):
+            runtime.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
+
+        self.assertFalse((self.state / "runtimes/review.json").exists())
+
+    def test_start_rejects_an_unrunnable_fixed_controller_before_state_creation(self):
+        class BrokenControllerRunner(FakeRunner):
+            def __call__(self, argv, **kwargs):
+                if (
+                    Path(argv[0]).name == "fleet-controller"
+                    and "--execute" not in argv
+                ):
+                    self.calls.append(list(argv))
+                    return subprocess.CompletedProcess(
+                        argv, 2, "", "controller import failed"
+                    )
+                return super().__call__(argv, **kwargs)
+
+        runner = BrokenControllerRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError,
+            "Fleet controller executable preflight failed",
+        ):
+            runtime.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
+
+        self.assertFalse((self.state / "runtimes/review.json").exists())
+        self.assertFalse((self.state / "fleets/review").exists())
+
+    def test_start_rejects_invalid_hook_syntax_before_state_creation(self):
+        invalid_hook = self.root / "invalid-role-context.py"
+        invalid_hook.write_text("def broken(:\n", encoding="utf-8")
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"],
+            runner=FakeRunner(),
+            hook_source=invalid_hook,
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "invalid Python syntax"
+        ):
+            runtime.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
+
+        self.assertFalse((self.state / "runtimes/review.json").exists())
+        self.assertFalse((self.state / "fleets/review").exists())
+
+    def test_start_rejects_invalid_claude_hook_registration_before_state_creation(self):
+        registration = self.root / "session-hooks-plugin/hooks/claude-hooks.json"
+        registration.write_text("{}\n", encoding="utf-8")
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"],
+            runner=FakeRunner(),
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "invalid event bindings"
+        ):
+            runtime.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
+
+        self.assertFalse((self.state / "runtimes/review.json").exists())
+        self.assertFalse((self.state / "fleets/review").exists())
+
+    def test_start_rejects_a_noop_claude_hook_registration_before_state_creation(self):
+        registration = self.root / "session-hooks-plugin/hooks/claude-hooks.json"
+        document = json.loads(registration.read_text(encoding="utf-8"))
+        for event_name in ("SessionStart", "UserPromptSubmit"):
+            document["hooks"][event_name][0]["hooks"][0]["args"][1] = (
+                "exit 0 # AGENT_FLEET_HOOK_RUNTIME --runtime-product claude"
+            )
+        registration.write_text(json.dumps(document), encoding="utf-8")
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"],
+            runner=FakeRunner(),
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "invalid SessionStart command"
+        ):
+            runtime.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
+
+        self.assertFalse((self.state / "runtimes/review.json").exists())
+        self.assertFalse((self.state / "fleets/review").exists())
+
+    def test_stop_during_pre_manifest_validation_cancels_start(self):
+        validation_started = threading.Event()
+        release_validation = threading.Event()
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        original_preflight = runtime._preflight_runtime
+
+        def blocking_preflight(resolved, cwd):
+            validation_started.set()
+            if not release_validation.wait(timeout=3):
+                raise AssertionError("test did not release runtime preflight")
+            return original_preflight(resolved, cwd)
+
+        with (
+            mock.patch.object(
+                runtime, "_preflight_runtime", side_effect=blocking_preflight
+            ),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            starting = executor.submit(
+                runtime.start,
+                "review",
+                [self.fleets],
+                [self.profiles],
+                self.state,
+                str(self.root),
+                "codex",
+                execute=True,
+                once=True,
+            )
+            self.assertTrue(validation_started.wait(timeout=3))
+            stopping = executor.submit(
+                runtime.stop, "review", self.state, execute=True
+            )
+            request_dir = self.state / "stop-requests/review"
+            for _ in range(100):
+                if request_dir.is_dir() and any(request_dir.glob("*.request")):
+                    break
+                threading.Event().wait(0.01)
+            else:
+                self.fail("stop request was not published before a manifest existed")
+            release_validation.set()
+
+            with self.assertRaisesRegex(
+                fleet_runtime.FleetRuntimeError,
+                "cancelled by a stop request",
+            ):
+                starting.result(timeout=3)
+            stopped = stopping.result(timeout=3)
+
+        self.assertEqual("inactive", stopped["status"])
+        self.assertFalse((self.state / "runtimes/review.json").exists())
+        self.assertFalse((self.state / "fleets/review").exists())
+        self.assertFalse(request_dir.exists())
+
     def test_live_stop_request_is_observed_and_crashed_request_is_removed(self):
         runtime = fleet_runtime.FleetRuntime(
             ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
@@ -712,7 +1071,7 @@ class FleetRuntimeTest(unittest.TestCase):
             execute=True,
             once=True,
         )
-        original_hold = runtime._hold_runtime_locks
+        original_hold = runtime._hold_fleet_lock
         original_run = runtime._run_json
         lock_held = False
 
@@ -732,7 +1091,7 @@ class FleetRuntimeTest(unittest.TestCase):
             return original_run(argv, context, **kwargs)
 
         with (
-            mock.patch.object(runtime, "_hold_runtime_locks", new=recording_lock),
+            mock.patch.object(runtime, "_hold_fleet_lock", new=recording_lock),
             mock.patch.object(runtime, "_run_json", side_effect=require_lock),
         ):
             result = runtime.remove("review", self.state, execute=True)
@@ -768,7 +1127,8 @@ class FleetRuntimeTest(unittest.TestCase):
         self.assertTrue((self.state / "runtimes/review-local.json").is_file())
         self.assertFalse((self.state / "runtimes/review.json").exists())
         controller = next(
-            call for call in runner.calls if call[0] == "fleet-controller"
+            call for call in runner.calls
+            if Path(call[0]).name == "fleet-controller" and "--execute" in call
         )
         self.assertEqual("review", controller[controller.index("--fleet") + 1])
         self.assertEqual(
@@ -885,11 +1245,10 @@ class FleetRuntimeTest(unittest.TestCase):
         hook_runtime = next(
             (self.state / "fleets/review/hook-runtimes").glob("*/role_context.py")
         )
+        hook_runtime.chmod(0o600)
         hook_runtime.write_text("raise SystemExit(91)\n", encoding="utf-8")
 
-        with self.assertRaisesRegex(
-            fleet_runtime.FleetRuntimeError, "hook runtime content"
-        ):
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "hook runtime"):
             runtime.start(
                 "review",
                 [self.fleets],
@@ -900,6 +1259,67 @@ class FleetRuntimeTest(unittest.TestCase):
                 execute=True,
                 once=True,
             )
+
+    def test_status_rejects_extra_file_in_hook_runtime(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        started = runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        hook_dir = Path(started["hook_runtime"]).parent
+        hook_dir.chmod(0o700)
+        (hook_dir / "json.py").write_text("raise SystemExit(91)\n", encoding="utf-8")
+        (hook_dir / "json.py").chmod(0o400)
+        hook_dir.chmod(0o500)
+        runner.calls.clear()
+
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "hook runtime"):
+            runtime.status("review", self.state)
+
+        self.assertEqual([], runner.calls)
+
+    def test_start_rejects_symlink_execution_runtime_directory(self):
+        outside = self.root / "outside-execution"
+        outside.mkdir()
+        fleet_state = self.state / "fleets/review"
+        fleet_state.mkdir(parents=True)
+        (fleet_state / "execution-runtimes").symlink_to(outside, target_is_directory=True)
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "must not be a symbolic link"
+        ):
+            runtime.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
+
+        self.assertEqual([], list(outside.iterdir()))
+
+    def test_start_rejects_symlink_hook_runtime_directory(self):
+        outside = self.root / "outside-hook"
+        outside.mkdir()
+        fleet_state = self.state / "fleets/review"
+        fleet_state.mkdir(parents=True)
+        (fleet_state / "hook-runtimes").symlink_to(outside, target_is_directory=True)
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "must not be a symbolic link"
+        ):
+            runtime.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
+
+        self.assertEqual([], list(outside.iterdir()))
 
     def test_start_rejects_missing_execution_prerequisite_before_state_creation(self):
         runtime = fleet_runtime.FleetRuntime(
@@ -915,6 +1335,70 @@ class FleetRuntimeTest(unittest.TestCase):
             )
 
         self.assertFalse(self.state.exists())
+
+    def test_start_rejects_missing_codex_hook_registration_before_state_creation(self):
+        class MissingRegistrationRunner(FakeRunner):
+            def __call__(self, argv, **kwargs):
+                if list(argv[:3]) == ["codex", "plugin", "list"]:
+                    self.calls.append(list(argv))
+                    return subprocess.CompletedProcess(
+                        argv, 0, json.dumps({"installed": []}), ""
+                    )
+                return super().__call__(argv, **kwargs)
+
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"],
+            ["fleet-herdr"],
+            ["fleet-controller"],
+            runner=MissingRegistrationRunner(),
+        )
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError,
+            "agent-fleet-session-hooks@agent-fleet must be installed",
+        ):
+            runtime.start(
+                "review", [self.fleets], [self.profiles], self.state,
+                str(self.root), "codex", execute=True, once=True,
+            )
+
+        self.assertFalse(self.state.exists())
+
+    def test_active_resume_does_not_require_codex_registration_again(self):
+        class ToggleRegistrationRunner(FakeRunner):
+            registration_available = True
+
+            def __call__(self, argv, **kwargs):
+                if (
+                    list(argv[:3]) == ["codex", "plugin", "list"]
+                    and not self.registration_available
+                ):
+                    self.calls.append(list(argv))
+                    return subprocess.CompletedProcess(
+                        argv, 0, json.dumps({"installed": []}), ""
+                    )
+                return super().__call__(argv, **kwargs)
+
+        runner = ToggleRegistrationRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        runner.registration_available = False
+        runner.calls.clear()
+
+        resumed = runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+
+        self.assertEqual("resumed", resumed["status"])
+        self.assertFalse(
+            any(list(call[:3]) == ["codex", "plugin", "list"] for call in runner.calls)
+        )
 
     def test_start_uses_fixed_configuration_snapshots_after_launch_commit(self):
         runner = FakeRunner()
@@ -1220,7 +1704,7 @@ class FleetRuntimeTest(unittest.TestCase):
         self.assertEqual(FLEET["spec"]["objective"], resolved.fleet["spec"]["objective"])
         self.assertFalse(self.state.exists())
 
-    def test_resume_rejects_different_execution_identity_with_recovery_guidance(self):
+    def test_resume_rejects_tampered_execution_identity_before_side_effects(self):
         runner = FakeRunner()
         original = fleet_runtime.FleetRuntime(
             ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
@@ -1235,7 +1719,7 @@ class FleetRuntimeTest(unittest.TestCase):
         manifest.write_text(json.dumps(saved), encoding="utf-8")
 
         with self.assertRaisesRegex(
-            fleet_runtime.FleetRuntimeError, "new fleet ID"
+            fleet_runtime.FleetRuntimeError, "path does not match its identity"
         ):
             original.start(
                 "review", [self.fleets], [self.profiles], self.state,
@@ -1250,9 +1734,92 @@ class FleetRuntimeTest(unittest.TestCase):
         runtime = fleet_runtime.FleetRuntime(
             ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
         )
-        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "legacy manifest"):
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "manifest format is unsupported"
+        ):
             runtime.start("review", [self.fleets], [self.profiles], self.state,
                           str(self.root), "codex", execute=True, once=True)
+        self.assertEqual([], runner.calls)
+
+    def test_status_rejects_manifest_without_a_known_phase(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        manifest_path = self.state / "runtimes/review.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.pop("phase")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        runner.calls.clear()
+
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "missing phase"):
+            runtime.status("review", self.state)
+
+        self.assertEqual([], runner.calls)
+
+    def test_status_rejects_a_non_string_manifest_phase(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        manifest_path = self.state / "runtimes/review.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["phase"] = ["active"]
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        runner.calls.clear()
+
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "invalid or missing phase"):
+            runtime.status("review", self.state)
+
+        self.assertEqual([], runner.calls)
+
+    def test_status_rejects_a_manifest_with_another_launch_identity(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        manifest_path = self.state / "runtimes/review.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["launch_id"] = "another-launch"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        runner.calls.clear()
+
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "launch identity"):
+            runtime.status("review", self.state)
+
+        self.assertEqual([], runner.calls)
+
+    def test_status_reports_incomplete_removal_without_querying_runtime(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        manifest_path = self.state / "runtimes/review.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["phase"] = "removing"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        runner.calls.clear()
+
+        result = runtime.status("review", self.state)
+
+        self.assertEqual("removing", result["status"])
+        self.assertTrue(result["recovery_required"])
         self.assertEqual([], runner.calls)
 
     def test_execution_identity_includes_wrapper_implementation_content(self):
@@ -1269,6 +1836,242 @@ class FleetRuntimeTest(unittest.TestCase):
 
         self.assertNotEqual(first["core"], second["core"])
         self.assertEqual(first["adapter"], second["adapter"])
+
+    def test_start_uses_snapshot_when_executable_changes_after_capture(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        original_preflight = runtime._preflight_runtime
+        implementation = (
+            self.commands["fleet-control"].parent.parent / "fleet_control.py"
+        )
+
+        def change_executable_after_preflight(resolved, cwd):
+            result = original_preflight(resolved, cwd)
+            implementation.write_text("# updated during launch\n", encoding="utf-8")
+            return result
+
+        with mock.patch.object(
+            runtime,
+            "_preflight_runtime",
+            side_effect=change_executable_after_preflight,
+        ):
+            result = runtime.start(
+                "review",
+                [self.fleets],
+                [self.profiles],
+                self.state,
+                str(self.root),
+                "codex",
+                execute=True,
+                once=True,
+            )
+
+        self.assertEqual("started", result["status"])
+        snapshot_root = Path(result["execution_snapshot_root"]).resolve()
+        snapshot_core = Path(result["runtime_commands"]["core"][0]).resolve()
+        self.assertTrue(snapshot_core.is_relative_to(snapshot_root))
+        self.assertEqual(
+            "# fleet-control fixture\n",
+            (snapshot_core.parent.parent / "fleet_control.py").read_text(
+                encoding="utf-8"
+            ),
+        )
+        self.assertEqual("# updated during launch\n", implementation.read_text())
+        for call in runner.calls:
+            if Path(call[0]).name in {
+                "fleet-control",
+                "fleet-herdr",
+                "fleet-controller",
+            }:
+                self.assertNotIn(Path(call[0]).resolve(), self.commands.values())
+                if "spec.validate" not in call and "--agent-core-command" in call:
+                    self.assertTrue(
+                        Path(call[0]).resolve().is_relative_to(snapshot_root)
+                    )
+
+    def test_monitor_keeps_using_snapshot_after_source_changes(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        started = runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        snapshot_root = Path(started["execution_snapshot_root"]).resolve()
+        (self.root / "adapter" / "fleet_controller.py").write_text(
+            "# source B remains installed\n", encoding="utf-8"
+        )
+        runner.calls.clear()
+
+        runtime.monitor("review", self.state, once=True, poll_seconds=0.01)
+
+        controller_call = next(
+            call for call in runner.calls if Path(call[0]).name == "fleet-controller"
+        )
+        self.assertTrue(Path(controller_call[0]).resolve().is_relative_to(snapshot_root))
+        self.assertEqual(
+            "# fleet-controller fixture\n",
+            (Path(controller_call[0]).parent.parent / "fleet_controller.py").read_text(
+                encoding="utf-8"
+            ),
+        )
+
+    def test_status_rejects_unexpected_file_in_execution_snapshot_before_runner(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        started = runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        snapshot_root = Path(started["execution_snapshot_root"])
+        snapshot_root.chmod(0o700)
+        (snapshot_root / "json.py").write_text("raise SystemExit(91)\n", encoding="utf-8")
+        (snapshot_root / "json.py").chmod(0o400)
+        snapshot_root.chmod(0o500)
+        runner.calls.clear()
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "unexpected or missing path"
+        ):
+            runtime.status("review", self.state)
+
+        self.assertEqual([], runner.calls)
+
+    def test_status_rejects_execution_snapshot_mode_change_before_runner(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        started = runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        snapshot_root = Path(started["execution_snapshot_root"])
+        declared_file = next(
+            snapshot_root / item["path"]
+            for item in started["execution_identity"]["files"]
+            if item["mode"] == 0o400
+        )
+        declared_file.chmod(0o600)
+        runner.calls.clear()
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "does not match its descriptor"
+        ):
+            runtime.status("review", self.state)
+
+        self.assertEqual([], runner.calls)
+
+    def test_status_rejects_special_permission_bits_on_an_execution_file(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        started = runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        snapshot_root = Path(started["execution_snapshot_root"])
+        declared_file = next(
+            snapshot_root / item["path"]
+            for item in started["execution_identity"]["files"]
+            if item["mode"] == 0o500
+        )
+        runner.calls.clear()
+
+        original_stat = Path.stat
+
+        def stat_with_setuid(path, *args, **kwargs):
+            metadata = original_stat(path, *args, **kwargs)
+            if str(path) == str(declared_file):
+                values = list(metadata)
+                values[0] |= 0o4000
+                return os.stat_result(values)
+            return metadata
+
+        with (
+            mock.patch.object(Path, "stat", autospec=True, side_effect=stat_with_setuid),
+            self.assertRaisesRegex(
+                fleet_runtime.FleetRuntimeError, "does not match its descriptor"
+            ),
+        ):
+            runtime.status("review", self.state)
+
+        self.assertEqual([], runner.calls)
+
+    def test_status_rejects_manifest_command_change_before_runner(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        manifest_path = self.state / "runtimes/review.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["runtime_commands"]["controller"].append("--changed")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        runner.calls.clear()
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "commands do not match"
+        ):
+            runtime.status("review", self.state)
+
+        self.assertEqual([], runner.calls)
+
+    def test_status_rejects_manifest_identity_change_before_runner(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        manifest_path = self.state / "runtimes/review.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["execution_identity"]["commands"]["controller"].append("--changed")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        runner.calls.clear()
+
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError, "path does not match its identity"
+        ):
+            runtime.status("review", self.state)
+
+        self.assertEqual([], runner.calls)
+
+    def test_status_does_not_recreate_missing_execution_state(self):
+        runner = FakeRunner()
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
+        )
+        runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        fleet_state = self.state / "fleets/review"
+        for directory in [fleet_state, *fleet_state.rglob("*")]:
+            if directory.is_dir() and not directory.is_symlink():
+                directory.chmod(0o700)
+        shutil.rmtree(fleet_state)
+        manifest_path = self.state / "runtimes/review.json"
+        before_manifest = manifest_path.read_bytes()
+        runner.calls.clear()
+
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "is missing"):
+            runtime.status("review", self.state)
+
+        self.assertFalse(fleet_state.exists())
+        self.assertEqual(before_manifest, manifest_path.read_bytes())
+        self.assertEqual([], runner.calls)
 
     def test_start_materializes_the_same_hook_bytes_captured_by_preflight(self):
         hook_source = self.root / "role_context.py"
@@ -1309,12 +2112,12 @@ class FleetRuntimeTest(unittest.TestCase):
             (self.state / "runtimes/review.json").read_text(encoding="utf-8")
         )
         self.assertEqual(
-            manifest["execution_identity"]["hook"]["sha256"],
+            manifest["execution_identity"]["hook_sha256"],
             manifest["hook_sha256"],
         )
         self.assertEqual(hook_a, Path(manifest["hook_runtime"]).read_bytes())
 
-    def test_execution_identity_covers_adapter_tree_and_rejects_before_side_effects(self):
+    def test_active_resume_uses_saved_adapter_when_installed_adapter_changes(self):
         runner = FakeRunner()
         runtime = fleet_runtime.FleetRuntime(
             ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
@@ -1323,15 +2126,28 @@ class FleetRuntimeTest(unittest.TestCase):
                       str(self.root), "codex", execute=True, once=True)
         manifest = self.state / "runtimes/review.json"
         before_manifest = manifest.read_bytes()
-        before_calls = len(runner.calls)
         (self.root / "adapter" / "view_profiles.py").write_text("# changed\n", encoding="utf-8")
-        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "identity conflict"):
-            runtime.start("review", [self.fleets], [self.profiles], self.state,
-                          str(self.root), "codex", execute=True, once=True)
-        self.assertEqual(before_manifest, manifest.read_bytes())
-        self.assertEqual(before_calls, len(runner.calls))
+        runner.calls.clear()
 
-    def test_runtime_module_change_rejects_without_side_effects(self):
+        resumed = runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+
+        self.assertEqual("resumed", resumed["status"])
+        self.assertEqual(before_manifest, manifest.read_bytes())
+        snapshot_root = Path(resumed["execution_snapshot_root"]).resolve()
+        self.assertTrue(
+            all(
+                Path(call[0]).resolve().is_relative_to(snapshot_root)
+                for call in runner.calls
+                if Path(call[0]).name in {
+                    "fleet-control", "fleet-herdr", "fleet-controller"
+                }
+            )
+        )
+
+    def test_coordinator_source_is_outside_the_fixed_execution_bundle(self):
         runner = FakeRunner()
         runtime = fleet_runtime.FleetRuntime(
             ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=runner
@@ -1340,17 +2156,24 @@ class FleetRuntimeTest(unittest.TestCase):
                       str(self.root), "codex", execute=True, once=True)
         manifest = self.state / "runtimes/review.json"
         before_manifest = manifest.read_bytes()
-        before_calls = len(runner.calls)
         (self.root / "adapter" / "fleet_runtime.py").write_text(
             "# changed runtime\n", encoding="utf-8"
         )
+        runner.calls.clear()
 
-        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "identity conflict"):
-            runtime.start("review", [self.fleets], [self.profiles], self.state,
-                          str(self.root), "codex", execute=True, once=True)
+        resumed = runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
 
+        self.assertEqual("resumed", resumed["status"])
         self.assertEqual(before_manifest, manifest.read_bytes())
-        self.assertEqual(before_calls, len(runner.calls))
+        self.assertFalse(
+            any(
+                item["path"].endswith("adapter/fleet_runtime.py")
+                for item in resumed["execution_identity"]["files"]
+            )
+        )
 
     def test_same_install_resumes_after_pyc_generation(self):
         runner = FakeRunner()
@@ -1369,7 +2192,7 @@ class FleetRuntimeTest(unittest.TestCase):
 
         self.assertEqual("resumed", resumed["status"])
 
-    def test_same_content_at_different_install_path_rejects_resume(self):
+    def test_same_content_at_different_install_path_resumes_same_snapshot(self):
         runner = FakeRunner()
         original = fleet_runtime.FleetRuntime(
             [str(self.commands["fleet-control"])],
@@ -1380,11 +2203,15 @@ class FleetRuntimeTest(unittest.TestCase):
         original.start("review", [self.fleets], [self.profiles], self.state,
                        str(self.root), "codex", execute=True, once=True)
         manifest = self.state / "runtimes/review.json"
-        before_manifest = manifest.read_bytes()
-        before_calls = len(runner.calls)
         relocated = self.root / "relocated"
         shutil.copytree(self.root / "core", relocated / "core")
         shutil.copytree(self.root / "adapter", relocated / "adapter")
+        shutil.copytree(self.root / "spec", relocated / "spec")
+        shutil.copytree(self.root / "config", relocated / "config")
+        shutil.copytree(
+            self.root / "session-hooks-plugin",
+            relocated / "session-hooks-plugin",
+        )
         moved = fleet_runtime.FleetRuntime(
             [str(relocated / "core/scripts/fleet-control")],
             [str(relocated / "adapter/scripts/fleet-herdr")],
@@ -1392,14 +2219,24 @@ class FleetRuntimeTest(unittest.TestCase):
             runner=runner,
         )
 
-        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "identity conflict"):
-            moved.start("review", [self.fleets], [self.profiles], self.state,
-                        str(self.root), "codex", execute=True, once=True)
+        resumed = moved.start(
+            "review",
+            [self.fleets],
+            [self.profiles],
+            self.state,
+            str(self.root),
+            "codex",
+            execute=True,
+            once=True,
+        )
 
-        self.assertEqual(before_manifest, manifest.read_bytes())
-        self.assertEqual(before_calls, len(runner.calls))
+        self.assertEqual("resumed", resumed["status"])
+        saved = json.loads(manifest.read_text(encoding="utf-8"))
+        self.assertEqual(
+            saved["execution_snapshot_root"], resumed["execution_snapshot_root"]
+        )
 
-    def test_different_hook_rejects_same_fleet_id(self):
+    def test_active_resume_keeps_saved_hook_and_stopped_restart_uses_new_hook(self):
         runner = FakeRunner()
         first_source = self.root / "role-context-v1.py"
         second_source = self.root / "role-context-v2.py"
@@ -1431,12 +2268,25 @@ class FleetRuntimeTest(unittest.TestCase):
             runner=runner,
             hook_source=second_source,
         )
-        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "identity conflict"):
-            updated_runtime.start(
-                "review", [self.fleets], [self.profiles], self.state,
-                str(self.root), "codex", execute=True, once=True,
-            )
+        resumed = updated_runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        self.assertEqual("resumed", resumed["status"])
+        self.assertEqual(str(first_hook), resumed["hook_runtime"])
         self.assertEqual("print('v1')\n", first_hook.read_text(encoding="utf-8"))
+
+        updated_runtime.stop("review", self.state, execute=True)
+        restarted = updated_runtime.start(
+            "review", [self.fleets], [self.profiles], self.state,
+            str(self.root), "codex", execute=True, once=True,
+        )
+        self.assertEqual("started", restarted["status"])
+        self.assertNotEqual(str(first_hook), restarted["hook_runtime"])
+        self.assertEqual(
+            "print('v2')\n",
+            Path(restarted["hook_runtime"]).read_text(encoding="utf-8"),
+        )
 
     def test_different_hook_can_start_with_new_fleet_id(self):
         class ConfigAwareRunner(FakeRunner):

@@ -12,6 +12,7 @@ import re
 import shutil
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -26,10 +27,44 @@ from launch_profiles import LaunchProfileCatalog, LaunchProfileError
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 DEFAULT_HOOK_SOURCE = Path(__file__).resolve().parents[1] / "hooks" / "role_context.py"
+MANIFEST_FORMAT_VERSION = 1
+RUNTIME_PHASES = frozenset(
+    {"planned", "core_provisioned", "herdr_provisioned", "active", "stopping", "stopped", "removing"}
+)
 
 
 class FleetRuntimeError(RuntimeError):
     """設定解決または艦隊起動を安全に継続できない。"""
+
+
+class ExecutionBundle:
+    """One immutable Core/Herdr/Controller runtime closure."""
+
+    def __init__(
+        self,
+        root: Path,
+        source_identity: Mapping[str, Any],
+        command_relatives: Mapping[str, Sequence[str]],
+        *,
+        created: bool = False,
+    ):
+        self.root = root
+        self.source_identity = dict(source_identity)
+        self.command_relatives = {
+            name: tuple(argv) for name, argv in command_relatives.items()
+        }
+        self.created = created
+
+    def command(self, name: str) -> tuple[str, ...]:
+        argv = self.command_relatives[name]
+        return (str((self.root / argv[0]).resolve()), *argv[1:])
+
+    @property
+    def commands(self) -> dict[str, list[str]]:
+        return {
+            name: list(self.command(name))
+            for name in ("core", "herdr", "controller")
+        }
 
 
 class ResolvedFleet:
@@ -216,36 +251,668 @@ class FleetRuntime:
                 argv[0] = discovered
         return shlex.join(argv)
 
+    def _with_execution_bundle(self, bundle: ExecutionBundle) -> FleetRuntime:
+        runtime = FleetRuntime(
+            bundle.command("core"),
+            bundle.command("herdr"),
+            bundle.command("controller"),
+            runner=self.runner,
+            sleeper=self.sleeper,
+            hook_source=self.hook_source,
+            role_catalog=self.role_catalog,
+            launch_dirs=self.launch_dirs,
+            allow_legacy_fleet=self.allow_legacy_fleet,
+        )
+        # Preserve explicit instance-level test/integration seams while changing
+        # only the executable commands. Normal CLI instances have none of these.
+        for name in (
+            "_profiles",
+            "_preflight_runtime",
+            "_run_json",
+            "_materialize_hook_runtime",
+        ):
+            if name in self.__dict__:
+                setattr(runtime, name, self.__dict__[name])
+        return runtime
+
+    @staticmethod
+    def _bundle_identity(
+        root: Path,
+        command_relatives: Mapping[str, Sequence[str]],
+        hook_payload: bytes,
+    ) -> dict[str, Any]:
+        files = []
+        for path in sorted(
+            (candidate for candidate in root.rglob("*") if candidate.is_file()),
+            key=lambda candidate: candidate.relative_to(root).as_posix(),
+        ):
+            metadata = path.stat()
+            files.append(
+                {
+                    "path": path.relative_to(root).as_posix(),
+                    "mode": metadata.st_mode & 0o777,
+                    "size": metadata.st_size,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+        return {
+            "format_version": 1,
+            "hook_sha256": hashlib.sha256(hook_payload).hexdigest(),
+            "files": files,
+            "commands": {
+                name: list(command_relatives[name])
+                for name in ("core", "herdr", "controller")
+            },
+        }
+
+    @staticmethod
+    def _assert_tree_has_no_symlinks(root: Path) -> None:
+        if root.is_symlink() or not root.is_dir():
+            raise FleetRuntimeError(
+                f"execution source must be a regular directory: {root}"
+            )
+        for directory, subdirectories, filenames in os.walk(
+            root, followlinks=False
+        ):
+            parent = Path(directory)
+            for name in [*subdirectories, *filenames]:
+                if (parent / name).is_symlink():
+                    raise FleetRuntimeError(
+                        f"execution source contains a symbolic link: {parent / name}"
+                    )
+
+    @staticmethod
+    def _freeze_execution_tree(root: Path) -> None:
+        paths = sorted(root.rglob("*"), key=lambda path: len(path.parts), reverse=True)
+        for path in paths:
+            if path.is_symlink():
+                raise FleetRuntimeError(
+                    f"execution snapshot contains a symbolic link: {path}"
+                )
+            mode = path.stat().st_mode
+            if path.is_dir():
+                path.chmod(0o500)
+            elif path.is_file():
+                path.chmod(0o500 if mode & 0o111 else 0o400)
+        root.chmod(0o500)
+
+    @staticmethod
+    def _copy_execution_tree(source: Path, target: Path) -> None:
+        shutil.copytree(
+            source,
+            target,
+            symlinks=True,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+        )
+
+    @staticmethod
+    def _execution_tree_files(root: Path) -> list[Path]:
+        candidates: list[Path]
+        if root.name == "core":
+            plugin_root = root.parent
+            candidates = [
+                root / "fleet_control.py",
+                root / "scripts" / "fleet-control",
+                plugin_root / "spec" / "scripts" / "validate_fleet.py",
+                plugin_root / "spec" / "schema" / "envelopes.schema.yml",
+                plugin_root / "spec" / "schema" / "fleet.schema.yml",
+                plugin_root / "spec" / "config" / "defaults.yml",
+                plugin_root / "config" / "defaults.yml",
+            ]
+        elif root.name == "adapter":
+            plugin_root = root.parent
+            hook_plugin = plugin_root / "session-hooks-plugin"
+            candidates = [
+                root / "fleet_controller.py",
+                root / "herdr_adapter.py",
+                root / "launch_profiles.py",
+                root / "view_profiles.py",
+                root / "scripts" / "fleet-controller",
+                root / "scripts" / "fleet-herdr",
+                root / "schema" / "launch-profile.schema.yml",
+                root / "schema" / "view-profile.schema.yml",
+                hook_plugin / "hooks" / "claude-hooks.json",
+                hook_plugin / ".claude-plugin" / "plugin.json",
+            ]
+        else:
+            raise FleetRuntimeError(
+                f"unsupported execution tree identity: {root.name}"
+            )
+        source_plugin_root = root.parent
+        for path in candidates:
+            try:
+                relative = path.relative_to(source_plugin_root)
+            except ValueError as exc:
+                raise FleetRuntimeError(
+                    f"required execution closure file escapes its plugin: {path}"
+                ) from exc
+            ancestor = source_plugin_root
+            for part in relative.parts[:-1]:
+                ancestor = ancestor / part
+                try:
+                    metadata = ancestor.lstat()
+                except OSError as exc:
+                    raise FleetRuntimeError(
+                        f"required execution closure directory is unavailable: {ancestor}"
+                    ) from exc
+                if ancestor.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+                    raise FleetRuntimeError(
+                        f"execution source contains a symbolic or invalid directory: {ancestor}"
+                    )
+            if path.is_symlink() or not path.is_file():
+                raise FleetRuntimeError(
+                    f"required execution closure file is unavailable: {path}"
+                )
+        return sorted(candidates, key=lambda path: path.relative_to(root.parent).as_posix())
+
+    @staticmethod
+    def _validate_claude_hook_registration(adapter_root: Path) -> None:
+        plugin_root = adapter_root.parent / "session-hooks-plugin"
+        plugin_path = plugin_root / ".claude-plugin" / "plugin.json"
+        hooks_path = plugin_root / "hooks" / "claude-hooks.json"
+        try:
+            plugin = json.loads(plugin_path.read_text(encoding="utf-8"))
+            registration = json.loads(hooks_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise FleetRuntimeError(
+                f"Claude hook registration is unreadable or invalid JSON: {exc}"
+            ) from exc
+        if (
+            not isinstance(plugin, Mapping)
+            or plugin.get("name") != "agent-fleet-session-hooks"
+            or plugin.get("hooks") != "./hooks/claude-hooks.json"
+        ):
+            raise FleetRuntimeError("Claude hook plugin manifest has an invalid registration")
+        hooks = registration.get("hooks") if isinstance(registration, Mapping) else None
+        if not isinstance(hooks, Mapping) or set(hooks) != {
+            "SessionStart",
+            "UserPromptSubmit",
+        }:
+            raise FleetRuntimeError("Claude hook registration has invalid event bindings")
+        expected_script = (
+            'if [ -n "${AGENT_FLEET_HOOK_RUNTIME:-}" ]; then exec python3 '
+            '"$AGENT_FLEET_HOOK_RUNTIME" --runtime-product claude; fi'
+        )
+        for event_name in ("SessionStart", "UserPromptSubmit"):
+            event_bindings = hooks.get(event_name)
+            if not isinstance(event_bindings, list) or len(event_bindings) != 1:
+                raise FleetRuntimeError(
+                    f"Claude hook registration has invalid {event_name} bindings"
+                )
+            event_binding = event_bindings[0]
+            if (
+                not isinstance(event_binding, Mapping)
+                or (
+                    event_name == "SessionStart"
+                    and event_binding.get("matcher")
+                    != "startup|resume|clear|compact|fork"
+                )
+                or (event_name == "UserPromptSubmit" and "matcher" in event_binding)
+            ):
+                raise FleetRuntimeError(
+                    f"Claude hook registration has invalid {event_name} matcher"
+                )
+            handlers = (
+                event_binding.get("hooks")
+                if isinstance(event_binding, Mapping) else None
+            )
+            if not isinstance(handlers, list) or len(handlers) != 1:
+                raise FleetRuntimeError(
+                    f"Claude hook registration has invalid {event_name} handler"
+                )
+            handler = handlers[0]
+            args = handler.get("args") if isinstance(handler, Mapping) else None
+            if (
+                not isinstance(handler, Mapping)
+                or handler.get("type") != "command"
+                or handler.get("command") != "sh"
+                or args != ["-c", expected_script]
+                or not isinstance(handler.get("timeout"), int)
+                or isinstance(handler.get("timeout"), bool)
+                or handler["timeout"] <= 0
+            ):
+                raise FleetRuntimeError(
+                    f"Claude hook registration has an invalid {event_name} command"
+                )
+
+    @classmethod
+    def _copy_execution_closure(cls, source_root: Path, target_root: Path) -> None:
+        files = cls._execution_tree_files(source_root)
+        if not files:
+            raise FleetRuntimeError(
+                f"required implementation tree is empty: {source_root}"
+            )
+        source_plugin_root = source_root.parent
+        target_plugin_root = target_root.parent
+        for source in files:
+            metadata = source.lstat()
+            if source.is_symlink() or not source.is_file() or metadata.st_nlink != 1:
+                raise FleetRuntimeError(
+                    f"execution source file is not an independent regular file: {source}"
+                )
+            relative = source.relative_to(source_plugin_root)
+            target = target_plugin_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.copy2(source, target, follow_symlinks=False)
+
+    @contextmanager
+    def _capture_execution_bundle(
+        self, hook_payload: bytes
+    ) -> Iterator[ExecutionBundle]:
+        """Copy the executable closure once, then execute only the copy."""
+        source_probe = self._preflight_execution(hook_payload)
+        source_commands = {
+            "core": self.core_command,
+            "herdr": self.herdr_command,
+            "controller": self.controller_command,
+        }
+        identity_names = {
+            "core": "core",
+            "herdr": "adapter",
+            "controller": "controller",
+        }
+        with tempfile.TemporaryDirectory(
+            prefix="agent-fleet-execution-snapshot-"
+        ) as temporary:
+            snapshot_root = Path(temporary) / "bundle"
+            snapshot_root.mkdir(mode=0o700)
+            copied_roots: dict[Path, Path] = {}
+            command_relatives: dict[str, tuple[str, ...]] = {}
+            for name in ("core", "herdr", "controller"):
+                command = source_commands[name]
+                command_path = Path(
+                    str(source_probe[identity_names[name]]["command_path"])
+                )
+                source_root = command_path.parent.parent.resolve()
+                self._assert_tree_has_no_symlinks(source_root)
+                target_root = copied_roots.get(source_root)
+                if target_root is None:
+                    target_root = (
+                        snapshot_root
+                        / "trees"
+                        / f"{len(copied_roots)}-{source_root.name}-plugin"
+                        / source_root.name
+                    )
+                    self._copy_execution_closure(source_root, target_root)
+                    copied_roots[source_root] = target_root
+                executable = target_root / command_path.relative_to(source_root)
+                command_relatives[name] = (
+                    executable.relative_to(snapshot_root).as_posix(),
+                    *command[1:],
+                )
+            self._freeze_execution_tree(snapshot_root)
+            provisional = ExecutionBundle(
+                snapshot_root,
+                {},
+                command_relatives,
+            )
+            stable_runtime = self._with_execution_bundle(provisional)
+            stable_runtime._preflight_execution(hook_payload)
+            stable_runtime._validate_claude_hook_registration(
+                Path(stable_runtime.herdr_command[0]).parent.parent
+            )
+            stable_runtime._run_json(
+                [
+                    *stable_runtime.controller_command,
+                    "--core-db",
+                    "__fleet_runtime_preflight_core__",
+                    "--herdr-db",
+                    "__fleet_runtime_preflight_herdr__",
+                    "--fleet",
+                    "__fleet_runtime_preflight__",
+                    "--worker-id",
+                    "__fleet_runtime_preflight__",
+                ],
+                "Fleet controller executable preflight",
+                timeout=10,
+            )
+            bundle = ExecutionBundle(
+                snapshot_root,
+                self._bundle_identity(
+                    snapshot_root, command_relatives, hook_payload
+                ),
+                command_relatives,
+            )
+            self._validate_execution_bundle(bundle, hook_payload)
+            yield bundle
+
+    @staticmethod
+    def _prepare_private_runtime_directory(
+        fleet_state_dir: Path,
+        name: str,
+        label: str,
+        *,
+        create: bool = True,
+    ) -> Path:
+        """Create or validate one private, non-symlink runtime directory."""
+        if create:
+            fleet_state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        elif not fleet_state_dir.is_dir():
+            raise FleetRuntimeError(f"{label} Fleet state directory is missing")
+        child = fleet_state_dir / name
+        if child.is_symlink():
+            raise FleetRuntimeError(f"{label} directory must not be a symbolic link")
+        if create:
+            child.mkdir(mode=0o700, exist_ok=True)
+        if not child.exists():
+            raise FleetRuntimeError(f"{label} directory is missing")
+        try:
+            metadata = child.lstat()
+        except OSError as exc:
+            raise FleetRuntimeError(f"cannot validate {label} directory: {exc}") from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o777 != 0o700
+        ):
+            raise FleetRuntimeError(f"{label} directory has unsafe ownership or mode")
+        return child.resolve()
+
+    def _publish_execution_bundle(
+        self,
+        bundle: ExecutionBundle,
+        fleet_state_dir: Path,
+        hook_payload: bytes,
+    ) -> ExecutionBundle:
+        identity_payload = json.dumps(
+            bundle.source_identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        identity_hash = hashlib.sha256(identity_payload).hexdigest()
+        parent = self._prepare_private_runtime_directory(
+            fleet_state_dir, "execution-runtimes", "execution snapshot"
+        )
+        target = parent / identity_hash
+        created = False
+        if not target.exists():
+            temporary = parent / f".{identity_hash}-{uuid.uuid4().hex}.tmp"
+            try:
+                self._copy_execution_tree(bundle.root, temporary)
+                self._freeze_execution_tree(temporary)
+                staged = ExecutionBundle(
+                    temporary,
+                    bundle.source_identity,
+                    bundle.command_relatives,
+                )
+                self._validate_execution_bundle(staged, hook_payload)
+                temporary.replace(target)
+                created = True
+            except Exception:
+                if temporary.exists():
+                    self._remove_execution_tree(temporary)
+                raise
+        published = ExecutionBundle(
+            target,
+            bundle.source_identity,
+            bundle.command_relatives,
+            created=created,
+        )
+        try:
+            self._validate_execution_bundle(published, hook_payload)
+        except Exception:
+            if created and target.exists():
+                self._remove_execution_tree(target)
+            raise
+        return published
+
+    @staticmethod
+    def _remove_execution_tree(root: Path) -> None:
+        for path in [root, *root.rglob("*")]:
+            if path.is_dir() and not path.is_symlink():
+                path.chmod(0o700)
+        shutil.rmtree(root)
+
+    @staticmethod
+    def _discard_uncommitted_execution_bundle(bundle: ExecutionBundle) -> None:
+        if not bundle.created or not bundle.root.exists():
+            return
+        FleetRuntime._remove_execution_tree(bundle.root)
+        try:
+            bundle.root.parent.rmdir()
+            bundle.root.parent.parent.rmdir()
+        except OSError:
+            pass
+
+    def _validate_execution_bundle(
+        self, bundle: ExecutionBundle, hook_payload: bytes
+    ) -> None:
+        raw_root = bundle.root
+        if raw_root.is_symlink() or not raw_root.is_dir():
+            raise FleetRuntimeError("immutable execution snapshot is missing or unsafe")
+        root = raw_root.resolve()
+        if (
+            root.stat().st_uid != os.getuid()
+            or root.stat().st_mode & 0o7777 != 0o500
+        ):
+            raise FleetRuntimeError("immutable execution snapshot has unsafe ownership or mode")
+        identity = bundle.source_identity
+        if identity.get("format_version") != 1:
+            raise FleetRuntimeError("unsupported immutable execution snapshot format")
+        if identity.get("hook_sha256") != hashlib.sha256(hook_payload).hexdigest():
+            raise FleetRuntimeError("immutable execution snapshot hook identity changed")
+        descriptors = identity.get("files")
+        if not isinstance(descriptors, list) or not descriptors:
+            raise FleetRuntimeError("immutable execution snapshot has no file manifest")
+        expected_files: dict[Path, Mapping[str, Any]] = {}
+        for descriptor in descriptors:
+            if not isinstance(descriptor, Mapping):
+                raise FleetRuntimeError("immutable execution file descriptor is invalid")
+            relative_value = descriptor.get("path")
+            mode = descriptor.get("mode")
+            size = descriptor.get("size")
+            digest = descriptor.get("sha256")
+            if (
+                not isinstance(relative_value, str)
+                or not relative_value
+                or not isinstance(mode, int)
+                or mode not in {0o400, 0o500}
+                or not isinstance(size, int)
+                or size < 0
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            ):
+                raise FleetRuntimeError("immutable execution file descriptor is invalid")
+            relative = Path(relative_value)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise FleetRuntimeError("immutable execution file path is unsafe")
+            expected = (root / relative).resolve()
+            if not expected.is_relative_to(root) or expected in expected_files:
+                raise FleetRuntimeError("immutable execution file path is unsafe")
+            expected_files[expected] = descriptor
+        expected_directories = {root}
+        for path in expected_files:
+            parent = path.parent
+            while parent.is_relative_to(root):
+                expected_directories.add(parent)
+                if parent == root:
+                    break
+                parent = parent.parent
+        actual_files: set[Path] = set()
+        actual_directories = {root}
+        for path in root.rglob("*"):
+            if path.is_symlink():
+                raise FleetRuntimeError(
+                    "immutable execution snapshot contains a symbolic link"
+                )
+            if path.is_file():
+                actual_files.add(path.resolve())
+            elif path.is_dir():
+                actual_directories.add(path.resolve())
+            else:
+                raise FleetRuntimeError(
+                    "immutable execution snapshot contains a special file"
+                )
+        if (
+            actual_files != set(expected_files)
+            or actual_directories != expected_directories
+        ):
+            raise FleetRuntimeError(
+                "immutable execution snapshot contains an unexpected or missing path"
+            )
+        command_paths = {
+            Path(bundle.command(name)[0]).resolve()
+            for name in ("core", "herdr", "controller")
+        }
+        if not command_paths.issubset(expected_files):
+            raise FleetRuntimeError("immutable execution command is not a declared file")
+        for path in actual_directories:
+            metadata = path.stat()
+            if (
+                metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o7777 != 0o500
+            ):
+                raise FleetRuntimeError(
+                    "immutable execution snapshot has unsafe ownership or mode"
+                )
+        for path, descriptor in expected_files.items():
+            metadata = path.stat()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if (
+                metadata.st_uid != os.getuid()
+                or metadata.st_nlink != 1
+                or metadata.st_mode & 0o7777 != descriptor["mode"]
+                or metadata.st_size != descriptor["size"]
+                or digest != descriptor["sha256"]
+            ):
+                raise FleetRuntimeError(
+                    "immutable execution snapshot file does not match its descriptor"
+                )
+            if path in command_paths and descriptor["mode"] != 0o500:
+                raise FleetRuntimeError(
+                    "immutable execution snapshot command is not owner-executable"
+                )
+
+    def _execution_bundle_from_manifest(
+        self,
+        manifest: Mapping[str, Any],
+        state_dir: Path,
+        launch_id: str,
+    ) -> ExecutionBundle:
+        self._validate_runtime_manifest(manifest)
+        if manifest["launch_id"] != launch_id:
+            raise FleetRuntimeError(
+                "runtime manifest launch identity does not match the requested launch"
+            )
+        source_identity = manifest.get("execution_identity")
+        snapshot_root_value = manifest.get("execution_snapshot_root")
+        runtime_commands = manifest.get("runtime_commands")
+        if (
+            not isinstance(source_identity, Mapping)
+            or not isinstance(snapshot_root_value, str)
+            or not isinstance(runtime_commands, Mapping)
+        ):
+            raise FleetRuntimeError(
+                "runtime has no immutable execution snapshot; remove it with its "
+                "original plugin version and start it again"
+            )
+        fleet_state_dir = self._fleet_state_dir(state_dir, launch_id)
+        allowed_root = self._prepare_private_runtime_directory(
+            fleet_state_dir,
+            "execution-runtimes",
+            "execution snapshot",
+            create=False,
+        )
+        snapshot_root = Path(snapshot_root_value)
+        if snapshot_root.is_symlink():
+            raise FleetRuntimeError("immutable execution snapshot path is unsafe")
+        resolved_root = snapshot_root.resolve()
+        if resolved_root.parent != allowed_root:
+            raise FleetRuntimeError("immutable execution snapshot escapes Fleet state")
+        identity_payload = json.dumps(
+            source_identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if resolved_root.name != hashlib.sha256(identity_payload).hexdigest():
+            raise FleetRuntimeError(
+                "immutable execution snapshot path does not match its identity"
+            )
+        declared_commands = source_identity.get("commands")
+        if not isinstance(declared_commands, Mapping):
+            raise FleetRuntimeError("runtime identity has no canonical commands")
+        command_relatives: dict[str, tuple[str, ...]] = {}
+        for name in ("core", "herdr", "controller"):
+            argv = declared_commands.get(name)
+            if (
+                not isinstance(argv, list)
+                or not argv
+                or not all(isinstance(value, str) and value for value in argv)
+            ):
+                raise FleetRuntimeError(
+                    f"runtime manifest has an invalid {name} command snapshot"
+                )
+            relative_executable = Path(argv[0])
+            if relative_executable.is_absolute() or ".." in relative_executable.parts:
+                raise FleetRuntimeError("runtime command snapshot path is unsafe")
+            executable = resolved_root / relative_executable
+            if executable.is_symlink():
+                raise FleetRuntimeError("runtime command snapshot path is unsafe")
+            resolved_executable = executable.resolve()
+            if not resolved_executable.is_relative_to(resolved_root):
+                raise FleetRuntimeError("runtime command snapshot escapes its root")
+            command_relatives[name] = (
+                resolved_executable.relative_to(resolved_root).as_posix(),
+                *argv[1:],
+            )
+        bundle = ExecutionBundle(
+            resolved_root,
+            source_identity,
+            command_relatives,
+        )
+        if runtime_commands != bundle.commands:
+            raise FleetRuntimeError(
+                "runtime manifest commands do not match the immutable identity"
+            )
+        hook_sha256 = manifest.get("hook_sha256")
+        hook_runtime = manifest.get("hook_runtime")
+        if not isinstance(hook_sha256, str) or not isinstance(hook_runtime, str):
+            raise FleetRuntimeError("runtime manifest has no fixed hook runtime")
+        hook_payload = self._validate_hook_runtime(
+            self._fleet_state_dir(state_dir, launch_id),
+            Path(hook_runtime),
+            hook_sha256,
+        ).read_bytes()
+        self._validate_execution_bundle(bundle, hook_payload)
+        return bundle
+
+    @staticmethod
+    def _validate_runtime_manifest(manifest: Mapping[str, Any]) -> None:
+        if manifest.get("manifest_format_version") != MANIFEST_FORMAT_VERSION:
+            raise FleetRuntimeError(
+                "runtime manifest format is unsupported; remove it with its original "
+                "plugin version and start it again"
+            )
+        phase = manifest.get("phase")
+        if not isinstance(phase, str) or phase not in RUNTIME_PHASES:
+            raise FleetRuntimeError("runtime manifest has an invalid or missing phase")
+        for key in ("launch_id", "fleet_id"):
+            value = manifest.get(key)
+            if not isinstance(value, str) or not value:
+                raise FleetRuntimeError(f"runtime manifest has no {key}")
+        runtime_generation = manifest.get("runtime_generation")
+        if not isinstance(runtime_generation, str) or not runtime_generation:
+            raise FleetRuntimeError("runtime manifest has no runtime_generation")
+        if not isinstance(manifest.get("runtime_preflight"), Mapping):
+            raise FleetRuntimeError("runtime manifest has no runtime_preflight")
+
     @staticmethod
     def _tree_identity(root: Path) -> str:
         if root.is_symlink() or not root.is_dir():
             raise FleetRuntimeError(f"required implementation tree is unavailable: {root}")
         digest = hashlib.sha256()
         # Deliberately enumerate the runtime closure: rglob would include generated
-        # __pycache__ files and make an unchanged installation conflict with itself.
-        candidates = [*root.glob("*.py"), *root.glob("scripts/*"), *root.glob("schema/*"), *root.glob("config/*")]
-        if root.name == "core":
-            plugin_root = root.parent
-            candidates += [* (plugin_root / "spec" / "scripts").glob("*.py"),
-                           * (plugin_root / "spec" / "schema").glob("*"),
-                           * (plugin_root / "spec" / "config").glob("*"),
-                           * (plugin_root / "config").glob("*")]
-        if root.name == "adapter":
-            plugin_root = root.parent
-            hook_plugin = plugin_root / "session-hooks-plugin"
-            candidates += [* (hook_plugin / "hooks").glob("*.json"),
-                           hook_plugin / ".claude-plugin" / "plugin.json",
-                           hook_plugin / ".codex-plugin" / "plugin.json"]
-        files = sorted(
-            (path for path in candidates if path.is_file() and not path.is_symlink()),
-            key=lambda path: path.relative_to(root.parent).as_posix(),
-        )
+        # caches and tests that are not executable dependencies.
+        files = FleetRuntime._execution_tree_files(root)
         if not files:
             raise FleetRuntimeError(f"required implementation tree is empty: {root}")
         for path in files:
             relative = path.relative_to(root.parent).as_posix().encode("utf-8")
             digest.update(len(relative).to_bytes(4, "big"))
             digest.update(relative)
+            digest.update((path.stat().st_mode & 0o111).to_bytes(2, "big"))
             digest.update(hashlib.sha256(path.read_bytes()).digest())
         return digest.hexdigest()
 
@@ -296,9 +963,16 @@ class FleetRuntime:
         if hook.is_symlink() or not hook.is_file():
             raise FleetRuntimeError("required hook runtime source is unavailable")
         try:
-            return hook.read_bytes()
+            payload = hook.read_bytes()
         except OSError as exc:
             raise FleetRuntimeError(f"cannot read hook runtime source: {exc}") from exc
+        try:
+            compile(payload, str(hook), "exec")
+        except (SyntaxError, ValueError, TypeError) as exc:
+            raise FleetRuntimeError(
+                f"required hook runtime source has invalid Python syntax: {exc}"
+            ) from exc
+        return payload
 
     def _preflight_execution(
         self, hook_payload: bytes | None = None
@@ -320,10 +994,19 @@ class FleetRuntime:
                 "fleet-controller", self.controller_command, "../fleet_controller.py"
             ),
             "hook": {"sha256": hook_sha256},
+            "command_arguments": {
+                "core": list(self.core_command[1:]),
+                "herdr": list(self.herdr_command[1:]),
+                "controller": list(self.controller_command[1:]),
+            },
         }
 
     def _preflight_runtime(
-        self, resolved: ResolvedFleet, cwd: str
+        self,
+        resolved: ResolvedFleet,
+        cwd: str,
+        *,
+        require_codex_registration: bool = True,
     ) -> dict[str, Any]:
         working_directory = Path(cwd)
         if not working_directory.is_dir():
@@ -347,11 +1030,55 @@ class FleetRuntime:
             raise FleetRuntimeError(
                 "required agent product is unavailable: " + ", ".join(missing)
             )
-        return {
+        preflight: dict[str, Any] = {
             "herdr_version": version,
             "products": products,
             "cwd": str(working_directory.resolve()),
         }
+        if require_codex_registration and "codex" in products:
+            completed = self.runner(
+                ["codex", "plugin", "list", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+            if completed.returncode != 0:
+                raise FleetRuntimeError(
+                    "cannot inspect the Codex agent-fleet-session-hooks registration"
+                )
+            try:
+                plugin_catalog = json.loads(completed.stdout)
+            except json.JSONDecodeError as exc:
+                raise FleetRuntimeError(
+                    "Codex plugin list returned invalid JSON"
+                ) from exc
+            installed = (
+                plugin_catalog.get("installed")
+                if isinstance(plugin_catalog, Mapping)
+                else None
+            )
+            registration = next(
+                (
+                    item
+                    for item in installed or []
+                    if isinstance(item, Mapping)
+                    and item.get("pluginId")
+                    == "agent-fleet-session-hooks@agent-fleet"
+                    and item.get("installed") is True
+                ),
+                None,
+            )
+            if registration is None:
+                raise FleetRuntimeError(
+                    "Codex plugin agent-fleet-session-hooks@agent-fleet must be installed "
+                    "before creating Codex panes"
+                )
+            preflight["codex_hook_registration"] = {
+                "plugin_id": "agent-fleet-session-hooks@agent-fleet",
+                "version": registration.get("version"),
+            }
+        return preflight
 
     @staticmethod
     def _assert_runtime_identity(current: Mapping[str, Any], expected: Mapping[str, Any]) -> None:
@@ -415,8 +1142,16 @@ class FleetRuntime:
         timeout: int = 60,
         env: Mapping[str, str] | None = None,
     ) -> Mapping[str, Any]:
+        runtime_env = dict(os.environ)
+        runtime_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        if env is not None:
+            runtime_env.update(env)
         completed = self.runner(
-            list(argv), capture_output=True, text=True, timeout=timeout, env=env
+            list(argv),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=runtime_env,
         )
         if completed.returncode != 0:
             raise FleetRuntimeError(
@@ -783,6 +1518,36 @@ class FleetRuntime:
             "herdr": dict(herdr_plan),
         }
 
+    def _validate_composition(
+        self,
+        resolved: ResolvedFleet,
+        state_dir: Path,
+        cwd: str,
+        agent_kind: str,
+    ) -> None:
+        """Validate Fleet/Launch/View composition without creating runtime state."""
+        self._run_json(
+            [
+                *self.herdr_command,
+                "--state-db",
+                str(state_dir / ".composition-validation-does-not-write.sqlite3"),
+                "provision",
+                "--fleet-json",
+                json.dumps(resolved.fleet, ensure_ascii=False, sort_keys=True),
+                "--launch-profile-json",
+                json.dumps(
+                    resolved.launch_profile, ensure_ascii=False, sort_keys=True
+                ),
+                "--view-profile-json",
+                json.dumps(resolved.profile, ensure_ascii=False, sort_keys=True),
+                "--cwd",
+                cwd,
+                "--agent-kind",
+                agent_kind,
+            ],
+            f"Launch composition validation ({resolved.launch_id})",
+        )
+
     @staticmethod
     def _manifest_path(state_dir: Path, fleet_id: str) -> Path:
         root = (state_dir / "runtimes").resolve()
@@ -923,6 +1688,64 @@ class FleetRuntime:
             pass
 
     @contextmanager
+    def _hold_identity_lock(
+        self,
+        path: Path,
+        *,
+        timeout_seconds: float,
+        timeout_message: str,
+    ) -> Iterator[None]:
+        lock = self._open_fleet_lock(path)
+        deadline = time.monotonic() + timeout_seconds
+        try:
+            while True:
+                try:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise FleetRuntimeError(timeout_message) from exc
+                    self.sleeper(0.05)
+            yield
+        finally:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock.close()
+
+    @contextmanager
+    def _hold_launch_lock(
+        self,
+        state_dir: Path,
+        launch_id: str,
+        *,
+        timeout_seconds: float,
+        timeout_message: str,
+    ) -> Iterator[None]:
+        with self._hold_identity_lock(
+            self._launch_lock_path(state_dir, launch_id),
+            timeout_seconds=timeout_seconds,
+            timeout_message=timeout_message,
+        ):
+            yield
+
+    @contextmanager
+    def _hold_fleet_lock(
+        self,
+        state_dir: Path,
+        fleet_id: str,
+        *,
+        timeout_seconds: float,
+        timeout_message: str,
+    ) -> Iterator[None]:
+        with self._hold_identity_lock(
+            self._fleet_lock_path(state_dir, fleet_id),
+            timeout_seconds=timeout_seconds,
+            timeout_message=timeout_message,
+        ):
+            yield
+
+    @contextmanager
     def _hold_runtime_locks(
         self,
         state_dir: Path,
@@ -932,41 +1755,20 @@ class FleetRuntime:
         timeout_seconds: float,
         timeout_message: str,
     ) -> Iterator[None]:
-        paths = sorted(
-            {
-                self._launch_lock_path(state_dir, launch_id),
-                self._fleet_lock_path(state_dir, fleet_id),
-            },
-            key=str,
-        )
-        locks: list[TextIO] = []
-        deadline = time.monotonic() + timeout_seconds
-        try:
-            for path in paths:
-                lock = self._open_fleet_lock(path)
-                try:
-                    while True:
-                        try:
-                            fcntl.flock(
-                                lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
-                            )
-                            break
-                        except BlockingIOError as exc:
-                            if time.monotonic() >= deadline:
-                                raise FleetRuntimeError(timeout_message) from exc
-                            self.sleeper(0.05)
-                except Exception:
-                    lock.close()
-                    raise
-                locks.append(lock)
-            try:
+        """Compatibility helper; lifecycle code always locks launch, then Fleet."""
+        with self._hold_launch_lock(
+            state_dir,
+            launch_id,
+            timeout_seconds=timeout_seconds,
+            timeout_message=timeout_message,
+        ):
+            with self._hold_fleet_lock(
+                state_dir,
+                fleet_id,
+                timeout_seconds=timeout_seconds,
+                timeout_message=timeout_message,
+            ):
                 yield
-            finally:
-                for lock in reversed(locks):
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-        finally:
-            for lock in reversed(locks):
-                lock.close()
 
     @staticmethod
     def _write_manifest(path: Path, desired: Mapping[str, Any], phase: str) -> None:
@@ -1003,25 +1805,22 @@ class FleetRuntime:
         self, fleet_state_dir: Path, payload: bytes
     ) -> tuple[Path, str]:
         digest = hashlib.sha256(payload).hexdigest()
-        root = (fleet_state_dir / "hook-runtimes").resolve()
-        version_dir = (root / digest).resolve()
+        root = self._prepare_private_runtime_directory(
+            fleet_state_dir, "hook-runtimes", "hook runtime"
+        )
+        raw_version_dir = root / digest
+        if raw_version_dir.is_symlink():
+            raise FleetRuntimeError(
+                "hook runtime version directory must not be a symbolic link"
+            )
+        version_dir = raw_version_dir.resolve()
         if version_dir.parent != root:
             raise FleetRuntimeError("hook runtime identity escapes the Fleet state directory")
-        version_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        root.chmod(0o700)
-        version_dir.chmod(0o700)
         target = version_dir / "role_context.py"
-        if target.is_symlink():
-            raise FleetRuntimeError("hook runtime must not be a symbolic link")
-        if target.exists():
-            try:
-                existing = target.read_bytes()
-            except OSError as exc:
-                raise FleetRuntimeError(f"cannot read materialized hook runtime: {exc}") from exc
-            if existing != payload:
-                raise FleetRuntimeError("materialized hook runtime content does not match its hash")
-        else:
-            temporary = version_dir / f".role_context-{uuid.uuid4().hex}.tmp"
+        if not version_dir.exists():
+            staging = root / f".{digest}-{uuid.uuid4().hex}.tmp"
+            staging.mkdir(mode=0o700)
+            temporary = staging / "role_context.py"
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
@@ -1031,11 +1830,16 @@ class FleetRuntime:
                     stream.write(payload)
                     stream.flush()
                     os.fsync(stream.fileno())
-                temporary.replace(target)
+                temporary.chmod(0o400)
+                staging.chmod(0o500)
+                staging.replace(version_dir)
             except Exception:
-                temporary.unlink(missing_ok=True)
+                if staging.exists():
+                    staging.chmod(0o700)
+                    temporary.unlink(missing_ok=True)
+                    staging.rmdir()
                 raise
-        target.chmod(0o600)
+        self._validate_hook_runtime(fleet_state_dir, target, digest)
         return target, digest
 
     @staticmethod
@@ -1095,20 +1899,35 @@ class FleetRuntime:
     def _validate_hook_runtime(
         self, fleet_state_dir: Path, path: Path, expected_digest: str
     ) -> Path:
-        root = (fleet_state_dir / "hook-runtimes").resolve()
+        root = self._prepare_private_runtime_directory(
+            fleet_state_dir,
+            "hook-runtimes",
+            "hook runtime",
+            create=False,
+        )
         if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
             raise FleetRuntimeError("runtime manifest has an invalid hook hash")
         if path.is_symlink() or not path.is_file():
             raise FleetRuntimeError("materialized hook runtime is missing or unsafe")
         resolved = path.resolve()
-        if not resolved.is_relative_to(root):
+        expected = root / expected_digest / "role_context.py"
+        if resolved != expected:
             raise FleetRuntimeError("materialized hook runtime escapes Fleet state")
         try:
             payload = resolved.read_bytes()
             metadata = resolved.stat()
+            directory_metadata = resolved.parent.stat()
+            entries = list(resolved.parent.iterdir())
         except OSError as exc:
             raise FleetRuntimeError(f"cannot validate materialized hook runtime: {exc}") from exc
-        if metadata.st_uid != os.getuid() or metadata.st_mode & 0o022:
+        if (
+            metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o777 != 0o400
+            or directory_metadata.st_uid != os.getuid()
+            or directory_metadata.st_mode & 0o777 != 0o500
+            or metadata.st_nlink != 1
+            or entries != [resolved]
+        ):
             raise FleetRuntimeError("materialized hook runtime has unsafe ownership or mode")
         if hashlib.sha256(payload).hexdigest() != expected_digest:
             raise FleetRuntimeError("materialized hook runtime content does not match its hash")
@@ -1131,49 +1950,176 @@ class FleetRuntime:
             return self.plan(
                 fleet_name, fleet_dirs, profile_dirs, state_dir, cwd, agent_kind
             )
-        hook_payload = self._capture_hook_source()
-        execution_identity = self._preflight_execution(hook_payload)
-        # Check before resolving configs so an incompatible resume has no state or runner effects.
-        known_manifest = self._manifest_path(state_dir, fleet_name)
-        if known_manifest.exists():
-            self._assert_runtime_identity(_load_document(known_manifest), execution_identity)
-        resolved = self.resolve(fleet_name, fleet_dirs, profile_dirs, state_dir)
-        self._assert_no_other_active_launch(resolved, state_dir)
-        self._plan_resolved(
-            resolved,
+        state_dir_existed = state_dir.exists()
+        with self._hold_launch_lock(
             state_dir,
-            cwd,
-            agent_kind,
-            hook_sha256=str(execution_identity["hook"]["sha256"]),
-        )
-        runtime_preflight = self._preflight_runtime(resolved, cwd)
-        self._assert_config_snapshot(resolved)
-        with self._hold_runtime_locks(
-            state_dir,
-            resolved.launch_id,
-            resolved.fleet_id,
+            fleet_name,
             timeout_seconds=0,
             timeout_message=(
                 f"Fleet {fleet_name!r} already has an active runtime process"
             ),
         ):
-            self._assert_no_other_active_launch(resolved, state_dir)
-            self._assert_config_snapshot(resolved)
-            self._raise_if_stop_requested(state_dir, resolved.launch_id)
-            return self._start_locked(
-                fleet_name,
-                fleet_dirs,
-                profile_dirs,
-                state_dir,
-                cwd,
-                agent_kind,
-                execution_identity,
-                hook_payload,
-                resolved,
-                runtime_preflight,
-                once=once,
-                poll_seconds=poll_seconds,
-            )
+            known_manifest_path = self._manifest_path(state_dir, fleet_name)
+            if known_manifest_path.exists():
+                known = _load_document(known_manifest_path)
+                self._validate_runtime_manifest(known)
+                if known.get("phase") != "stopped":
+                    execution_bundle = self._execution_bundle_from_manifest(
+                        known, state_dir, fleet_name
+                    )
+                    if known["phase"] == "stopping":
+                        raise FleetRuntimeError(
+                            "Fleet stop is incomplete; rerun stop instead of start"
+                        )
+                    if known["phase"] == "removing":
+                        raise FleetRuntimeError(
+                            "Fleet removal is incomplete; rerun remove instead of start"
+                        )
+                    stable_runtime = self._with_execution_bundle(execution_bundle)
+                    hook_runtime = Path(str(known["hook_runtime"]))
+                    hook_payload = hook_runtime.read_bytes()
+                    resolved = stable_runtime.resolve(
+                        fleet_name, fleet_dirs, profile_dirs, state_dir
+                    )
+                    if resolved.launch_id != fleet_name:
+                        raise FleetRuntimeError(
+                            "resolved LaunchProfile identity differs from the requested identity"
+                        )
+                    self._raise_if_stop_requested(state_dir, resolved.launch_id)
+                    self._assert_no_other_active_launch(resolved, state_dir)
+                    self._assert_config_snapshot(resolved)
+                    with self._hold_fleet_lock(
+                        state_dir,
+                        resolved.fleet_id,
+                        timeout_seconds=0,
+                        timeout_message=(
+                            f"Fleet {resolved.fleet_id!r} already has an active runtime process"
+                        ),
+                    ):
+                        self._assert_no_other_active_launch(resolved, state_dir)
+                        self._assert_config_snapshot(resolved)
+                        self._raise_if_stop_requested(state_dir, resolved.launch_id)
+                        stable_runtime._validate_composition(
+                            resolved, state_dir, cwd, agent_kind
+                        )
+                        stable_runtime._preflight_runtime(
+                            resolved,
+                            cwd,
+                            require_codex_registration=(
+                                known["phase"] in {"planned", "core_provisioned"}
+                            ),
+                        )
+                        runtime_preflight = dict(known["runtime_preflight"])
+                        self._assert_config_snapshot(resolved)
+                        self._raise_if_stop_requested(state_dir, resolved.launch_id)
+                        return stable_runtime._start_locked(
+                            fleet_name,
+                            fleet_dirs,
+                            profile_dirs,
+                            state_dir,
+                            cwd,
+                            agent_kind,
+                            known["execution_identity"],
+                            hook_payload,
+                            resolved,
+                            runtime_preflight,
+                            execution_bundle,
+                            once=once,
+                            poll_seconds=poll_seconds,
+                        )
+            hook_payload = self._capture_hook_source()
+            with self._capture_execution_bundle(hook_payload) as temporary_bundle:
+                execution_identity = temporary_bundle.source_identity
+                snapshot_runtime = self._with_execution_bundle(temporary_bundle)
+                self._raise_if_stop_requested(state_dir, fleet_name)
+                resolved = snapshot_runtime.resolve(
+                    fleet_name, fleet_dirs, profile_dirs, state_dir
+                )
+                if resolved.launch_id != fleet_name:
+                    raise FleetRuntimeError(
+                        "resolved LaunchProfile identity differs from the requested identity"
+                    )
+                self._raise_if_stop_requested(state_dir, resolved.launch_id)
+                self._assert_no_other_active_launch(resolved, state_dir)
+                self._assert_config_snapshot(resolved)
+                self._raise_if_stop_requested(state_dir, resolved.launch_id)
+                with self._hold_fleet_lock(
+                    state_dir,
+                    resolved.fleet_id,
+                    timeout_seconds=0,
+                    timeout_message=(
+                        f"Fleet {resolved.fleet_id!r} already has an active runtime process"
+                    ),
+                ):
+                    self._assert_no_other_active_launch(resolved, state_dir)
+                    self._assert_config_snapshot(resolved)
+                    self._raise_if_stop_requested(state_dir, resolved.launch_id)
+                    snapshot_runtime._validate_composition(
+                        resolved, state_dir, cwd, agent_kind
+                    )
+                    runtime_preflight = snapshot_runtime._preflight_runtime(
+                        resolved, cwd
+                    )
+                    self._assert_config_snapshot(resolved)
+                    self._raise_if_stop_requested(state_dir, resolved.launch_id)
+                    published_bundle = self._publish_execution_bundle(
+                        temporary_bundle,
+                        self._fleet_state_dir(state_dir, resolved.launch_id),
+                        hook_payload,
+                    )
+                    stable_runtime = self._with_execution_bundle(published_bundle)
+                    try:
+                        stable_runtime._plan_resolved(
+                            resolved,
+                            state_dir,
+                            cwd,
+                            agent_kind,
+                            hook_sha256=str(execution_identity["hook_sha256"]),
+                        )
+                        self._raise_if_stop_requested(
+                            state_dir, resolved.launch_id
+                        )
+                        return stable_runtime._start_locked(
+                            fleet_name,
+                            fleet_dirs,
+                            profile_dirs,
+                            state_dir,
+                            cwd,
+                            agent_kind,
+                            execution_identity,
+                            hook_payload,
+                            resolved,
+                            runtime_preflight,
+                            published_bundle,
+                            once=once,
+                            poll_seconds=poll_seconds,
+                        )
+                    except Exception:
+                        manifest_path = self._manifest_path(
+                            state_dir, resolved.launch_id
+                        )
+                        bundle_committed = False
+                        if manifest_path.exists():
+                            try:
+                                bundle_committed = (
+                                    _load_document(manifest_path).get(
+                                        "execution_snapshot_root"
+                                    )
+                                    == str(published_bundle.root)
+                                )
+                            except FleetRuntimeError:
+                                bundle_committed = False
+                        if not bundle_committed:
+                            self._discard_uncommitted_execution_bundle(
+                                published_bundle
+                            )
+                            if not state_dir_existed:
+                                for empty in (state_dir / "fleets", state_dir):
+                                    try:
+                                        empty.rmdir()
+                                    except OSError:
+                                        pass
+                        raise
 
     def _start_locked(
         self,
@@ -1187,6 +2133,7 @@ class FleetRuntime:
         hook_payload: bytes,
         resolved: ResolvedFleet,
         runtime_preflight: Mapping[str, Any],
+        execution_bundle: ExecutionBundle,
         *,
         once: bool = False,
         poll_seconds: float = 0.25,
@@ -1197,6 +2144,7 @@ class FleetRuntime:
             self._configuration_snapshot_paths(resolved, fleet_state_dir)
         )
         desired = {
+            "manifest_format_version": MANIFEST_FORMAT_VERSION,
             "launch_id": resolved.launch_id,
             "launch_path": (
                 str(resolved.launch_path) if resolved.launch_path is not None else None
@@ -1218,6 +2166,8 @@ class FleetRuntime:
             },
             "runtime_preflight": dict(runtime_preflight),
             "fleet_snapshot_path": str(fleet_snapshot_path),
+            "execution_snapshot_root": str(execution_bundle.root),
+            "runtime_commands": execution_bundle.commands,
         }
         if self.role_catalog is not None:
             desired["role_catalog_path"] = str(self.role_catalog.resolve())
@@ -1231,13 +2181,27 @@ class FleetRuntime:
         current: Mapping[str, Any] | None = None
         if manifest_path.exists():
             current = _load_document(manifest_path)
-            # Repeat under the fleet lock to close the TOCTOU window after the early check.
-            self._assert_runtime_identity(current, execution_identity)
-            if not all(current.get(key) == value for key, value in desired.items()):
+            phase = str(current.get("phase") or "active")
+            if phase != "stopped":
+                # Repeat under both locks to close the early-check window.
+                self._assert_runtime_identity(current, execution_identity)
+            stable_configuration = {
+                key: value
+                for key, value in desired.items()
+                if phase != "stopped"
+                or key not in {
+                    "execution_snapshot_root",
+                    "runtime_commands",
+                    "runtime_preflight",
+                }
+            }
+            if not all(
+                current.get(key) == value
+                for key, value in stable_configuration.items()
+            ):
                 raise FleetRuntimeError(
                     "configuration conflict: stop the active Fleet before changing its config"
                 )
-            phase = str(current.get("phase") or "active")
             runtime_generation = str(
                 current.get("runtime_generation") or runtime_generation
             )
@@ -1284,7 +2248,7 @@ class FleetRuntime:
                 poll_seconds=poll_seconds,
             )
             return {**runtime_manifest, "status": "resumed", "monitor": monitor}
-        elif not current.get("hook_runtime"):
+        elif restarting or not current.get("hook_runtime"):
             self._write_manifest(manifest_path, runtime_manifest, phase)
         core_db = fleet_state_dir / "core.sqlite3"
         herdr_db = fleet_state_dir / "herdr.sqlite3"
@@ -1322,6 +2286,8 @@ class FleetRuntime:
                     "context.invalidate",
                     "--fleet",
                     resolved.fleet_id,
+                    "--operation-id",
+                    f"runtime-restart:{resolved.launch_id}:{runtime_generation}",
                 ],
                 "Core context invalidation",
             )
@@ -1461,13 +2427,13 @@ class FleetRuntime:
         self, launch_id: str, state_dir: Path, *, execute: bool = False
     ) -> dict[str, Any]:
         manifest_path = self._manifest_path(state_dir, launch_id)
-        if not manifest_path.exists():
-            return {"launch_id": launch_id, "status": "inactive"}
-        manifest = _load_document(manifest_path)
-        fleet_id = str(manifest.get("fleet_id") or "")
-        if not fleet_id:
-            raise FleetRuntimeError("runtime manifest has no fleet_id")
         if not execute:
+            if not manifest_path.exists():
+                return {"launch_id": launch_id, "status": "inactive"}
+            manifest = _load_document(manifest_path)
+            fleet_id = str(manifest.get("fleet_id") or "")
+            if not fleet_id:
+                raise FleetRuntimeError("runtime manifest has no fleet_id")
             return {
                 "launch_id": launch_id,
                 "fleet_id": fleet_id,
@@ -1475,31 +2441,66 @@ class FleetRuntime:
                 "action": "stop",
             }
         with self._publish_stop_request(state_dir, launch_id):
-            with self._hold_runtime_locks(
+            with self._hold_launch_lock(
                 state_dir,
                 launch_id,
-                fleet_id,
                 timeout_seconds=30,
                 timeout_message=(
-                    f"Fleet {fleet_id!r} controller did not stop within 30 seconds"
+                    f"Fleet launch {launch_id!r} did not stop within 30 seconds"
                 ),
             ):
                 if not manifest_path.exists():
                     return {"launch_id": launch_id, "status": "inactive"}
-                locked_manifest = _load_document(manifest_path)
-                locked_fleet_id = str(locked_manifest.get("fleet_id") or "")
-                if locked_fleet_id != fleet_id:
-                    raise FleetRuntimeError(
-                        "runtime manifest Fleet identity changed while stopping"
-                    )
-                self._write_manifest(manifest_path, locked_manifest, "stopping")
-                herdr = self._stop_locked(
-                    launch_id,
+                manifest = _load_document(manifest_path)
+                fleet_id = str(manifest.get("fleet_id") or "")
+                if not fleet_id:
+                    raise FleetRuntimeError("runtime manifest has no fleet_id")
+                with self._hold_fleet_lock(
                     state_dir,
-                    manifest_path,
-                    locked_manifest,
                     fleet_id,
-                )
+                    timeout_seconds=30,
+                    timeout_message=(
+                        f"Fleet {fleet_id!r} controller did not stop within 30 seconds"
+                    ),
+                ):
+                    if not manifest_path.exists():
+                        return {"launch_id": launch_id, "status": "inactive"}
+                    locked_manifest = _load_document(manifest_path)
+                    locked_fleet_id = str(locked_manifest.get("fleet_id") or "")
+                    if locked_fleet_id != fleet_id:
+                        raise FleetRuntimeError(
+                            "runtime manifest Fleet identity changed while stopping"
+                        )
+                    bundle = self._execution_bundle_from_manifest(
+                        locked_manifest, state_dir, launch_id
+                    )
+                    stable_runtime = self._with_execution_bundle(bundle)
+                    phase = str(locked_manifest.get("phase") or "active")
+                    if phase == "removing":
+                        raise FleetRuntimeError(
+                            "Fleet removal is incomplete; rerun remove instead of stop"
+                        )
+                    if phase == "stopped":
+                        herdr = {"status": "already_stopped", "idempotent": True}
+                    else:
+                        stopping_manifest = {
+                            **locked_manifest,
+                            "stop_from_phase": (
+                                locked_manifest.get("stop_from_phase")
+                                if phase == "stopping"
+                                else phase
+                            ),
+                        }
+                        self._write_manifest(
+                            manifest_path, stopping_manifest, "stopping"
+                        )
+                        herdr = stable_runtime._stop_locked(
+                            launch_id,
+                            state_dir,
+                            manifest_path,
+                            stopping_manifest,
+                            fleet_id,
+                        )
         return {
             "launch_id": launch_id,
             "fleet_id": fleet_id,
@@ -1517,7 +2518,15 @@ class FleetRuntime:
     ) -> Mapping[str, Any]:
         fleet_state = self._fleet_state_dir(state_dir, launch_id)
         core_db = fleet_state / "core.sqlite3"
-        if core_db.exists():
+        stop_from_phase = str(
+            manifest.get("stop_from_phase") or manifest.get("phase") or "active"
+        )
+        if core_db.exists() and stop_from_phase in {
+            "core_provisioned",
+            "herdr_provisioned",
+            "active",
+            "stopping",
+        }:
             self._run_json(
                 [
                     *self.core_command,
@@ -1526,6 +2535,8 @@ class FleetRuntime:
                     "context.invalidate",
                     "--fleet",
                     fleet_id,
+                    "--operation-id",
+                    f"runtime-stop:{launch_id}:{manifest['runtime_generation']}",
                 ],
                 "Core context invalidation",
             )
@@ -1554,59 +2565,96 @@ class FleetRuntime:
                 "status": "planned",
                 "action": "remove",
             }
-        if not manifest_path.exists():
-            return {"launch_id": launch_id, "status": "inactive"}
-        manifest = _load_document(manifest_path)
-        fleet_id = str(manifest.get("fleet_id") or "")
-        if not fleet_id:
-            raise FleetRuntimeError("runtime manifest has no fleet_id")
         with self._publish_stop_request(state_dir, launch_id):
-            with self._hold_runtime_locks(
+            with self._hold_launch_lock(
                 state_dir,
                 launch_id,
-                fleet_id,
                 timeout_seconds=30,
                 timeout_message=(
-                    f"Fleet {fleet_id!r} controller did not stop within 30 seconds"
+                    f"Fleet launch {launch_id!r} did not stop within 30 seconds"
                 ),
             ):
                 if not manifest_path.exists():
                     return {"launch_id": launch_id, "status": "inactive"}
-                locked_manifest = _load_document(manifest_path)
-                locked_fleet_id = str(locked_manifest.get("fleet_id") or "")
-                if locked_fleet_id != fleet_id:
-                    raise FleetRuntimeError(
-                        "runtime manifest Fleet identity changed while removing"
-                    )
-                self._write_manifest(manifest_path, locked_manifest, "stopping")
-                herdr = self._stop_locked(
-                    launch_id,
+                manifest = _load_document(manifest_path)
+                fleet_id = str(manifest.get("fleet_id") or "")
+                if not fleet_id:
+                    raise FleetRuntimeError("runtime manifest has no fleet_id")
+                with self._hold_fleet_lock(
                     state_dir,
-                    manifest_path,
-                    locked_manifest,
                     fleet_id,
-                )
-                stopped = {
-                    "launch_id": launch_id,
-                    "fleet_id": fleet_id,
-                    "status": "stopped",
-                    "herdr": dict(herdr),
-                }
-                core = self._run_json(
-                    [
-                        *self.core_command,
-                        "--db",
-                        str(self._fleet_state_dir(state_dir, launch_id) / "core.sqlite3"),
-                        "fleet.remove",
-                        "--fleet",
-                        fleet_id,
-                        "--confirm-fleet",
-                        fleet_id,
-                    ],
-                    "Core fleet removal",
-                )
-                if manifest_path.exists():
-                    manifest_path.unlink()
+                    timeout_seconds=30,
+                    timeout_message=(
+                        f"Fleet {fleet_id!r} controller did not stop within 30 seconds"
+                    ),
+                ):
+                    if not manifest_path.exists():
+                        return {"launch_id": launch_id, "status": "inactive"}
+                    locked_manifest = _load_document(manifest_path)
+                    locked_fleet_id = str(locked_manifest.get("fleet_id") or "")
+                    if locked_fleet_id != fleet_id:
+                        raise FleetRuntimeError(
+                            "runtime manifest Fleet identity changed while removing"
+                        )
+                    bundle = self._execution_bundle_from_manifest(
+                        locked_manifest, state_dir, launch_id
+                    )
+                    stable_runtime = self._with_execution_bundle(bundle)
+                    phase = str(locked_manifest.get("phase") or "active")
+                    if phase not in {"stopped", "removing"}:
+                        stopping_manifest = {
+                            **locked_manifest,
+                            "stop_from_phase": (
+                                locked_manifest.get("stop_from_phase")
+                                if phase == "stopping"
+                                else phase
+                            ),
+                        }
+                        self._write_manifest(
+                            manifest_path, stopping_manifest, "stopping"
+                        )
+                        herdr = stable_runtime._stop_locked(
+                            launch_id,
+                            state_dir,
+                            manifest_path,
+                            stopping_manifest,
+                            fleet_id,
+                        )
+                    else:
+                        herdr = {"status": "already_stopped", "idempotent": True}
+                    stopped = {
+                        "launch_id": launch_id,
+                        "fleet_id": fleet_id,
+                        "status": "stopped",
+                        "herdr": dict(herdr),
+                    }
+                    self._write_manifest(manifest_path, locked_manifest, "removing")
+                    core_db = (
+                        self._fleet_state_dir(state_dir, launch_id)
+                        / "core.sqlite3"
+                    )
+                    if core_db.exists() and core_db.stat().st_size > 0:
+                        core = stable_runtime._run_json(
+                            [
+                                *stable_runtime.core_command,
+                                "--db",
+                                str(core_db),
+                                "fleet.remove",
+                                "--fleet",
+                                fleet_id,
+                                "--confirm-fleet",
+                                fleet_id,
+                            ],
+                            "Core fleet removal",
+                        )
+                    else:
+                        core = {
+                            "fleet_id": fleet_id,
+                            "status": "absent",
+                            "idempotent": True,
+                        }
+                    if manifest_path.exists():
+                        manifest_path.unlink()
         return {
             "launch_id": launch_id,
             "fleet_id": fleet_id,
@@ -1713,6 +2761,10 @@ class FleetRuntime:
         fleet_id = str(manifest.get("fleet_id") or "")
         if not fleet_id:
             raise FleetRuntimeError("runtime manifest has no fleet_id")
+        execution_bundle = self._execution_bundle_from_manifest(
+            manifest, state_dir, launch_id
+        )
+        execution_runtime = self._with_execution_bundle(execution_bundle)
         processed = 0
         idle_rounds = 0
         transient_errors = 0
@@ -1736,13 +2788,13 @@ class FleetRuntime:
                         stopping = True
                         break
                 try:
-                    result = self._run_json(
+                    result = execution_runtime._run_json(
                         [
-                            *self.controller_command,
+                            *execution_runtime.controller_command,
                             "--core-command",
-                            self.core_command[0],
+                            execution_runtime.core_command[0],
                             "--herdr-command",
-                            self.herdr_command[0],
+                            execution_runtime.herdr_command[0],
                             "--core-db",
                             str(self._fleet_state_dir(state_dir, launch_id) / "core.sqlite3"),
                             "--herdr-db",
@@ -1795,13 +2847,26 @@ class FleetRuntime:
         fleet_id = str(manifest.get("fleet_id") or "")
         if not fleet_id:
             raise FleetRuntimeError("runtime manifest has no fleet_id")
-        if manifest.get("phase") == "stopped":
+        execution_bundle = self._execution_bundle_from_manifest(
+            manifest, state_dir, launch_id
+        )
+        phase = str(manifest["phase"])
+        if phase in {
+            "planned",
+            "core_provisioned",
+            "herdr_provisioned",
+            "stopping",
+            "stopped",
+            "removing",
+        }:
             return {
                 "launch_id": launch_id,
                 "fleet_id": fleet_id,
-                "status": "stopped",
+                "status": phase,
+                "recovery_required": phase in {"stopping", "removing"},
                 "configuration": dict(manifest),
             }
+        execution_runtime = self._with_execution_bundle(execution_bundle)
         drift = False
         for path_key, hash_key in (
             ("launch_path", "launch_hash"),
@@ -1818,9 +2883,9 @@ class FleetRuntime:
             drift = drift or _content_hash(_load_document(Path(configured_path))) != manifest.get(
                 hash_key
             )
-        core = self._run_json(
+        core = execution_runtime._run_json(
             [
-                *self.core_command,
+                *execution_runtime.core_command,
                 "--db",
                 str(self._fleet_state_dir(state_dir, launch_id) / "core.sqlite3"),
                 "status",
@@ -1829,9 +2894,9 @@ class FleetRuntime:
             ],
             "Core fleet status",
         )
-        herdr = self._run_json(
+        herdr = execution_runtime._run_json(
             [
-                *self.herdr_command,
+                *execution_runtime.herdr_command,
                 "--state-db",
                 str(self._fleet_state_dir(state_dir, launch_id) / "herdr.sqlite3"),
                 "status",

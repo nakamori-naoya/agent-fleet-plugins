@@ -815,6 +815,59 @@ class FleetStoreTest(unittest.TestCase):
 
         self.assertIsNone(self.store.claim_delivery("demo", "controller"))
 
+    def test_context_invalidation_operation_is_idempotent(self):
+        first = self.store.invalidate_contexts("demo", "stop:demo:generation-1")
+        with self.store.connect() as db:
+            first_revisions = list(
+                db.execute(
+                    "SELECT agent_ref,context_revision FROM member_context_state "
+                    "WHERE fleet_id='demo' ORDER BY agent_ref"
+                )
+            )
+            first_events = db.execute(
+                "SELECT count(*) FROM events WHERE fleet_id='demo' "
+                "AND event_type='context.invalidated'"
+            ).fetchone()[0]
+
+        repeated = self.store.invalidate_contexts(
+            "demo", "stop:demo:generation-1"
+        )
+
+        with self.store.connect() as db:
+            repeated_revisions = list(
+                db.execute(
+                    "SELECT agent_ref,context_revision FROM member_context_state "
+                    "WHERE fleet_id='demo' ORDER BY agent_ref"
+                )
+            )
+            repeated_events = db.execute(
+                "SELECT count(*) FROM events WHERE fleet_id='demo' "
+                "AND event_type='context.invalidated'"
+            ).fetchone()[0]
+        self.assertEqual("invalidated", first["status"])
+        self.assertTrue(repeated["idempotent"])
+        self.assertEqual(first_revisions, repeated_revisions)
+        self.assertEqual(first_events, repeated_events)
+
+    def test_remove_fleet_is_idempotent(self):
+        first = self.store.remove_fleet("demo", "demo")
+        repeated = self.store.remove_fleet("demo", "demo")
+
+        self.assertEqual("removed", first["status"])
+        self.assertEqual("absent", repeated["status"])
+        self.assertTrue(repeated["idempotent"])
+
+    def test_remove_fleet_treats_a_schema_only_database_as_absent(self):
+        incomplete_db = self.root / "incomplete.sqlite3"
+        with closing(sqlite3.connect(incomplete_db)) as db:
+            db.execute("CREATE TABLE interrupted_initialization(marker TEXT)")
+            db.commit()
+
+        result = fleet_control.FleetStore(incomplete_db).remove_fleet("demo", "demo")
+
+        self.assertEqual("absent", result["status"])
+        self.assertTrue(result["idempotent"])
+
     def test_context_invalidation_rejects_an_activation_from_the_old_runtime(self):
         self.store.assign(
             "demo", "task-1", "worker-1", "manager", "assignment:old-runtime"
