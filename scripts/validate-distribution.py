@@ -13,6 +13,14 @@ import tempfile
 from pathlib import Path
 
 
+SELF_TEST_SENTINELS = (
+    "LICENSE",
+    ".claude-plugin/marketplace.json",
+    ".agents/plugins/marketplace.json",
+    "scripts/validate-distribution.py",
+)
+
+
 def fail(message: str) -> None:
     raise ValueError(message)
 
@@ -482,7 +490,43 @@ def expect_mutation_rejected(root: Path, mutation: str, expected_error: str) -> 
             )
 
 
-def self_test(root: Path) -> int:
+def repository_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def validate_self_test_request(requested_root: Path) -> None:
+    if requested_root != repository_root():
+        fail("--self-testは実行中のrepository rootだけを対象にできます")
+
+
+def validate_self_test_sentinels(root: Path) -> None:
+    for relative in SELF_TEST_SENTINELS:
+        sentinel = root / relative
+        require_regular_file(sentinel)
+        reject_symlink_ancestors(root, sentinel)
+
+
+def reject_unsafe_copy_entries(root: Path) -> None:
+    for directory, subdirectories, filenames in os.walk(root, followlinks=False):
+        parent = Path(directory)
+        if parent == root:
+            subdirectories[:] = [name for name in subdirectories if name != ".git"]
+        for name in [*subdirectories, *filenames]:
+            path = parent / name
+            mode = path.lstat().st_mode
+            if not stat.S_ISDIR(mode) and not stat.S_ISREG(mode):
+                fail(f"self-testの複製元にsymlinkまたは特殊fileがあります: {path}")
+
+
+def validate_self_test_source(root: Path) -> None:
+    validate_self_test_sentinels(root)
+    reject_unsafe_copy_entries(root)
+    validate_repository(root)
+
+
+def self_test() -> int:
+    root = repository_root()
+    validate_self_test_source(root)
     expect_mutation_rejected(root, "catalog-empty", "catalog plugins配列")
     expect_mutation_rejected(root, "source-absolute", "sourceは相対path")
     expect_mutation_rejected(root, "source-missing-dot-prefix", "./plugins/<canonical segments>")
@@ -511,7 +555,8 @@ def main() -> int:
     if len(sys.argv) == 2:
         return validate_repository(Path(sys.argv[1]).resolve(strict=True))
     if len(sys.argv) == 3 and sys.argv[1] == "--self-test":
-        return self_test(Path(sys.argv[2]).resolve(strict=True))
+        validate_self_test_request(Path(sys.argv[2]).resolve(strict=True))
+        return self_test()
     print(f"usage: {Path(sys.argv[0]).name} [--self-test] REPOSITORY_ROOT", file=sys.stderr)
     return 2
 

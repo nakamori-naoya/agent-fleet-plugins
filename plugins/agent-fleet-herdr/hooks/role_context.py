@@ -6,9 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -167,15 +167,68 @@ def _block(reason: str) -> dict[str, Any]:
     return {"decision": "block", "reason": reason}
 
 
+def _trusted_regular_path(
+    configured: str,
+    label: str,
+    *,
+    executable: bool = False,
+    private: bool = False,
+) -> Path:
+    candidate = Path(configured).expanduser()
+    if not candidate.is_absolute():
+        raise ActivationError(f"{label}は絶対pathで指定してください。")
+    try:
+        metadata = candidate.lstat()
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ActivationError(f"{label}を安全に確認できませんでした: {exc}") from exc
+    if candidate != resolved or candidate.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise ActivationError(
+            f"{label}はsymlinkを含まないcanonicalなregular fileでなければなりません。"
+        )
+    permitted_owners = {os.getuid(), 0} if executable else {os.getuid()}
+    if metadata.st_uid not in permitted_owners or metadata.st_mode & 0o022:
+        raise ActivationError(f"{label}の所有者または書き込み権限が安全ではありません。")
+    if private and metadata.st_mode & 0o077:
+        raise ActivationError(f"{label}は所有者以外から読取り・実行できない必要があります。")
+    for ancestor in candidate.parents:
+        try:
+            ancestor_metadata = ancestor.lstat()
+        except OSError as exc:
+            raise ActivationError(
+                f"{label}の親directoryを安全に確認できませんでした: {exc}"
+            ) from exc
+        if ancestor.is_symlink() or not stat.S_ISDIR(ancestor_metadata.st_mode):
+            raise ActivationError(f"{label}の親pathが安全なdirectoryではありません。")
+        if ancestor_metadata.st_uid not in {0, os.getuid()}:
+            raise ActivationError(f"{label}の親directoryの所有者が安全ではありません。")
+        writable_by_others = bool(ancestor_metadata.st_mode & 0o022)
+        root_owned_sticky = (
+            ancestor_metadata.st_uid == 0
+            and bool(ancestor_metadata.st_mode & stat.S_ISVTX)
+        )
+        if writable_by_others and not root_owned_sticky:
+            raise ActivationError(
+                f"{label}の親directoryへ第三者が書き込み可能です。"
+            )
+    if executable and not os.access(candidate, os.X_OK):
+        raise ActivationError(f"{label}を現在の利用者が実行できません。")
+    return resolved
+
+
 def _trusted_core_command() -> list[str]:
     configured = os.environ.get("AGENT_FLEET_CORE_COMMAND")
     if configured:
-        argv = shlex.split(configured)
-        if argv:
-            return argv
+        command = _trusted_regular_path(
+            configured, "AGENT_FLEET_CORE_COMMAND", executable=True
+        )
+        return [str(command)]
     discovered = shutil.which("fleet-control")
     if discovered:
-        return [discovered]
+        command = _trusted_regular_path(
+            discovered, "PATH上のfleet-control", executable=True
+        )
+        return [str(command)]
     raise ActivationError(
         "fleet-controlが見つかりません。AGENT_FLEET_CORE_COMMANDを設定してください。"
     )
@@ -184,10 +237,14 @@ def _trusted_core_command() -> list[str]:
 def _trusted_core_db() -> Path:
     configured = os.environ.get("AGENT_FLEET_CORE_DB")
     if configured:
-        return Path(configured).expanduser()
+        return _trusted_regular_path(configured, "AGENT_FLEET_CORE_DB", private=True)
     state_root = os.environ.get("XDG_STATE_HOME")
     base = Path(state_root).expanduser() if state_root else Path.home() / ".local/state"
-    return base / "agent-fleet" / "core.sqlite3"
+    return _trusted_regular_path(
+        str(base / "agent-fleet" / "core.sqlite3"),
+        "既定のFleet Core DB",
+        private=True,
+    )
 
 
 def _consume_activation(

@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import sqlite3
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,7 +20,15 @@ SPEC.loader.exec_module(role_context_hook)
 class RoleContextHookTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.db = Path(self.temp.name) / "session-context.sqlite3"
+        self.trusted_root = Path(self.temp.name).resolve()
+        self.db = self.trusted_root / "session-context.sqlite3"
+        command_root = self.trusted_root / "trusted runtime"
+        command_root.mkdir()
+        self.core_command = command_root / "fleet-control"
+        self.core_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.core_command.chmod(0o500)
+        self.core_db = self.trusted_root / "core.sqlite3"
+        self.core_db.touch(mode=0o600)
         self.context = {
             "fleet_id": "demo",
             "context_revision": 3,
@@ -398,8 +407,8 @@ class RoleContextHookTest(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "AGENT_FLEET_CORE_COMMAND": "/trusted/fleet-control",
-                    "AGENT_FLEET_CORE_DB": "/trusted/core.sqlite3",
+                    "AGENT_FLEET_CORE_COMMAND": str(self.core_command),
+                    "AGENT_FLEET_CORE_DB": str(self.core_db),
                 },
                 clear=True,
             ),
@@ -414,9 +423,9 @@ class RoleContextHookTest(unittest.TestCase):
         self.assertEqual(self.context, result["context"])
         self.assertEqual(
             [
-                "/trusted/fleet-control",
+                str(self.core_command),
                 "--db",
-                "/trusted/core.sqlite3",
+                str(self.core_db),
                 "context.consume",
                 "--fleet",
                 "demo",
@@ -431,6 +440,98 @@ class RoleContextHookTest(unittest.TestCase):
             run.call_args.args[0],
         )
         self.assertNotIn("shell", run.call_args.kwargs)
+
+    def test_trusted_core_command_accepts_one_canonical_executable_with_spaces(self):
+        with mock.patch.dict(
+            os.environ,
+            {"AGENT_FLEET_CORE_COMMAND": str(self.core_command)},
+            clear=True,
+        ):
+            self.assertEqual(
+                [str(self.core_command)], role_context_hook._trusted_core_command()
+            )
+
+    def test_trusted_core_command_rejects_untrusted_command_forms(self):
+        symlink = self.trusted_root / "fleet-control-link"
+        symlink.symlink_to(self.core_command)
+        for configured in (
+            "relative/fleet-control",
+            f"{self.core_command} --extra",
+            f"{self.core_command}; echo unsafe",
+            str(symlink),
+        ):
+            with self.subTest(configured=configured), mock.patch.dict(
+                os.environ,
+                {"AGENT_FLEET_CORE_COMMAND": configured},
+                clear=True,
+            ):
+                with self.assertRaises(role_context_hook.ActivationError):
+                    role_context_hook._trusted_core_command()
+
+    def test_trusted_core_command_rejects_world_writable_parent(self):
+        untrusted_parent = self.trusted_root / "untrusted-runtime"
+        untrusted_parent.mkdir(mode=0o777)
+        untrusted_parent.chmod(0o777)
+        command = untrusted_parent / "fleet-control"
+        command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        command.chmod(0o500)
+
+        with mock.patch.dict(
+            os.environ,
+            {"AGENT_FLEET_CORE_COMMAND": str(command)},
+            clear=True,
+        ):
+            with self.assertRaises(role_context_hook.ActivationError):
+                role_context_hook._trusted_core_command()
+
+    def test_trusted_core_paths_allow_root_owned_sticky_temp_ancestor(self):
+        system_temp = Path("/tmp").resolve()
+        metadata = system_temp.stat()
+        if metadata.st_uid != 0 or not metadata.st_mode & stat.S_ISVTX:
+            self.skipTest("system temp is not a root-owned sticky directory")
+        with tempfile.TemporaryDirectory(dir=system_temp) as temporary:
+            trusted_root = Path(temporary).resolve()
+            command = trusted_root / "fleet-control"
+            command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            command.chmod(0o500)
+            database = trusted_root / "core.sqlite3"
+            database.touch(mode=0o600)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "AGENT_FLEET_CORE_COMMAND": str(command),
+                    "AGENT_FLEET_CORE_DB": str(database),
+                },
+                clear=True,
+            ):
+                self.assertEqual(
+                    [str(command)], role_context_hook._trusted_core_command()
+                )
+                self.assertEqual(database, role_context_hook._trusted_core_db())
+
+    def test_trusted_core_db_rejects_non_private_database(self):
+        for mode in (0o640, 0o644, 0o666):
+            with self.subTest(mode=oct(mode)):
+                self.core_db.chmod(mode)
+                with mock.patch.dict(
+                    os.environ,
+                    {"AGENT_FLEET_CORE_DB": str(self.core_db)},
+                    clear=True,
+                ):
+                    with self.assertRaises(role_context_hook.ActivationError):
+                        role_context_hook._trusted_core_db()
+
+    def test_trusted_core_command_must_be_executable_by_current_user(self):
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"AGENT_FLEET_CORE_COMMAND": str(self.core_command)},
+                clear=True,
+            ),
+            mock.patch.object(role_context_hook.os, "access", return_value=False),
+        ):
+            with self.assertRaises(role_context_hook.ActivationError):
+                role_context_hook._trusted_core_command()
 
     def test_non_context_command_is_verified_by_core_and_receives_current_context(self):
         self.submit(self.command())
@@ -596,8 +697,8 @@ class RoleContextHookTest(unittest.TestCase):
                     mock.patch.dict(
                         os.environ,
                         {
-                            "AGENT_FLEET_CORE_COMMAND": "/trusted/fleet-control",
-                            "AGENT_FLEET_CORE_DB": "/trusted/core.sqlite3",
+                            "AGENT_FLEET_CORE_COMMAND": str(self.core_command),
+                            "AGENT_FLEET_CORE_DB": str(self.core_db),
                         },
                         clear=True,
                     ),
@@ -624,8 +725,8 @@ class RoleContextHookTest(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "AGENT_FLEET_CORE_COMMAND": "/trusted/fleet-control",
-                    "AGENT_FLEET_CORE_DB": "/trusted/core.sqlite3",
+                    "AGENT_FLEET_CORE_COMMAND": str(self.core_command),
+                    "AGENT_FLEET_CORE_DB": str(self.core_db),
                 },
                 clear=True,
             ),
@@ -727,8 +828,8 @@ class RoleContextHookTest(unittest.TestCase):
                 mock.patch.dict(
                     os.environ,
                     {
-                        "AGENT_FLEET_CORE_COMMAND": "/trusted/fleet-control",
-                        "AGENT_FLEET_CORE_DB": "/trusted/core.sqlite3",
+                        "AGENT_FLEET_CORE_COMMAND": str(self.core_command),
+                        "AGENT_FLEET_CORE_DB": str(self.core_db),
                     },
                     clear=True,
                 ),
