@@ -1685,6 +1685,7 @@ class FleetRuntime:
         completed_request.unlink(missing_ok=True)
         for request_path in request_dir.glob("*.request"):
             if request_path.is_symlink():
+                request_path.unlink(missing_ok=True)
                 continue
             flags = os.O_RDONLY
             if hasattr(os, "O_NOFOLLOW"):

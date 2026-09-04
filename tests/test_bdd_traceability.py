@@ -309,6 +309,10 @@ COVERAGE = {
             RUNTIME_TESTS,
             "test_one_completed_stop_does_not_clear_another_live_stop_request",
         ),
+        (
+            RUNTIME_TESTS,
+            "test_successful_stop_clears_a_dangling_stop_request_symlink",
+        ),
     ),
     "停止済みの艦隊を再度停止しても外部操作を繰り返さない": (
         (RUNTIME_TESTS, "test_repeated_stop_is_idempotent_without_repeating_external_changes"),

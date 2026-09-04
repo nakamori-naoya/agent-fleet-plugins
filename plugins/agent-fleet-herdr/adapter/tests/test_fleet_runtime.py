@@ -1111,6 +1111,23 @@ class FleetRuntimeTest(unittest.TestCase):
 
         self.assertFalse(runtime._stop_requested(self.state, "review"))
 
+    def test_successful_stop_clears_a_dangling_stop_request_symlink(self):
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
+        )
+        request_dir = self.state / "stop-requests/review"
+        request_dir.mkdir(parents=True)
+        dangling = request_dir / "tampered.request"
+        dangling.symlink_to(self.root / "missing-request-target")
+
+        self.assertTrue(runtime._stop_requested(self.state, "review"))
+        stopped = runtime.stop("review", self.state, execute=True)
+
+        self.assertEqual("inactive", stopped["status"])
+        self.assertFalse(dangling.exists())
+        self.assertFalse(dangling.is_symlink())
+        self.assertFalse(request_dir.exists())
+
     def test_timed_out_stop_request_prevents_start_until_stop_is_retried(self):
         runtime = fleet_runtime.FleetRuntime(
             ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
