@@ -22,3 +22,15 @@ __pycache__/
 !/AGENTS.md
 !/README.md
 !/.gitignore
+
+# Secrets and local credentials at every depth
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/id_rsa
+**/id_ed25519
