@@ -145,6 +145,8 @@ Fleet YAMLの形式例は[manager 1・worker 2の利用者設定](configs/fleets
 
 Herdr 0.8の`pane run`は引数を連結した文字列をpaneのshellへ送るため、Adapterはこの境界でコマンドと各引数を引用する。利用者が設定値へshell用の引用符を追加する必要はない。Claudeの`--settings`に含むJSONの引用符、Codexの`--config`に含むTOML文字列の引用符、空白・改行は管理agentを含む各メンバーへそのまま渡す。通常の`agent start`経路にはこの追加引用を適用しない。
 
+プロファイル経由の起動では、Herdrへのagent登録前に`agent_not_found`が返る場合だけ、起動コマンドを再送せず待機を再試行する。登録待ちと状態待ちの合計上限は30秒で、権限エラーや通信失敗は即座に報告する。起動確認は`idle`または`done`を待ち、`blocked`を成功扱いしない。Herdrの`done`はこの起動確認だけに使い、Coreのタスク完了報告やmanagerによる受入を代替しない。
+
 新しいpaneを作る前に、`fleet-runtime`は起動コマンドが利用者の対話シェルで解決できることを確認する。Claude用コマンドは`<command> auth status`、Codex用コマンドは`<command> plugin list --json`も同じアカウント用コマンド経由で検査する。Claudeが未ログインなら複数paneを作らず、`<command> auth login`を一度実行するよう示す。起動済みpaneの制御処理を再開するだけの場合、この起動前検査を繰り返さない。
 
 Herdr起動設定で`spec.codex_hook_trust: preapproved`を明示すると、Herdrから起動する各Codexだけに`--dangerously-bypass-hook-trust`を渡し、役割文脈Hookの起動時レビューを省略する。これはHookの信頼確認だけを省略し、tool承認やsandboxを無効にしない。`review`指定時は対話確認を維持し、プラグイン更新で旧実行ファイルが消えた場合も未確認の新版へ自動移行しない。利用者向けHerdr起動設定例3件は、毎回の艦隊起動を止めないよう`preapproved`を明示している。
