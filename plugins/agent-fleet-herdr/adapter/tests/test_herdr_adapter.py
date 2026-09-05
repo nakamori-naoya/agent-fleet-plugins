@@ -392,6 +392,8 @@ class HerdrAdapterTest(unittest.TestCase):
                 "$workspace.root_pane",
                 "--until",
                 "idle",
+                "--until",
+                "done",
                 "--timeout",
                 "30000",
             ],

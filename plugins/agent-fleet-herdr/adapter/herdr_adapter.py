@@ -668,6 +668,8 @@ class Herdr08Commands:
             safe_token(pane_id, "pane_id"),
             "--until",
             "idle",
+            "--until",
+            "done",
             "--timeout",
             str(timeout_ms),
         ]
@@ -724,11 +726,13 @@ class HerdrAdapter:
         commands: Herdr08Commands | None = None,
         runner: Runner = subprocess.run,
         sleeper: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.state = state
         self.commands = commands or Herdr08Commands()
         self.runner = runner
         self.sleeper = sleeper
+        self.clock = clock
 
     @staticmethod
     def _fleet_parts(
@@ -1261,7 +1265,10 @@ class HerdrAdapter:
         context: str,
         *,
         retry_new_pane_busy: bool = False,
+        wait_for_registration: bool = False,
     ) -> subprocess.CompletedProcess[str]:
+        if wait_for_registration:
+            return self._wait_for_registered_agent(argv, context)
         attempts = NEW_PANE_START_ATTEMPTS if retry_new_pane_busy else 1
         for attempt in range(attempts):
             try:
@@ -1284,6 +1291,46 @@ class HerdrAdapter:
             f"{context} failed: {completed.stderr.strip() or 'unknown Herdr error'}; "
             "bindings were not saved"
         )
+
+    def _wait_for_registered_agent(
+        self, argv: Sequence[str], context: str
+    ) -> subprocess.CompletedProcess[str]:
+        timeout_index = list(argv).index("--timeout") + 1
+        budget = int(argv[timeout_index]) / 1000
+        deadline = self.clock() + budget
+        while True:
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                raise HerdrAdapterError(
+                    f"{context} registration wait timed out after {budget:g}s; "
+                    "bindings were not saved"
+                )
+            attempt = list(argv)
+            attempt[timeout_index] = str(max(1, int(remaining * 1000)))
+            try:
+                completed = self.runner(
+                    attempt, capture_output=True, text=True, timeout=remaining
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise HerdrAdapterError(
+                    f"{context} timed out; bindings were not saved"
+                ) from exc
+            if completed.returncode == 0:
+                return completed
+            try:
+                response = json.loads(completed.stderr)
+                error = response.get("error") if isinstance(response, dict) else None
+                not_registered = isinstance(error, dict) and error.get("code") == "agent_not_found"
+            except (ValueError, TypeError):
+                not_registered = False
+            if not not_registered:
+                raise HerdrAdapterError(
+                    f"{context} failed: {completed.stderr.strip() or 'unknown Herdr error'}; "
+                    "bindings were not saved"
+                )
+            remaining = deadline - self.clock()
+            if remaining > 0:
+                self.sleeper(min(1.0, remaining))
 
     @staticmethod
     def _resolve_argv(argv: Sequence[str], pane_ids: Mapping[str, str]) -> list[str]:
@@ -1427,6 +1474,7 @@ class HerdrAdapter:
                 retry_new_pane_busy=operation_id.startswith(
                     ("agent.start:", "agent.run:")
                 ),
+                wait_for_registration=operation_id.startswith("agent.wait:"),
             )
             if operation_id.startswith("pane.split:"):
                 worker_ref = operation_id.split(":", 1)[1]
