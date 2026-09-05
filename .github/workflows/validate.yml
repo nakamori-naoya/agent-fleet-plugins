@@ -1,0 +1,37 @@
+name: Functional validation
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    name: validate (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.24.x'
+      - name: Install CLI requirements
+        shell: bash
+        run: |
+          go install github.com/mikefarah/yq/v4@v4.44.3
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update
+            sudo apt-get install -y jq ripgrep
+          else
+            brew list jq >/dev/null 2>&1 || brew install jq
+            brew list ripgrep >/dev/null 2>&1 || brew install ripgrep
+          fi
+      - name: Validate normal and deliberately broken fixtures
+        shell: bash
+        run: bash scripts/validate.sh

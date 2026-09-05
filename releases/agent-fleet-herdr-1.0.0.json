@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "plugin": "agent-fleet-herdr",
+  "version": "1.0.0",
+  "created_at": "2026-09-05T12:01:28.571881+00:00",
+  "notes": "実行環境の内容固定・起動前検査を分離し、凍結対象へ新moduleを含める。",
+  "breaking": "重複する薄いSKILL入口を廃止。",
+  "migration": "公開manifestの入口を利用する。既存の実行snapshotは実行時identityを勝手に差し替えず、更新時は新しいlaunchを作成する。",
+  "checks": {
+    "codex": {
+      "status": "manifest-and-contract-tests-passed",
+      "native-client-installation": "not-executed",
+      "evidence": "bash scripts/validate.sh; both runtime marketplace and public entry fixtures"
+    },
+    "claude": {
+      "status": "manifest-and-contract-tests-passed",
+      "native-client-installation": "not-executed",
+      "semantic-evaluation": "Fable 5.1 generation + Fable 5 independent judge; representative next-response fixtures passed; tools disabled"
+    },
+    "review": {
+      "independent": "completed",
+      "baseline": "regression reproductions recorded",
+      "post-version-validation": "required before commit"
+    }
+  },
+  "files": [
+    "plugins/agent-fleet-herdr/.claude-plugin/plugin.json",
+    "plugins/agent-fleet-herdr/.codex-plugin/plugin.json",
+    ".agents/plugins/marketplace.json",
+    ".claude-plugin/marketplace.json"
+  ]
+}

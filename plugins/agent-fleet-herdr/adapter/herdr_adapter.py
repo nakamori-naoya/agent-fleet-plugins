@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -643,13 +644,18 @@ class Herdr08Commands:
     def agent_run(
         self, command: str, pane_id: str, agent_args: Sequence[str] = ()
     ) -> list[str]:
+        # Herdr 0.8 pane run joins its remaining argv with spaces and sends
+        # that text to the pane shell. Serialize once at this shell boundary.
+        shell_command = shlex.join([
+            safe_token(command, "agent command"),
+            *(safe_token(arg, "agent arg") for arg in agent_args),
+        ])
         return [
             self.binary,
             "pane",
             "run",
             safe_token(pane_id, "pane_id"),
-            safe_token(command, "agent command"),
-            *(safe_token(arg, "agent arg") for arg in agent_args),
+            shell_command,
         ]
 
     def agent_wait(self, pane_id: str, timeout_ms: int = 30_000) -> list[str]:

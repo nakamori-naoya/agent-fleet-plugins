@@ -269,6 +269,8 @@ class FleetRuntimeTest(unittest.TestCase):
         (self.root / "adapter" / "view_profiles.py").write_text("# view fixture\n", encoding="utf-8")
         (self.root / "adapter" / "fleet_runtime.py").write_text("# runtime fixture\n", encoding="utf-8")
         required_fixtures = {
+            "core/core_contract.py": "# contract fixture\n",
+            "core/command_delivery.py": "# delivery fixture\n",
             "spec/scripts/validate_fleet.py": "# validator fixture\n",
             "spec/schema/envelopes.schema.yml": "{}\n",
             "spec/schema/fleet.schema.yml": "{}\n",
@@ -295,14 +297,22 @@ class FleetRuntimeTest(unittest.TestCase):
             fixture.write_text(content, encoding="utf-8")
             if fixture.parent.name == "scripts":
                 fixture.chmod(0o700)
+        product_bin = self.root / "agent-products"
+        product_bin.mkdir()
+        self.product_commands = {}
+        for product in ("claude", "codex"):
+            executable = product_bin / product
+            executable.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+            executable.chmod(0o700)
+            self.product_commands[product] = str(executable)
         original_which = fleet_runtime.shutil.which
-        self.which = mock.patch.object(
-            fleet_runtime.shutil,
-            "which",
-            side_effect=lambda name: str(self.commands[name])
-            if name in {"fleet-control", "fleet-herdr", "fleet-controller"}
-            else original_which(name),
-        )
+        def fixture_which(name):
+            if name in {"claude", "codex"}:
+                return self.product_commands.get(name)
+            if name in self.commands:
+                return str(self.commands[name])
+            return original_which(name)
+        self.which = mock.patch.object(fleet_runtime.shutil, "which", side_effect=fixture_which)
         self.which.start()
 
     def tearDown(self):
@@ -1628,6 +1638,16 @@ class FleetRuntimeTest(unittest.TestCase):
                 str(self.root), "codex", execute=True, once=True,
             )
 
+        self.assertFalse(self.state.exists())
+
+    def test_start_rejects_missing_agent_product_before_state_creation(self):
+        self.product_commands.pop("codex")
+        runtime = fleet_runtime.FleetRuntime(
+            ["fleet-control"], ["fleet-herdr"], ["fleet-controller"], runner=FakeRunner()
+        )
+        with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "required agent product is unavailable: codex"):
+            runtime.start("review", [self.fleets], [self.profiles], self.state,
+                          str(self.root), "codex", execute=True, once=True)
         self.assertFalse(self.state.exists())
 
     def test_start_rejects_unavailable_agent_command_before_state_creation(self):

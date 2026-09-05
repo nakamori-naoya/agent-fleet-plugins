@@ -1,7 +1,14 @@
 {
   "name": "agent-fleet-core",
-  "version": "0.7.0",
+  "version": "1.0.0",
   "description": "YAML Fleet SpecとSQLiteでlogical agent、task、command、eventを管理する",
-  "author": {"name": "NaoyaNakamori"},
-  "skills": "./skills/"
+  "author": {
+    "name": "NaoyaNakamori"
+  },
+  "skills": "./",
+  "metadata": {
+    "harness": {
+      "contractVersion": 1
+    }
+  }
 }

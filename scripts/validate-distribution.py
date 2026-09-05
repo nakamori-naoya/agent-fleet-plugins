@@ -124,7 +124,8 @@ def resolve_declared_path(source_root: Path, value: object, label: str) -> Path:
     boundary = os.path.realpath(os.fspath(source_root))
     lexical = os.path.abspath(os.path.join(boundary, value))
     candidate = os.path.realpath(lexical)
-    if not candidate.startswith(boundary + os.sep):
+    root_skill = candidate == boundary and label.endswith("skills path") and (source_root / "SKILL.md").is_file()
+    if not root_skill and not candidate.startswith(boundary + os.sep):
         fail(f"{label}がplugin root外を指しています: {source_root}")
     if candidate != lexical:
         fail(f"{label}がsymlinkです: {source_root}")
@@ -149,7 +150,7 @@ def validate_skills(source_root: Path, manifests: dict[str, dict]) -> None:
     skills_expected = bundled_skills.exists() or skills_declared or skills_capability
     if not skills_expected:
         return
-    if not bundled_skills.is_dir():
+    if not bundled_skills.is_dir() and not (source_root / "SKILL.md").is_file():
         fail(f"physical skills directoryがありません: {source_root}")
     for runtime, manifest in manifests.items():
         skills_root = resolve_declared_path(source_root, manifest.get("skills"), f"{runtime} skills path")
@@ -338,7 +339,8 @@ def expect_mutation_rejected(root: Path, mutation: str, expected_error: str) -> 
         shutil.copytree(root, fixture, ignore=shutil.ignore_patterns(".git"), symlinks=True)
         _, entries = catalog_entries(fixture / ".agents/plugins/marketplace.json", "codex")
         skills_name = next(
-            name for name, (_, source) in entries.items() if (fixture / source / "skills").is_dir()
+            name for name, (_, source) in entries.items()
+            if "skills" in load_json(fixture / source / ".codex-plugin/plugin.json")
         )
         skills_root = (fixture / entries[skills_name][1]).resolve(strict=True)
         if mutation == "catalog-empty":
@@ -376,9 +378,10 @@ def expect_mutation_rejected(root: Path, mutation: str, expected_error: str) -> 
             manifest.pop("skills", None)
             write_json(manifest_path, manifest)
         elif mutation == "physical-skills-deleted":
-            shutil.rmtree(skills_root / "skills")
+            shutil.rmtree(skills_root / "skills", ignore_errors=True)
+            (skills_root / "SKILL.md").unlink(missing_ok=True)
         elif mutation in {"skill-zero-byte", "skill-whitespace"}:
-            skill_file = next((skills_root / "skills").rglob("SKILL.md"))
+            skill_file = next(skills_root.rglob("SKILL.md"))
             skill_file.write_text("" if mutation == "skill-zero-byte" else " \n\t\n", encoding="utf-8")
         elif mutation == "skills-intermediate-symlink":
             (skills_root / "skill-alias").symlink_to(".", target_is_directory=True)
@@ -458,7 +461,8 @@ def expect_mutation_rejected(root: Path, mutation: str, expected_error: str) -> 
             if scripts_root.exists():
                 shutil.rmtree(scripts_root)
             if mutation == "physical-scripts-without-capability":
-                shutil.rmtree(skills_root / "skills")
+                shutil.rmtree(skills_root / "skills", ignore_errors=True)
+                (skills_root / "SKILL.md").unlink(missing_ok=True)
                 scripts_root.mkdir()
                 (scripts_root / "run.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
                 for runtime in ("claude", "codex"):

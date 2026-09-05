@@ -143,6 +143,8 @@ Fleet YAMLの形式例は[manager 1・worker 2の利用者設定](configs/fleets
 
 `AgentCommandProfile`は`codex-personal`、`codex-work`、`claude-personal`、`claude-work`のような一つのコマンド名と製品だけを持つ。aliasの展開内容、認証directory、秘密値、モデル引数は複製しない。Herdr起動設定の`spec.agent_command_profiles`が論理メンバーIDから版固定のプロファイルIDを参照し、Herdr Adapterは選ばれたコマンドへ艦隊設定のHook・モデル・思考量を合成する。プロファイルを指定しないメンバーは従来どおり`codex`または`claude`を起動する。
 
+Herdr 0.8の`pane run`は引数を連結した文字列をpaneのshellへ送るため、Adapterはこの境界でコマンドと各引数を引用する。利用者が設定値へshell用の引用符を追加する必要はない。Claudeの`--settings`に含むJSONの引用符、Codexの`--config`に含むTOML文字列の引用符、空白・改行は管理agentを含む各メンバーへそのまま渡す。通常の`agent start`経路にはこの追加引用を適用しない。
+
 新しいpaneを作る前に、`fleet-runtime`は起動コマンドが利用者の対話シェルで解決できることを確認する。Claude用コマンドは`<command> auth status`、Codex用コマンドは`<command> plugin list --json`も同じアカウント用コマンド経由で検査する。Claudeが未ログインなら複数paneを作らず、`<command> auth login`を一度実行するよう示す。起動済みpaneの制御処理を再開するだけの場合、この起動前検査を繰り返さない。
 
 Herdr起動設定で`spec.codex_hook_trust: preapproved`を明示すると、Herdrから起動する各Codexだけに`--dangerously-bypass-hook-trust`を渡し、役割文脈Hookの起動時レビューを省略する。これはHookの信頼確認だけを省略し、tool承認やsandboxを無効にしない。`review`指定時は対話確認を維持し、プラグイン更新で旧実行ファイルが消えた場合も未確認の新版へ自動移行しない。利用者向けHerdr起動設定例3件は、毎回の艦隊起動を止めないよう`preapproved`を明示している。
@@ -160,3 +162,17 @@ Hook登録はHerdr package内のsidecarへ閉じ、個別に配布しない。Ho
 ```bash
 bash scripts/validate.sh
 ```
+
+## 実行契約の検証と配布
+
+`python3 scripts/doctor.py --repository . --repo <対象repository>` はCLI構文、公開skillと設定・依存の解決を読み取り専用で診断する。設定解決を含めない検査は `--distribution-only` を明示する。
+
+`bash scripts/validate.sh` は機能・不正入力・配布の検証を行い、GitHub Actionsの `validate (ubuntu-latest)` / `validate (macos-latest)` でも実行する。[意味的評価シナリオ](evals/scenarios.json)は `scripts/evaluate-skills.py` で実モデルと別のjudgeモデルへ渡し、モデルID・設定・入力・応答・判定根拠を記録する。モデル評価は構造検証と別に実施し、未実行を成功として扱わない。
+
+version更新は `python3 scripts/release.py --plugin <公開plugin名> --version <semver> --notes <変更内容> --breaking <互換性への影響> --migration <移行方法> --checks <codex/claudeの検証結果JSON>` で計画を確認し、`--apply` で両runtimeのmanifestとmarketplaceを更新する。検証結果には未検証も明示できる。配布・外部publishは別操作であり、このcommandでは行わない。
+
+Coreの[command delivery](plugins/agent-fleet-core/core/command_delivery.py)はSQLiteの配送leaseと結果遷移、[Core契約](plugins/agent-fleet-core/core/core_contract.py)は状態語彙を扱う。Herdrの[実行物identity](plugins/agent-fleet-herdr/adapter/execution_identity.py)は内容hash・凍結・preflight、[runtime値](plugins/agent-fleet-herdr/adapter/runtime_models.py)は解決済み設定と実行bundleを扱う。公開FleetStore/FleetRuntimeは従来のCLI境界を維持し、起動・停止順序を管理する。Core凍結closureには新moduleも含め、実行時の内容変更を検知する。
+
+### 破壊的変更と移行
+
+公開入口は同名SKILLの薄い別入口を廃止して一意にした。古い内部SKILL pathを直接参照している呼出元は公開manifestのskillsへ切り替える。設定の一時fileはshell終了では削除されず、返却された絶対pathを次の工程へ渡し、完了・停止時にrun-configのcleanupでそのrunだけを削除する。以前の一時fileや異なる実行identityを再利用せず、新しいrunを開始する。

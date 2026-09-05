@@ -10,18 +10,20 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agent-fleet-validation.XXXXXX") || exit 2
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P) || exit 2
 trap 'rm -rf "$TMP_ROOT"' EXIT
 failed=0
+python3 "$ROOT/scripts/test-hardening.py" || failed=1
+python3 "$ROOT/scripts/sync-runtime.py" --check || failed=1
 
 python3 "$ROOT/scripts/validate-distribution.py" "$ROOT" || failed=1
 python3 "$ROOT/scripts/validate-distribution.py" --self-test || failed=1
 
 for manifest in "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.7.0" and .name=="agent-fleet-core"' "$manifest" >/dev/null || failed=1
+  jq -e '(.version|test("^[0-9]+[.][0-9]+[.][0-9]+")) and .name=="agent-fleet-core"' "$manifest" >/dev/null || failed=1
 done
 for manifest in "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.8.0" and .name=="agent-fleet-herdr"' "$manifest" >/dev/null || failed=1
+  jq -e '(.version|test("^[0-9]+[.][0-9]+[.][0-9]+")) and .name=="agent-fleet-herdr"' "$manifest" >/dev/null || failed=1
 done
 for manifest in "$HOOK_PLUGIN/.codex-plugin/plugin.json" "$HOOK_PLUGIN/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.7.0" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
+  jq -e '(.version|test("^[0-9]+[.][0-9]+[.][0-9]+")) and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
 done
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact|fork" and .hooks.SessionStart[0].hooks[0].timeout==12' \
   "$HOOK_PLUGIN/hooks/claude-hooks.json" >/dev/null || failed=1
@@ -41,7 +43,7 @@ test ! -e "$HERDR/view-profiles" || failed=1
 if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
   failed=1
 fi
-jq -e '.name=="agent-fleet" and (.plugins|length==2) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr"] and (.plugins[]|select(.name=="agent-fleet-core").version)=="0.7.0" and (.plugins[]|select(.name=="agent-fleet-herdr").version)=="0.8.0"' \
+jq -e '.name=="agent-fleet" and (.plugins|length==2) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr"]' \
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \
@@ -214,10 +216,24 @@ jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.start:manager" o
   > "$TMP_ROOT/personal-fleet-plan.json" || failed=1
 jq -e '.ok==true and .result.agent_command_profiles.manager.command=="claude-personal" and .result.agent_command_profiles["worker-implementation"].command=="codex-personal"' \
   "$TMP_ROOT/personal-fleet-plan.json" >/dev/null || failed=1
-jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.run:manager" or .id=="agent.run:advisor" or .id=="agent.run:reviewer"); .argv[4]=="claude-personal" and (.argv|index("claude-fable-5-1")) != null)' \
-  "$TMP_ROOT/personal-fleet-plan.json" >/dev/null || failed=1
-jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.run:worker-implementation" or .id=="agent.run:worker-verification"); .argv[4]=="codex-personal" and (.argv|index("gpt-5.6-sol")) != null)' \
-  "$TMP_ROOT/personal-fleet-plan.json" >/dev/null || failed=1
+python3 - "$TMP_ROOT/personal-fleet-plan.json" <<'PY' || failed=1
+import json, shlex, sys
+plan = json.load(open(sys.argv[1]))
+runs = {operation["id"].split(":", 1)[1]: operation["argv"]
+        for operation in plan["result"]["herdr"]["plan"]["operations"]
+        if operation["id"].startswith("agent.run:")}
+assert set(runs) == {"manager", "advisor", "reviewer", "worker-implementation", "worker-verification"}
+for member, argv in runs.items():
+    assert len(argv) == 5, argv
+    args = shlex.split(argv[4])
+    claude = member in {"manager", "advisor", "reviewer"}
+    assert args[0] == ("claude-personal" if claude else "codex-personal")
+    assert args[args.index("--model") + 1] == ("claude-fable-5-1" if claude else "gpt-5.6-sol")
+    if claude:
+        assert json.loads(args[args.index("--settings") + 1]) == {"switchModelsOnFlag": False}
+    else:
+        assert 'model_reasoning_effort="medium"' in args
+PY
 test ! -e "$TMP_ROOT/runtime-state" || failed=1
 
 mkdir -p "$TMP_ROOT/separate/core" "$TMP_ROOT/separate/herdr"
@@ -240,8 +256,8 @@ bash -n "$HERDR/adapter/scripts/fleet-controller" || failed=1
 bash -n "$HERDR/adapter/scripts/fleet-runtime" || failed=1
 test -x "$HERDR/adapter/scripts/fleet-controller" || failed=1
 test -x "$HERDR/adapter/scripts/fleet-runtime" || failed=1
-rg -n '^name: control-agent-fleet$' "$CORE/SKILL.md" "$CORE/skills/control-agent-fleet/SKILL.md" >/dev/null || failed=1
-rg -n '^name: provision-herdr-fleet$' "$HERDR/SKILL.md" "$HERDR/skills/provision-herdr-fleet/SKILL.md" >/dev/null || failed=1
+rg -n '^name: control-agent-fleet$' "$CORE/SKILL.md" >/dev/null || failed=1
+rg -n '^name: provision-herdr-fleet$' "$HERDR/SKILL.md" >/dev/null || failed=1
 
 if [ "$failed" -eq 0 ]; then
   echo 'Validation: passed (unit tests + dry-run integration)'
