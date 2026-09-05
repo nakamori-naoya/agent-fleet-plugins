@@ -1209,7 +1209,7 @@ class FleetRuntime:
                 )
                 if completed.returncode != 0:
                     raise FleetRuntimeError(
-                        "cannot inspect the Codex agent-fleet-session-hooks "
+                        "cannot inspect the Codex agent-fleet-herdr "
                         f"registration through {command}"
                     )
                 try:
@@ -1229,20 +1229,20 @@ class FleetRuntime:
                         for item in installed or []
                         if isinstance(item, Mapping)
                         and item.get("pluginId")
-                        == "agent-fleet-session-hooks@agent-fleet"
+                        == "agent-fleet-herdr@agent-fleet"
                         and item.get("installed") is True
                     ),
                     None,
                 )
                 if registration is None:
                     raise FleetRuntimeError(
-                        "Codex plugin agent-fleet-session-hooks@agent-fleet must be "
+                        "Codex plugin agent-fleet-herdr@agent-fleet must be "
                         f"installed for {command} before creating Codex panes"
                     )
                 registrations.append(
                     {
                         "command": command,
-                        "plugin_id": "agent-fleet-session-hooks@agent-fleet",
+                        "plugin_id": "agent-fleet-herdr@agent-fleet",
                         "version": registration.get("version"),
                     }
                 )

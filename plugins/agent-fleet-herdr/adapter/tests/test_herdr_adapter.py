@@ -293,7 +293,7 @@ class HerdrAdapterTest(unittest.TestCase):
             [
                 "--",
                 "--config",
-                "plugins.agent-fleet-session-hooks@agent-fleet.enabled=true",
+                "plugins.agent-fleet-herdr@agent-fleet.enabled=true",
                 "--dangerously-bypass-hook-trust",
                 "--model",
                 "gpt-5.6-sol",
@@ -378,7 +378,7 @@ class HerdrAdapterTest(unittest.TestCase):
             ["herdr", "pane", "run", "$workspace.root_pane", "codex-personal"],
             run[:5],
         )
-        self.assertIn("plugins.agent-fleet-session-hooks@agent-fleet.enabled=true", run)
+        self.assertIn("plugins.agent-fleet-herdr@agent-fleet.enabled=true", run)
         self.assertIn("gpt-5.6-sol", run)
         self.assertEqual(
             [
@@ -486,7 +486,7 @@ class HerdrAdapterTest(unittest.TestCase):
         for argv in codex_starts:
             self.assertIn("--config", argv)
             self.assertIn(
-                "plugins.agent-fleet-session-hooks@agent-fleet.enabled=true", argv
+                "plugins.agent-fleet-herdr@agent-fleet.enabled=true", argv
             )
 
         hook_plugin_root = str(
@@ -517,7 +517,7 @@ class HerdrAdapterTest(unittest.TestCase):
         ]
         for argv in starts:
             hook_option = argv.index(
-                "plugins.agent-fleet-session-hooks@agent-fleet.enabled=true"
+                "plugins.agent-fleet-herdr@agent-fleet.enabled=true"
             )
             self.assertEqual("--config", argv[hook_option - 1])
             self.assertEqual("--dangerously-bypass-hook-trust", argv[hook_option + 1])
@@ -894,7 +894,7 @@ class HerdrAdapterTest(unittest.TestCase):
                 "p-manager",
                 "--",
                 "--config",
-                "plugins.agent-fleet-session-hooks@agent-fleet.enabled=true",
+                "plugins.agent-fleet-herdr@agent-fleet.enabled=true",
                 "--dangerously-bypass-hook-trust",
                 "--model",
                 "gpt-5.6-sol",

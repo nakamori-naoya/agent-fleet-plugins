@@ -4,7 +4,6 @@
   "description": "Fleet CoreとHerdr Adapterを独立配布し、YAMLで定義したagent fleetを制御するmarketplace",
   "plugins": [
     {"name":"agent-fleet-core","source":"./plugins/agent-fleet-core","description":"Fleet Spec、logical agent、task、command、eventを管理する","version":"0.7.0"},
-    {"name":"agent-fleet-herdr","source":"./plugins/agent-fleet-herdr","description":"Fleet Coreの公開JSON契約をHerdrのRuntime/View操作へ変換する","version":"0.7.0"},
-    {"name":"agent-fleet-session-hooks","source":"./plugins/agent-fleet-herdr/session-hooks-plugin","description":"艦隊agent sessionだけで役割文脈Hookを有効にする","version":"0.7.0"}
+    {"name":"agent-fleet-herdr","source":"./plugins/agent-fleet-herdr","description":"Fleet Coreの公開JSON契約をHerdrのRuntime/View操作へ変換し、艦隊session限定Hookを同梱する","version":"0.8.0"}
   ]
 }

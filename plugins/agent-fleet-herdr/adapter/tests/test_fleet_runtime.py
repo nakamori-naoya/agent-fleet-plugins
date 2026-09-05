@@ -125,7 +125,7 @@ class FakeRunner:
                     {
                         "installed": [
                             {
-                                "pluginId": "agent-fleet-session-hooks@agent-fleet",
+                                "pluginId": "agent-fleet-herdr@agent-fleet",
                                 "installed": True,
                                 "version": "test",
                             }
@@ -1621,7 +1621,7 @@ class FleetRuntimeTest(unittest.TestCase):
 
         with self.assertRaisesRegex(
             fleet_runtime.FleetRuntimeError,
-            "agent-fleet-session-hooks@agent-fleet must be installed",
+            "agent-fleet-herdr@agent-fleet must be installed",
         ):
             runtime.start(
                 "review", [self.fleets], [self.profiles], self.state,

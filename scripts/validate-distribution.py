@@ -186,7 +186,7 @@ def validate_hook_document(path: Path, plugin_name: str) -> None:
     hooks = document.get("hooks")
     if not isinstance(hooks, dict) or not hooks:
         fail(f"hooks fileにhook定義がありません: {plugin_name}")
-    if plugin_name == "agent-fleet-session-hooks":
+    if plugin_name in {"agent-fleet-herdr", "agent-fleet-session-hooks"}:
         required_events = {"UserPromptSubmit", "SessionStart"}
         if not required_events.issubset(hooks):
             fail(f"session-hooksに必須eventがありません: {plugin_name}")
@@ -210,14 +210,16 @@ def validate_hook_document(path: Path, plugin_name: str) -> None:
 def validate_hooks(source_root: Path, plugin_name: str, manifests: dict[str, dict]) -> None:
     capabilities = codex_capabilities(manifests["codex"])
     hooks_capability = "Hooks" in capabilities
-    hooks_declared = any("hooks" in manifest for manifest in manifests.values())
-    if hooks_declared != hooks_capability:
-        fail(f"hooks宣言とHooks capabilityが一致しません: {plugin_name}")
+    codex_hooks_declared = "hooks" in manifests["codex"]
+    if codex_hooks_declared != hooks_capability:
+        fail(f"Codex hooks宣言とHooks capabilityが一致しません: {plugin_name}")
     if plugin_name == "agent-fleet-session-hooks" and not hooks_capability:
         fail(f"session-hooksにHooks capabilityがありません: {plugin_name}")
     if not hooks_capability:
         return
     for runtime, manifest in manifests.items():
+        if "hooks" not in manifest:
+            continue
         hooks_path = resolve_declared_path(source_root, manifest.get("hooks"), f"{runtime} hooks path")
         require_regular_file(hooks_path)
         if not hooks_path.read_bytes():
@@ -238,6 +240,7 @@ def validate_repository(root: Path) -> int:
         fail("Claude/Codexのplugin名・version・sourceが一致しません")
 
     expected_roots: set[Path] = set()
+    expected_internal_roots: set[Path] = set()
     plugins_declared = root / "plugins"
     reject_symlink_ancestors(root, plugins_declared)
     plugins_root = plugins_declared.resolve(strict=True)
@@ -264,15 +267,42 @@ def validate_repository(root: Path) -> int:
         validate_skills(source_root, manifests)
         validate_scripts(source_root, manifests)
         validate_hooks(source_root, name, manifests)
+        internal_maps = []
+        for manifest in manifests.values():
+            metadata = manifest.get("metadata", {})
+            harness = metadata.get("harness", {}) if isinstance(metadata, dict) else {}
+            internal = harness.get("internalPlugins", {}) if isinstance(harness, dict) else {}
+            if not isinstance(internal, dict):
+                fail(f"internalPluginsがobjectではありません: {name}")
+            internal_maps.append(internal)
+        if internal_maps[0] != internal_maps[1]:
+            fail(f"Claude/CodexのinternalPluginsが一致しません: {name}")
+        for internal_name, relative in internal_maps[0].items():
+            internal_root = resolve_declared_path(source_root, relative, f"internal plugin path: {internal_name}")
+            if not internal_root.is_dir() or internal_root.is_symlink():
+                fail(f"internal plugin directoryが不正です: {internal_name}")
+            expected_internal_roots.add(internal_root)
+            internal_manifests = {}
+            for runtime in ("claude", "codex"):
+                internal_manifest_path = internal_root / f".{runtime}-plugin/plugin.json"
+                require_regular_file(internal_manifest_path)
+                internal_manifest = load_json(internal_manifest_path)
+                if internal_manifest.get("name") != internal_name:
+                    fail(f"internal plugin identityが不正です: {internal_name}/{runtime}")
+                internal_manifests[runtime] = internal_manifest
+            if internal_manifests["claude"].get("version") != internal_manifests["codex"].get("version"):
+                fail(f"internal plugin versionがruntime間で不一致です: {internal_name}")
+            validate_hooks(internal_root, internal_name, internal_manifests)
 
     discovered: set[Path] = set()
     for manifest in plugins_root.rglob("plugin.json"):
         if manifest.parent.name not in {".claude-plugin", ".codex-plugin"}:
             continue
         discovered.add(manifest.parent.parent.resolve(strict=True))
-    if discovered != expected_roots:
-        missing = sorted(os.fspath(path.relative_to(root)) for path in expected_roots - discovered)
-        extra = sorted(os.fspath(path.relative_to(root)) for path in discovered - expected_roots)
+    declared_roots = expected_roots | expected_internal_roots
+    if discovered != declared_roots:
+        missing = sorted(os.fspath(path.relative_to(root)) for path in declared_roots - discovered)
+        extra = sorted(os.fspath(path.relative_to(root)) for path in discovered - declared_roots)
         fail(f"catalogとsource集合が一致しません: missing={missing}, extra={extra}")
 
     print(f"Distribution: passed ({len(expected_roots)} plugins)")
@@ -406,6 +436,8 @@ def expect_mutation_rejected(root: Path, mutation: str, expected_error: str) -> 
                 manifest_path = hook_root / f".{runtime}-plugin/plugin.json"
                 manifest = load_json(manifest_path)
                 if has_hooks:
+                    if "hooks" not in manifest:
+                        continue
                     original = str(manifest["hooks"]).removeprefix("./")
                     manifest["hooks"] = f"./hook-alias/{original}"
                 else:

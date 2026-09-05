@@ -14,10 +14,11 @@ failed=0
 python3 "$ROOT/scripts/validate-distribution.py" "$ROOT" || failed=1
 python3 "$ROOT/scripts/validate-distribution.py" --self-test || failed=1
 
-for manifest in \
-  "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json" \
-  "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.7.0" and (.name=="agent-fleet-core" or .name=="agent-fleet-herdr")' "$manifest" >/dev/null || failed=1
+for manifest in "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json"; do
+  jq -e '.version=="0.7.0" and .name=="agent-fleet-core"' "$manifest" >/dev/null || failed=1
+done
+for manifest in "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
+  jq -e '.version=="0.8.0" and .name=="agent-fleet-herdr"' "$manifest" >/dev/null || failed=1
 done
 for manifest in "$HOOK_PLUGIN/.codex-plugin/plugin.json" "$HOOK_PLUGIN/.claude-plugin/plugin.json"; do
   jq -e '.version=="0.7.0" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
@@ -32,14 +33,15 @@ jq -e '.hooks.UserPromptSubmit[0].hooks[0].command | contains("AGENT_FLEET_HOOK_
   "$HOOK_PLUGIN/hooks/codex-hooks.json" >/dev/null || failed=1
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].command==.hooks.SessionStart[0].hooks[0].command' \
   "$HOOK_PLUGIN/hooks/codex-hooks.json" >/dev/null || failed=1
-jq -e 'has("hooks")|not' "$HERDR/.claude-plugin/plugin.json" "$HERDR/.codex-plugin/plugin.json" >/dev/null || failed=1
+jq -e 'has("hooks")|not' "$HERDR/.claude-plugin/plugin.json" >/dev/null || failed=1
+jq -e '.hooks=="./session-hooks-plugin/hooks/codex-hooks.json" and (.interface.capabilities|index("Hooks"))!=null' "$HERDR/.codex-plugin/plugin.json" >/dev/null || failed=1
 jq -e '.hooks=="./hooks/claude-hooks.json"' "$HOOK_PLUGIN/.claude-plugin/plugin.json" >/dev/null || failed=1
 jq -e '.hooks=="./hooks/codex-hooks.json"' "$HOOK_PLUGIN/.codex-plugin/plugin.json" >/dev/null || failed=1
 test ! -e "$HERDR/view-profiles" || failed=1
 if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
   failed=1
 fi
-jq -e '.name=="agent-fleet" and (.plugins|length==3) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr","agent-fleet-session-hooks"] and all(.plugins[]; .version=="0.7.0")' \
+jq -e '.name=="agent-fleet" and (.plugins|length==2) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr"] and (.plugins[]|select(.name=="agent-fleet-core").version)=="0.7.0" and (.plugins[]|select(.name=="agent-fleet-herdr").version)=="0.8.0"' \
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \
@@ -196,7 +198,7 @@ jq -e '.ok==true and (.result|length)==5 and all(.result[]; .profile_resolved==t
   > "$TMP_ROOT/fleet-plan.json" || failed=1
 jq -e '.ok==true and .result.status=="planned" and .result.profile_ref=="local/role-columns@1" and (.result.herdr.plan.placements|length)==5' \
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
-jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.start:worker-implementation" or .id=="agent.start:worker-verification"); (.argv|index("codex")) != null and (.argv|index("gpt-5.6-sol")) != null and (.argv|index("plugins.agent-fleet-session-hooks@agent-fleet.enabled=true")) != null and (.argv|index("model_reasoning_effort=\"medium\"")) != null)' \
+jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.start:worker-implementation" or .id=="agent.start:worker-verification"); (.argv|index("codex")) != null and (.argv|index("gpt-5.6-sol")) != null and (.argv|index("plugins.agent-fleet-herdr@agent-fleet.enabled=true")) != null and (.argv|index("model_reasoning_effort=\"medium\"")) != null)' \
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
 jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.start:manager" or .id=="agent.start:advisor" or .id=="agent.start:reviewer"); (.argv|index("claude")) != null and (.argv|index("claude-fable-5-1")) != null and (.argv|index("--plugin-dir")) != null and (.argv|index("high")) != null and (.argv|index("{\"switchModelsOnFlag\":false}")) != null)' \
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
