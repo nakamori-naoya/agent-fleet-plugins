@@ -248,6 +248,37 @@ class Hardening(unittest.TestCase):
         shutil.rmtree(package)
         result=self.call('python3',resolver,'--check-steps',input=json.dumps(config))
         self.assertEqual(result.returncode,2);self.assertIn('package-root-unavailable',result.stderr);self.assertNotIn('Traceback',result.stderr)
+    def test_own_script_root_and_ancestor_identity_are_preserved(self):
+        resolver=ROOT/'shared/playbook/resolve-dependency.py'
+        if not resolver.exists():self.skipTest('no dependency resolver')
+        for ancestor in [False, True]:
+            with self.subTest(ancestor=ancestor):
+                parent=self.base/('own-parent' if ancestor else 'own-package');package=parent/'playbook';package.mkdir(parents=True)
+                (package/'script.sh').write_text('#!/bin/sh\nexit 0\n')
+                config={'deps':{},'playbook_root':str(package),'playbook':{'steps':[{'id':'own','script':'script.sh'},{'id':'later','script':'not-created.sh','when':False}]}}
+                self.assertEqual(self.call('python3',resolver,'--check-steps',input=json.dumps(config)).returncode,0)
+                target=parent if ancestor else package;outside=self.base/('outside-own-parent' if ancestor else 'outside-own-package');target.rename(outside);target.symlink_to(outside,target_is_directory=True)
+                for selected in [[],['later']]:
+                    result=self.call('python3',resolver,'--check-steps',*selected,input=json.dumps(config))
+                    self.assertEqual(result.returncode,2);self.assertIn('path-root-symlink',result.stderr)
+    def test_dependency_entry_root_cannot_rebase_or_escape_package(self):
+        resolver=ROOT/'shared/playbook/resolve-dependency.py'
+        if not resolver.exists():self.skipTest('no dependency resolver')
+        sys.dont_write_bytecode=True
+        spec=importlib.util.spec_from_file_location('entry_boundary',resolver);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        package=self.base/'entry-package';(package/'.codex-plugin').mkdir(parents=True);entry=package/'entry';entry.mkdir()
+        (package/'.codex-plugin/plugin.json').write_text(json.dumps({'name':'fixture','version':'1.0.0','metadata':{'harness':{'entryRoot':'./entry'}}}))
+        (package/'SKILL.md').write_text('---\nname: fixture\ndescription: fixture\n---\ncontent')
+        (entry/'script.sh').write_text('#!/bin/sh\nexit 0\n');(entry/'playbook.yml').write_text('steps: []\n');(entry/'scripts').mkdir();(entry/'scripts/resolve.sh').write_text('#!/bin/sh\nexit 0\n')
+        dep=module.validate_candidate(package,'codex','fixture','fixture');config={'deps':{'fixture':dep},'playbook_root':str(package),'playbook':{'steps':[{'id':'script','plugin':'fixture','script':'script.sh'},{'id':'skill','skill':'fixture'},{'id':'child','playbook':'fixture'}]}}
+        module.check_steps(config)
+        outside=self.base/'entry-outside';entry.rename(outside);entry.symlink_to(outside,target_is_directory=True)
+        reads=[];module.load_json=lambda *args: reads.append(args)
+        with self.assertRaises(SystemExit):module.check_steps(config)
+        self.assertEqual(reads,[])
+        dep['root']=str(outside)
+        with self.assertRaises(SystemExit):module.check_steps(config)
+        self.assertEqual(reads,[])
     def test_all_templates_resolve_from_plugin_root(self):
         plugin=ROOT/'plugins/skills/authoring/content-types'
         if not plugin.exists():self.skipTest('no content types')
