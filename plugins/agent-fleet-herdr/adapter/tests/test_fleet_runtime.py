@@ -269,6 +269,8 @@ class FleetRuntimeTest(unittest.TestCase):
         (self.root / "adapter" / "view_profiles.py").write_text("# view fixture\n", encoding="utf-8")
         (self.root / "adapter" / "fleet_runtime.py").write_text("# runtime fixture\n", encoding="utf-8")
         required_fixtures = {
+            "core/core_contract.py": "# contract fixture\n",
+            "core/command_delivery.py": "# delivery fixture\n",
             "spec/scripts/validate_fleet.py": "# validator fixture\n",
             "spec/schema/envelopes.schema.yml": "{}\n",
             "spec/schema/fleet.schema.yml": "{}\n",
