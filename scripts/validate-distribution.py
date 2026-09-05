@@ -116,15 +116,19 @@ def declared_catalog_source(root: Path, source: str, plugin_name: str) -> Path:
 
 
 def resolve_declared_path(source_root: Path, value: object, label: str) -> Path:
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or not value or not value.startswith("./"):
         fail(f"{label}が未宣言です: {source_root}")
-    declared = source_root / value
-    resolved = declared.resolve(strict=False)
-    if resolved == source_root or source_root not in resolved.parents:
+    relative = Path(value)
+    if relative.is_absolute() or ".." in relative.parts:
         fail(f"{label}がplugin root外を指しています: {source_root}")
-    if declared.is_symlink():
+    boundary = os.path.realpath(os.fspath(source_root))
+    lexical = os.path.abspath(os.path.join(boundary, value))
+    candidate = os.path.realpath(lexical)
+    if not candidate.startswith(boundary + os.sep):
+        fail(f"{label}がplugin root外を指しています: {source_root}")
+    if candidate != lexical:
         fail(f"{label}がsymlinkです: {source_root}")
-    return resolved
+    return Path(candidate)
 
 
 def codex_capabilities(manifest: dict) -> list[str]:
@@ -510,7 +514,7 @@ def expect_mutation_rejected(root: Path, mutation: str, expected_error: str) -> 
             fail(f"未知のmutationです: {mutation}")
 
         result = subprocess.run(
-            [sys.executable, os.fspath(fixture / "scripts/validate-distribution.py"), os.fspath(fixture)],
+            [sys.executable, os.fspath(fixture / "scripts/validate-distribution.py")],
             check=False,
             capture_output=True,
             text=True,
@@ -579,12 +583,15 @@ def self_test() -> int:
 
 
 def main() -> int:
+    root = repository_root()
+    if len(sys.argv) == 1:
+        return validate_repository(root)
     if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
         return self_test()
-    if len(sys.argv) == 2:
-        return validate_repository(Path(sys.argv[1]).resolve(strict=True))
+    if len(sys.argv) == 2 and sys.argv[1] == os.fspath(root):
+        return validate_repository(root)
     print(
-        f"usage: {Path(sys.argv[0]).name} (--self-test | REPOSITORY_ROOT)",
+        f"usage: {Path(sys.argv[0]).name} (--self-test | {root})",
         file=sys.stderr,
     )
     return 2
