@@ -1,18 +1,25 @@
 {
   "name": "agent-fleet-core",
-  "version": "0.7.0",
+  "version": "1.0.0",
   "description": "YAML Fleet SpecとSQLiteでlogical agent、task、command、eventを管理する",
   "author": {
     "name": "NaoyaNakamori"
   },
-  "skills": "./skills/",
+  "skills": "./",
   "interface": {
     "displayName": "Agent Fleet Core",
     "shortDescription": "Agent fleetのdesired stateと制御状態を管理する",
     "longDescription": "YAML Fleet Specを検査し、logical agent、task、typed command、event、outboxをSQLiteへ永続化する。Herdrやpaneは操作しない。",
     "developerName": "NaoyaNakamori",
     "category": "Productivity",
-    "capabilities": ["Skills"],
+    "capabilities": [
+      "Skills"
+    ],
     "defaultPrompt": "agent-fleet-coreを使ってFleet Specを検査し、agent fleetのtaskとcommandを管理してください。"
+  },
+  "metadata": {
+    "harness": {
+      "contractVersion": 1
+    }
   }
 }

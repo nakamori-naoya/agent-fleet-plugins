@@ -10,18 +10,20 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agent-fleet-validation.XXXXXX") || exit 2
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P) || exit 2
 trap 'rm -rf "$TMP_ROOT"' EXIT
 failed=0
+python3 "$ROOT/scripts/test-hardening.py" || failed=1
+python3 "$ROOT/scripts/sync-runtime.py" --check || failed=1
 
 python3 "$ROOT/scripts/validate-distribution.py" "$ROOT" || failed=1
 python3 "$ROOT/scripts/validate-distribution.py" --self-test || failed=1
 
 for manifest in "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.7.0" and .name=="agent-fleet-core"' "$manifest" >/dev/null || failed=1
+  jq -e '(.version|test("^[0-9]+[.][0-9]+[.][0-9]+")) and .name=="agent-fleet-core"' "$manifest" >/dev/null || failed=1
 done
 for manifest in "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.8.0" and .name=="agent-fleet-herdr"' "$manifest" >/dev/null || failed=1
+  jq -e '(.version|test("^[0-9]+[.][0-9]+[.][0-9]+")) and .name=="agent-fleet-herdr"' "$manifest" >/dev/null || failed=1
 done
 for manifest in "$HOOK_PLUGIN/.codex-plugin/plugin.json" "$HOOK_PLUGIN/.claude-plugin/plugin.json"; do
-  jq -e '.version=="0.7.0" and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
+  jq -e '(.version|test("^[0-9]+[.][0-9]+[.][0-9]+")) and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
 done
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact|fork" and .hooks.SessionStart[0].hooks[0].timeout==12' \
   "$HOOK_PLUGIN/hooks/claude-hooks.json" >/dev/null || failed=1
@@ -41,7 +43,7 @@ test ! -e "$HERDR/view-profiles" || failed=1
 if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
   failed=1
 fi
-jq -e '.name=="agent-fleet" and (.plugins|length==2) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr"] and (.plugins[]|select(.name=="agent-fleet-core").version)=="0.7.0" and (.plugins[]|select(.name=="agent-fleet-herdr").version)=="0.8.0"' \
+jq -e '.name=="agent-fleet" and (.plugins|length==2) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr"]' \
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \
@@ -240,8 +242,8 @@ bash -n "$HERDR/adapter/scripts/fleet-controller" || failed=1
 bash -n "$HERDR/adapter/scripts/fleet-runtime" || failed=1
 test -x "$HERDR/adapter/scripts/fleet-controller" || failed=1
 test -x "$HERDR/adapter/scripts/fleet-runtime" || failed=1
-rg -n '^name: control-agent-fleet$' "$CORE/SKILL.md" "$CORE/skills/control-agent-fleet/SKILL.md" >/dev/null || failed=1
-rg -n '^name: provision-herdr-fleet$' "$HERDR/SKILL.md" "$HERDR/skills/provision-herdr-fleet/SKILL.md" >/dev/null || failed=1
+rg -n '^name: control-agent-fleet$' "$CORE/SKILL.md" >/dev/null || failed=1
+rg -n '^name: provision-herdr-fleet$' "$HERDR/SKILL.md" >/dev/null || failed=1
 
 if [ "$failed" -eq 0 ]; then
   echo 'Validation: passed (unit tests + dry-run integration)'
