@@ -3,12 +3,28 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
 VERSION = '2.0.0'
 NAMES = ['resolve-dependency.py', 'resolve.sh', 'validate-distribution.py', 'prepare.sh', 'run-config.py', 'doctor.py', 'release.py', 'evaluate-skills.py', 'claude-eval-adapter.py', 'sync-runtime.py', 'test-hardening.py', 'validate.yml']
 
+
+
+def reject_tree_symlinks(root, relatives):
+    """No generated-tree input/output may leave its explicit root via a symlink."""
+    if not root.is_dir():
+        raise ValueError('root is not a directory: ' + str(root))
+    for relative in relatives:
+        base = root / relative
+        if base.is_symlink():
+            raise ValueError('tree symlink refused: ' + str(base))
+        for directory, dirs, files in os.walk(base, followlinks=False):
+            for name in dirs + files:
+                path = Path(directory) / name
+                if path.is_symlink():
+                    raise ValueError('tree symlink refused: ' + str(path))
 
 def main():
     p = argparse.ArgumentParser()
@@ -17,6 +33,7 @@ def main():
     p.add_argument('--check', action='store_true')
     a = p.parse_args()
     repo = Path(a.repo).resolve()
+    reject_tree_symlinks(repo, ['plugins', 'scripts', 'shared', '.github'])
     lock = repo / 'shared/runtime-manifest.json'
     if a.source:
         source = Path(a.source).resolve(strict=True)
@@ -51,6 +68,10 @@ def main():
         return bool(errors)
     else:
         p.error('--source requires the development source checkout')
+    reject_tree_symlinks(source, ['.'])
+    for name in NAMES:
+        if not (source / name).is_file():
+            raise ValueError('source is not a regular file: ' + name)
     targets = {}
     for name in NAMES:
         if name == 'resolve-dependency.py':
@@ -87,4 +108,8 @@ def main():
     return bool(changed) if a.check else 0
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, KeyError) as exc:
+        print(json.dumps({'error': str(exc)}, ensure_ascii=False), file=sys.stderr)
+        sys.exit(2)

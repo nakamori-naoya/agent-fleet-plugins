@@ -2,11 +2,27 @@
 """Read-only CLI, publication, dependency and configuration diagnostics."""
 import argparse
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 
+
+
+def reject_repository_symlinks(root):
+    """Validate repository-controlled paths before any content read or subprocess."""
+    if not root.is_dir():
+        raise ValueError('repository is not a directory')
+    for relative in ['scripts', 'plugins', '.agents', '.claude-plugin']:
+        base = root / relative
+        if base.is_symlink():
+            raise ValueError('repository path is a symlink: ' + str(base))
+        for directory, dirs, files in os.walk(base, followlinks=False):
+            for name in dirs + files:
+                path = Path(directory) / name
+                if path.is_symlink():
+                    raise ValueError('repository path is a symlink: ' + str(path))
 
 def main():
     p = argparse.ArgumentParser()
@@ -16,6 +32,11 @@ def main():
     a = p.parse_args()
     root = Path(a.repository).resolve()
     checks = []
+    try:
+        reject_repository_symlinks(root)
+    except ValueError as exc:
+        print(json.dumps({'schema': 1, 'read_only': True, 'checks': [{'check': 'repository-path-boundary', 'ok': False, 'detail': str(exc), 'remedy': '診断対象の配布treeからsymlinkを除去する'}]}, ensure_ascii=False, indent=2))
+        return 1
     def run(label, argv, stdin=None):
         try:
             result = subprocess.run(argv, input=stdin, text=True, capture_output=True, timeout=60)

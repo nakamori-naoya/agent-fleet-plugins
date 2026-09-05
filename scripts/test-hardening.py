@@ -23,6 +23,44 @@ class Hardening(unittest.TestCase):
         self.temp.cleanup()
     def call(self, *args, input=None):
         return subprocess.run(list(map(str,args)), input=input, text=True, capture_output=True, env=self.env, cwd=self.base, timeout=30)
+    def test_sync_rejects_source_and_target_symlinks_without_external_writes(self):
+        source = self.base/'source';source.mkdir()
+        manifest = json.loads((ROOT/'shared/runtime-manifest.json').read_text())
+        for name in manifest['source']['files']:
+            (source/name).write_text('fixture source ' + name)
+        repo = self.base/'repo';(repo/'scripts').mkdir(parents=True)
+        outside = self.base/'outside';outside.write_text('preserve')
+        link = repo/'scripts/doctor.py';link.symlink_to(outside)
+        result = self.call('python3',ROOT/'scripts/sync-runtime.py','--repo',repo,'--source',source)
+        self.assertEqual(result.returncode,2,result.stdout+result.stderr)
+        self.assertEqual(outside.read_text(),'preserve')
+        self.assertEqual(list((repo/'scripts').iterdir()),[link])
+        link.unlink()
+        (source/'doctor.py').unlink();(source/'doctor.py').symlink_to(outside)
+        result = self.call('python3',ROOT/'scripts/sync-runtime.py','--repo',repo,'--source',source)
+        self.assertEqual(result.returncode,2,result.stdout+result.stderr)
+        self.assertEqual(outside.read_text(),'preserve')
+        self.assertEqual(list((repo/'scripts').iterdir()),[])
+    def test_doctor_rejects_external_skill_and_resolver_before_access(self):
+        repo=self.base/'repo';package=repo/'plugins/p';(repo/'scripts').mkdir(parents=True)
+        (repo/'scripts/validate.sh').write_text('#!/bin/bash\nexit 0\n');(package/'skill').mkdir(parents=True)
+        external=self.base/'outside.md';external.write_text('---\nname: external-private-name\ndescription: fixture\n---\n')
+        skill=package/'skill/SKILL.md';skill.symlink_to(external)
+        for runtime,relative in [('codex','.agents/plugins/marketplace.json'),('claude','.claude-plugin/marketplace.json')]:
+            manifest=package/f'.{runtime}-plugin/plugin.json';manifest.parent.mkdir(parents=True);manifest.write_text(json.dumps({'name':'p','version':'1.0.0','skills':['./skill']}))
+            catalog=repo/relative;catalog.parent.mkdir(parents=True);catalog.write_text(json.dumps({'plugins':[{'name':'p','source':{'source':'local','path':'./plugins/p'} if runtime=='codex' else './plugins/p'}]}))
+        result=self.call('python3',ROOT/'scripts/doctor.py','--repository',repo,'--distribution-only')
+        self.assertEqual(result.returncode,1)
+        self.assertNotIn('external-private-name',result.stdout)
+        self.assertIn('repository-path-boundary',result.stdout)
+        skill.unlink();skill.write_text('---\nname: fixture\ndescription: fixture\n---\n')
+        (package/'scripts').mkdir()
+        marker=self.base/'executed';script=self.base/'outside.sh';script.write_text('#!/bin/bash\ntouch "'+str(marker)+'"\n')
+        (package/'scripts/resolve.sh').symlink_to(script)
+        result=self.call('python3',ROOT/'scripts/doctor.py','--repository',repo,'--repo',self.base)
+        self.assertEqual(result.returncode,1)
+        self.assertFalse(marker.exists())
+        self.assertEqual(len(json.loads(result.stdout)['checks']),1)
     def test_functional_ci_actions_are_pinned(self):
         workflow = (ROOT/'.github/workflows/validate.yml').read_text()
         actions = re.findall(r'uses:\s+([^\s#]+)', workflow)
@@ -158,6 +196,17 @@ class Hardening(unittest.TestCase):
         command=json.dumps(['python3',str(adapter)]);out=repo/'result.json'
         result=self.call('python3',ROOT/'scripts/evaluate-skills.py','--fixtures',fixtures,'--model-command',command,'--judge-command',command,'--model','generator','--judge-model','judge','--output',out)
         self.assertEqual(result.returncode,1);record=json.loads(out.read_text())['records'][0];self.assertEqual(record['status'],'error');self.assertIn('evidence',record['error']);self.assertIn('judge_input',record);self.assertIn('judgment',record);self.assertEqual(record['judgment']['output']['criteria'][0]['quote'],'absent')
+    def test_state_rejects_symlink_ancestor_before_creating_files(self):
+        state = ROOT/'plugins/playbooks/authoring/write-doc/scripts/state.py'
+        if not state.exists():self.skipTest('no write-doc state')
+        root = self.base/'state/harness-plugins/playbooks';root.mkdir(parents=True)
+        outside = self.base/'outside';outside.mkdir()
+        (root/'fixture').symlink_to(outside, target_is_directory=True)
+        config = self.base/'config.json';config.write_text(json.dumps({'playbook':{'name':'fixture','steps':[{'id':'save','provides':['path']}]}}))
+        result = self.call('python3',state,'init','--config',config,'--repo',self.base,'--run-id','run')
+        self.assertEqual(result.returncode,2)
+        self.assertIn('symlink',result.stderr)
+        self.assertEqual(list(outside.iterdir()),[])
     def test_state_repo_retry_files_corruption_and_parallel_start(self):
         state=ROOT/'plugins/playbooks/authoring/write-doc/scripts/state.py'
         if not state.exists():self.skipTest('no write-doc state')
