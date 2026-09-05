@@ -339,7 +339,8 @@ def expect_mutation_rejected(root: Path, mutation: str, expected_error: str) -> 
         shutil.copytree(root, fixture, ignore=shutil.ignore_patterns(".git"), symlinks=True)
         _, entries = catalog_entries(fixture / ".agents/plugins/marketplace.json", "codex")
         skills_name = next(
-            name for name, (_, source) in entries.items() if (fixture / source / "skills").is_dir()
+            name for name, (_, source) in entries.items()
+            if "skills" in load_json(fixture / source / ".codex-plugin/plugin.json")
         )
         skills_root = (fixture / entries[skills_name][1]).resolve(strict=True)
         if mutation == "catalog-empty":
