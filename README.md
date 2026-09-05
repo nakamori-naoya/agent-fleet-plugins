@@ -143,6 +143,8 @@ Fleet YAMLの形式例は[manager 1・worker 2の利用者設定](configs/fleets
 
 `AgentCommandProfile`は`codex-personal`、`codex-work`、`claude-personal`、`claude-work`のような一つのコマンド名と製品だけを持つ。aliasの展開内容、認証directory、秘密値、モデル引数は複製しない。Herdr起動設定の`spec.agent_command_profiles`が論理メンバーIDから版固定のプロファイルIDを参照し、Herdr Adapterは選ばれたコマンドへ艦隊設定のHook・モデル・思考量を合成する。プロファイルを指定しないメンバーは従来どおり`codex`または`claude`を起動する。
 
+Herdr 0.8の`pane run`は引数を連結した文字列をpaneのshellへ送るため、Adapterはこの境界でコマンドと各引数を引用する。利用者が設定値へshell用の引用符を追加する必要はない。Claudeの`--settings`に含むJSONの引用符、Codexの`--config`に含むTOML文字列の引用符、空白・改行は管理agentを含む各メンバーへそのまま渡す。通常の`agent start`経路にはこの追加引用を適用しない。
+
 新しいpaneを作る前に、`fleet-runtime`は起動コマンドが利用者の対話シェルで解決できることを確認する。Claude用コマンドは`<command> auth status`、Codex用コマンドは`<command> plugin list --json`も同じアカウント用コマンド経由で検査する。Claudeが未ログインなら複数paneを作らず、`<command> auth login`を一度実行するよう示す。起動済みpaneの制御処理を再開するだけの場合、この起動前検査を繰り返さない。
 
 Herdr起動設定で`spec.codex_hook_trust: preapproved`を明示すると、Herdrから起動する各Codexだけに`--dangerously-bypass-hook-trust`を渡し、役割文脈Hookの起動時レビューを省略する。これはHookの信頼確認だけを省略し、tool承認やsandboxを無効にしない。`review`指定時は対話確認を維持し、プラグイン更新で旧実行ファイルが消えた場合も未確認の新版へ自動移行しない。利用者向けHerdr起動設定例3件は、毎回の艦隊起動を止めないよう`preapproved`を明示している。

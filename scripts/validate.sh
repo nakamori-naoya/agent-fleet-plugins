@@ -216,10 +216,24 @@ jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.start:manager" o
   > "$TMP_ROOT/personal-fleet-plan.json" || failed=1
 jq -e '.ok==true and .result.agent_command_profiles.manager.command=="claude-personal" and .result.agent_command_profiles["worker-implementation"].command=="codex-personal"' \
   "$TMP_ROOT/personal-fleet-plan.json" >/dev/null || failed=1
-jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.run:manager" or .id=="agent.run:advisor" or .id=="agent.run:reviewer"); .argv[4]=="claude-personal" and (.argv|index("claude-fable-5-1")) != null)' \
-  "$TMP_ROOT/personal-fleet-plan.json" >/dev/null || failed=1
-jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.run:worker-implementation" or .id=="agent.run:worker-verification"); .argv[4]=="codex-personal" and (.argv|index("gpt-5.6-sol")) != null)' \
-  "$TMP_ROOT/personal-fleet-plan.json" >/dev/null || failed=1
+python3 - "$TMP_ROOT/personal-fleet-plan.json" <<'PY' || failed=1
+import json, shlex, sys
+plan = json.load(open(sys.argv[1]))
+runs = {operation["id"].split(":", 1)[1]: operation["argv"]
+        for operation in plan["result"]["herdr"]["plan"]["operations"]
+        if operation["id"].startswith("agent.run:")}
+assert set(runs) == {"manager", "advisor", "reviewer", "worker-implementation", "worker-verification"}
+for member, argv in runs.items():
+    assert len(argv) == 5, argv
+    args = shlex.split(argv[4])
+    claude = member in {"manager", "advisor", "reviewer"}
+    assert args[0] == ("claude-personal" if claude else "codex-personal")
+    assert args[args.index("--model") + 1] == ("claude-fable-5-1" if claude else "gpt-5.6-sol")
+    if claude:
+        assert json.loads(args[args.index("--settings") + 1]) == {"switchModelsOnFlag": False}
+    else:
+        assert 'model_reasoning_effort="medium"' in args
+PY
 test ! -e "$TMP_ROOT/runtime-state" || failed=1
 
 mkdir -p "$TMP_ROOT/separate/core" "$TMP_ROOT/separate/herdr"

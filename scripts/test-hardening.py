@@ -182,6 +182,72 @@ class Hardening(unittest.TestCase):
         result=self.call('python3',resolver,'--check-steps',input=json.dumps(config));self.assertEqual(result.returncode,2);self.assertIn('content-hash',result.stderr)
         manifest.write_text(json.dumps({'name':'fixture','version':'1.0.0','metadata':{'harness':{'contractVersion':999}}}))
         with self.assertRaises(SystemExit):module.validate_candidate(package,'codex','fixture','fixture')
+    def test_dependency_manifest_rejected_before_external_json_read(self):
+        resolver=ROOT/'shared/playbook/resolve-dependency.py'
+        if not resolver.exists():self.skipTest('no dependency resolver')
+        sys.dont_write_bytecode=True
+        spec=importlib.util.spec_from_file_location('manifest_boundary',resolver);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        package=self.base/'dependency';(package/'.codex-plugin').mkdir(parents=True)
+        manifest=package/'.codex-plugin/plugin.json';manifest.write_text(json.dumps({'name':'fixture','version':'1.0.0'}))
+        (package/'SKILL.md').write_text('---\nname: fixture\ndescription: fixture\n---\ncontent')
+        dep=module.validate_candidate(package,'codex','fixture','fixture')
+        config={'deps':{'fixture':dep},'playbook_root':str(self.base),'playbook':{'steps':[]}}
+        external=self.base/'external.json';external.write_bytes(manifest.read_bytes())
+        original_load=module.load_json;reads=[]
+        def tracked_load(path,code):
+            reads.append(str(path.resolve()))
+            return original_load(path,code)
+        module.load_json=tracked_load
+        manifest.unlink();manifest.symlink_to(external)
+        with self.assertRaises(SystemExit) as rejected:module.check_steps(config)
+        self.assertEqual(rejected.exception.code,2);self.assertEqual(reads,[])
+        manifest.unlink();manifest.write_bytes(external.read_bytes())
+        config['deps']['fixture']['manifest']=str(external)
+        with self.assertRaises(SystemExit):module.check_steps(config)
+        self.assertEqual(reads,[])
+        config['deps']['fixture']['manifest']=str(manifest)
+        runtime_dir=manifest.parent;runtime_dir.rename(package/'original-manifest-dir');runtime_dir.symlink_to(package/'original-manifest-dir',target_is_directory=True)
+        with self.assertRaises(SystemExit):module.check_steps(config)
+        with self.assertRaises(SystemExit):module.validate_candidate(package,'codex','fixture','fixture')
+        self.assertEqual(reads,[])
+    def test_dependency_package_and_ancestor_symlink_rejected_before_read(self):
+        resolver=ROOT/'shared/playbook/resolve-dependency.py'
+        if not resolver.exists():self.skipTest('no dependency resolver')
+        sys.dont_write_bytecode=True
+        spec=importlib.util.spec_from_file_location('root_boundary',resolver);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        for replace_ancestor in [False, True]:
+            with self.subTest(ancestor=replace_ancestor):
+                parent=self.base/('ancestor-case' if replace_ancestor else 'package-case')
+                package=parent/'package';(package/'.codex-plugin').mkdir(parents=True)
+                (package/'.codex-plugin/plugin.json').write_text(json.dumps({'name':'fixture','version':'1.0.0'}))
+                (package/'SKILL.md').write_text('---\nname: fixture\ndescription: fixture\n---\ncontent')
+                dep=module.validate_candidate(package,'codex','fixture','fixture')
+                config={'deps':{'fixture':dep},'playbook_root':str(package),'playbook':{'steps':[]}}
+                target=parent if replace_ancestor else package
+                outside=self.base/('outside-ancestor' if replace_ancestor else 'outside-package')
+                target.rename(outside);target.symlink_to(outside,target_is_directory=True)
+                original_load=module.load_json;reads=[]
+                def tracked_load(path,code):
+                    reads.append(str(path.resolve()))
+                    return original_load(path,code)
+                module.load_json=tracked_load
+                try:
+                    with self.assertRaises(SystemExit) as rejected:module.check_steps(config)
+                    self.assertEqual(rejected.exception.code,2);self.assertEqual(reads,[])
+                finally:module.load_json=original_load
+    def test_dependency_deleted_package_is_structured_rejection(self):
+        resolver=ROOT/'shared/playbook/resolve-dependency.py'
+        if not resolver.exists():self.skipTest('no dependency resolver')
+        sys.dont_write_bytecode=True
+        spec=importlib.util.spec_from_file_location('deleted_root',resolver);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        package=self.base/'deleted-package';(package/'.codex-plugin').mkdir(parents=True)
+        (package/'.codex-plugin/plugin.json').write_text(json.dumps({'name':'fixture','version':'1.0.0'}))
+        (package/'SKILL.md').write_text('---\nname: fixture\ndescription: fixture\n---\ncontent')
+        dep=module.validate_candidate(package,'codex','fixture','fixture')
+        config={'deps':{'fixture':dep},'playbook_root':str(package),'playbook':{'steps':[]}}
+        shutil.rmtree(package)
+        result=self.call('python3',resolver,'--check-steps',input=json.dumps(config))
+        self.assertEqual(result.returncode,2);self.assertIn('package-root-unavailable',result.stderr);self.assertNotIn('Traceback',result.stderr)
     def test_all_templates_resolve_from_plugin_root(self):
         plugin=ROOT/'plugins/skills/authoring/content-types'
         if not plugin.exists():self.skipTest('no content types')

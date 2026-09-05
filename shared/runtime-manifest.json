@@ -5,7 +5,7 @@
     "path": "shared/runtime-source",
     "version": "2.0.0",
     "files": {
-      "resolve-dependency.py": "c61af08058970b74e3fde160f5e6efb60ad25be95f3ccf132d43ebb1f4f79024",
+      "resolve-dependency.py": "65dcf297e7e79d38eef40f3bf2dfeb4184eb1f7616be63e66fed029dd45bf5ed",
       "resolve.sh": "aa9f1658ce32486854285e56ae40ab096b25bb0319949c4530c92460c30c6604",
       "validate-distribution.py": "65936d1d98bc2b879da39ad7c2a9296a1563b5efbb6bf4dec306a83ab27d68ae",
       "prepare.sh": "bf512b18adaf4dd97a0190566a50f70b1680db386cba0eba415ab2289ce5bb11",
@@ -15,7 +15,7 @@
       "evaluate-skills.py": "43272002c9183dfbb7a0f0d5658c06a47e9b8c1e97aa209d8889802a0a8eab9d",
       "claude-eval-adapter.py": "3189453325a50d6c28dd808f40acb44eb2e6c40a7e56b4a39e18579b8f37e8f9",
       "sync-runtime.py": "d4d136e745ed5d49494f1ead1844fbcea42530663d3eca9d56525f2084618c02",
-      "test-hardening.py": "680ea30f96a81071358c7845d0a1a534bc6b269cb9f1c3e2db609fa7432f3034",
+      "test-hardening.py": "65abf4b6b7399bb8a84cb238c3be0567d0f4818aee3778b65ab0e54516c5edec",
       "validate.yml": "37d09b74ee886a0270452f40eb3e560f204fbc64ad92e768d84a950bfc734f2b"
     }
   },
@@ -26,6 +26,6 @@
     "scripts/evaluate-skills.py": "43272002c9183dfbb7a0f0d5658c06a47e9b8c1e97aa209d8889802a0a8eab9d",
     "scripts/release.py": "281880055f52c48e5c2e64931150f369b8fc2f97c004ac05c82ecb4bcf275fb6",
     "scripts/sync-runtime.py": "d4d136e745ed5d49494f1ead1844fbcea42530663d3eca9d56525f2084618c02",
-    "scripts/test-hardening.py": "680ea30f96a81071358c7845d0a1a534bc6b269cb9f1c3e2db609fa7432f3034"
+    "scripts/test-hardening.py": "65abf4b6b7399bb8a84cb238c3be0567d0f4818aee3778b65ab0e54516c5edec"
   }
 }
