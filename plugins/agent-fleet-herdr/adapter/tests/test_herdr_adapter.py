@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import shlex
 import sqlite3
 import subprocess
 import stat
@@ -375,11 +376,14 @@ class HerdrAdapterTest(unittest.TestCase):
             if operation["id"] == "agent.wait:manager-1"
         )
         self.assertEqual(
-            ["herdr", "pane", "run", "$workspace.root_pane", "codex-personal"],
-            run[:5],
+            ["herdr", "pane", "run", "$workspace.root_pane"],
+            run[:4],
         )
-        self.assertIn("plugins.agent-fleet-herdr@agent-fleet.enabled=true", run)
-        self.assertIn("gpt-5.6-sol", run)
+        self.assertEqual(5, len(run))
+        shell_args = shlex.split(run[4])
+        self.assertEqual("codex-personal", shell_args[0])
+        self.assertIn("plugins.agent-fleet-herdr@agent-fleet.enabled=true", shell_args)
+        self.assertIn("gpt-5.6-sol", shell_args)
         self.assertEqual(
             [
                 "herdr",
