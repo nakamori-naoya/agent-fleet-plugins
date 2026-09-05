@@ -48,7 +48,7 @@ NEW_PANE_START_ATTEMPTS = 3
 NEW_PANE_START_RETRY_DELAY_SECONDS = 1.0
 SESSION_HOOK_PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "session-hooks-plugin"
 CODEX_SESSION_HOOK_PLUGIN_CONFIG = (
-    "plugins.agent-fleet-session-hooks@agent-fleet.enabled=true"
+    "plugins.agent-fleet-herdr@agent-fleet.enabled=true"
 )
 
 

@@ -2,7 +2,7 @@
 
 YAMLのFleet Specを正本に、logical agent、task、command、eventを管理し、Herdr 0.8へruntime/view操作を委譲するClaude Code/Codex両対応marketplaceである。
 
-配布単位は`agent-fleet-core`と`agent-fleet-herdr`である。`agent-fleet-session-hooks`はHerdrが所有する同梱sidecarで、marketplace entryはCodexで有効化する配布面にすぎず、独立した実装domainではない。Coreだけを使う利用者へHerdr操作権限を同梱せず、通常セッションへ艦隊専用Hookを登録しない。Fleet Specにはdesired stateだけを記載し、pane IDや実行状態はSQLiteのobserved stateへ分離する。
+公開インストール単位は`agent-fleet-core`と`agent-fleet-herdr`である。Fleetは実行基盤なので、利用者の権限を最小にするためCoreとHerdr Adapterだけは分ける。役割HookはHerdr package内の実装であり、個別のmarketplace entryやインストール対象にはしない。Coreだけを使う利用者へHerdr操作権限を同梱せず、通常セッションで役割文脈を注入しない。Fleet Specにはdesired stateだけを記載し、pane IDや実行状態はSQLiteのobserved stateへ分離する。
 
 ## こんなときに使う
 
@@ -22,7 +22,7 @@ YAMLのFleet Specを正本に、logical agent、task、command、eventを管理�
 |---|---|
 | Fleet Specとタスク状態だけを管理する | `agent-fleet-core` |
 | Herdr上へpaneを作り、エージェントを起動する | `agent-fleet-core`と`agent-fleet-herdr` |
-| Codexの艦隊セッションだけへ役割Hookを渡す | 上記に加えて`agent-fleet-session-hooks`をinstallし、通常時は無効化する |
+| 艦隊セッションだけへ役割Hookを渡す | `agent-fleet-herdr`が内包するHookを艦隊起動時だけ有効にする |
 
 役割の意味は`agent-roles`、実行するAI製品とモデルはFleet Spec、画面配置はViewProfileがそれぞれ所有する。これらを一つの設定へ混ぜないことで、艦隊編成を変えずに表示方法やアカウントを交換できる。
 
@@ -55,11 +55,12 @@ development-squadを起動し、workerの報告後にreviewerが確認すると�
 
 daemon、multi-host、fleet間gateway、独自Web UI、自動pane再作成は対象外である。
 
-## Installable plugin
+## 公開インストール単位
 
 - `agent-fleet-core`: Fleet Spec、logical agent、task、command、event、outbox
 - `agent-fleet-herdr`: Herdr 0.8の実行時関連付け、利用者定義のpane配置、指示配送
-- `agent-fleet-session-hooks`: Herdr同梱sidecarとして、艦隊から起動したagent sessionだけで使う役割Hookを配布するentry
+
+役割Hookは`agent-fleet-herdr`の内部sidecarであり、利用者は個別にインストールしない。
 
 role catalogは別marketplaceの`agent-roles`を使う。Coreだけを使う場合、Herdr pluginをinstallする必要はない。
 
@@ -74,7 +75,6 @@ role catalogは別marketplaceの`agent-roles`を使う。Coreだけを使う場�
 | `agent-roles@agent-roles` 0.1.1以上 | Fleet設定の検査・起動で必須 | `role_ref`を検査済みRole Catalogへ解決し、RoleDefinitionの固定版を提供する |
 | `agent-fleet-core@agent-fleet` | 必須 | Fleet Specの検査、logical state、task、outboxの管理 |
 | `agent-fleet-herdr@agent-fleet` | 任意 | HerdrのRuntimeBinding、ViewPlacement、command配送 |
-| `agent-fleet-session-hooks@agent-fleet` | Codex艦隊では必須 | 艦隊agent sessionだけで役割Hookを登録。通常時はinstall済み・無効にする |
 | Herdr 0.8.x | Herdr Adapterの`--execute`時のみ必須 | local workspace、pane、agentの操作 |
 | PyYAMLまたはRuby標準`yaml` | いずれか必須 | Fleet YAMLの安全な読込 |
 
@@ -106,17 +106,16 @@ codex plugin add agent-fleet-core@agent-fleet
 # Herdr連携を使う場合だけ
 herdr --version  # 0.8.x
 codex plugin add agent-fleet-herdr@agent-fleet
-codex plugin add agent-fleet-session-hooks@agent-fleet
 ```
 
-CodexはHook pluginを解決できるようinstallだけ行い、`~/.codex/config.toml`では通常時を無効にする。
+CodexではHerdr packageを通常時に無効にし、艦隊を操作するセッションと、そこから起動する艦隊セッションでだけ有効にする。
 
 ```toml
-[plugins."agent-fleet-session-hooks@agent-fleet"]
+[plugins."agent-fleet-herdr@agent-fleet"]
 enabled = false
 ```
 
-`fleet-runtime start`がHerdrから起動する各Codexへ`--config plugins.agent-fleet-session-hooks@agent-fleet.enabled=true`を渡すため、艦隊agent sessionでだけ有効になる。
+艦隊を操作するCodexは`codex --config plugins.agent-fleet-herdr@agent-fleet.enabled=true`で開く。`fleet-runtime start`もHerdrから起動する各Codexへ同じ有効化を渡す。Hookは`AGENT_FLEET_HOOK_RUNTIME`を持つ艦隊agent sessionでだけ役割文脈を注入し、それ以外では何も返さない。
 
 ### Claude Code
 
@@ -132,7 +131,7 @@ herdr --version  # 0.8.x
 claude plugin install agent-fleet-herdr@agent-fleet
 ```
 
-Claude Codeでは`agent-fleet-session-hooks`を通常pluginとしてinstallしない。`fleet-runtime start`が各艦隊agentへ`--plugin-dir`を渡し、そのsessionだけでHook pluginを読み込む。
+Claude CodeではHerdr package自体にHookを登録しない。`fleet-runtime start`が各艦隊agentへpackage内のHook sidecarを`--plugin-dir`で渡し、そのsessionだけで読み込む。
 
 Coreだけを利用する場合、Herdr CLIと`agent-fleet-herdr`は不要である。Adapterのdry-runはHerdrを実行しないが、`--execute`を使う前に`herdr --version`が0.8.xであることを確認する。
 
@@ -148,11 +147,11 @@ Fleet YAMLの形式例は[manager 1・worker 2の利用者設定](configs/fleets
 
 Herdr起動設定で`spec.codex_hook_trust: preapproved`を明示すると、Herdrから起動する各Codexだけに`--dangerously-bypass-hook-trust`を渡し、役割文脈Hookの起動時レビューを省略する。これはHookの信頼確認だけを省略し、tool承認やsandboxを無効にしない。`review`指定時は対話確認を維持し、プラグイン更新で旧実行ファイルが消えた場合も未確認の新版へ自動移行しない。利用者向けHerdr起動設定例3件は、毎回の艦隊起動を止めないよう`preapproved`を明示している。
 
-Hook登録は`agent-fleet-session-hooks`へ分離し、通常セッションでは読み込まない。Hookの実体は艦隊起動時に艦隊stateへ内容address付きで固定配置し、各paneへ`AGENT_FLEET_HOOK_RUNTIME`として渡す。`fleet-runtime`は起動時と再開時に固定版をSHA-256照合する。Hook plugin内の`hooks/*.json`は固定版を起動する宣言だけを持つ。起動中の艦隊は導入元の更新を見に行かず、起動時の固定版で制御処理を再開する。新しいHook実体へ切り替わる境界は停止後の再起動である。
+Hook登録はHerdr package内のsidecarへ閉じ、個別に配布しない。Hookの実体は艦隊起動時に艦隊stateへ内容address付きで固定配置し、各paneへ`AGENT_FLEET_HOOK_RUNTIME`として渡す。`fleet-runtime`は起動時と再開時に固定版をSHA-256照合する。Hook宣言は固定版を起動するだけに留める。起動中の艦隊は導入元の更新を見に行かず、起動時の固定版で制御処理を再開する。新しいHook実体へ切り替わる境界は停止後の再起動である。
 
 `--execute`は導入元のfleet-controller、Core、Herdr adapter、Hook sourceを一時固定版へ複製し、その一時固定版でFleet・Herdr起動設定・表示プロファイルと実行前提を検査する。fleet-controllerは副作用なしのdry-runで起動し、役割HookのPython構文とClaude用Hook登録の形式も確認する。検査が成功したときだけ、各fileの相対path、mode、size、SHA-256と相対command引数を持つ内容address付きの固定実行版を艦隊stateへ公開する。起動と継続監視はその固定実行版だけを使う。起動中の艦隊は現在のinstall pathや現在版を再捕捉しない。保存済み固定版が欠損または改ざんされている場合は、paneや配送を増やす前に拒否する。
 
-固定実行版の対象は、CoreとHerdr連携部が実行時に必要とするentry point、Python module、schema、defaults、およびClaude用Hook登録の明示allowlistである。`fleet-runtime`自身はこれらの固定実行物を検査・選択する制御境界であり、固定実行版へは含めない。tests、SKILL、README、`__pycache__`、`.pyc`などの実行に不要なfileも含めない。一方、`python3`、Herdr 0.8.x、各AI製品のCLIと認証、Codexの`agent-fleet-session-hooks`名前解決は外部前提である。Codexの登録宣言は固定した`role_context.py`を起動する薄い境界だけに限り、新しいCodex paneを作る前に登録済みであることを検査する。
+固定実行版の対象は、CoreとHerdr連携部が実行時に必要とするentry point、Python module、schema、defaults、およびClaude用Hook登録の明示allowlistである。`fleet-runtime`自身はこれらの固定実行物を検査・選択する制御境界であり、固定実行版へは含めない。tests、SKILL、README、`__pycache__`、`.pyc`などの実行に不要なfileも含めない。一方、`python3`、Herdr 0.8.x、各AI製品のCLIと認証、Codexの`agent-fleet-herdr`名前解決は外部前提である。Codexの登録宣言は固定した`role_context.py`を起動する薄い境界だけに限り、新しいCodex paneを作る前にHerdr packageが登録済みであることを検査する。
 
 レビューはworkerが`reported`を明示した直後に始め、managerがレビュー結果と報告を照合してから`task.accept`する。したがってreviewer taskをworker taskの`depends_on`に置いて、`accepted`後までレビューを遅らせない。
 

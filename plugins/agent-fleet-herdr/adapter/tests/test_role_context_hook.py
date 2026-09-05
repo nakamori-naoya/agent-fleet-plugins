@@ -1041,7 +1041,10 @@ class RoleContextHookTest(unittest.TestCase):
         )
 
         self.assertNotIn("hooks", claude_manifest)
-        self.assertNotIn("hooks", codex_manifest)
+        self.assertEqual(
+            "./session-hooks-plugin/hooks/codex-hooks.json",
+            codex_manifest["hooks"],
+        )
         self.assertEqual(
             "./hooks/claude-hooks.json", hook_claude_manifest["hooks"]
         )
