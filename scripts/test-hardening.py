@@ -23,6 +23,12 @@ class Hardening(unittest.TestCase):
         self.temp.cleanup()
     def call(self, *args, input=None):
         return subprocess.run(list(map(str,args)), input=input, text=True, capture_output=True, env=self.env, cwd=self.base, timeout=30)
+    def test_functional_ci_actions_are_pinned(self):
+        workflow = (ROOT/'.github/workflows/validate.yml').read_text()
+        actions = re.findall(r'uses:\s+([^\s#]+)', workflow)
+        self.assertEqual(len(actions), 3)
+        for action in actions:
+            self.assertRegex(action, r'^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+@[0-9a-f]{40}$')
     def test_config_survives_shell_and_cleanup_isolated(self):
         helper=ROOT/'shared/run-config.py'
         if not helper.exists(): self.skipTest('no runtime config')
