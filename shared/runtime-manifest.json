@@ -15,17 +15,17 @@
       "evaluate-skills.py": "43272002c9183dfbb7a0f0d5658c06a47e9b8c1e97aa209d8889802a0a8eab9d",
       "claude-eval-adapter.py": "3189453325a50d6c28dd808f40acb44eb2e6c40a7e56b4a39e18579b8f37e8f9",
       "sync-runtime.py": "0645945d3edd74766de3ff95461e68404390b924acd873380bd9fb0e99df6ad5",
-      "test-hardening.py": "2d17593e271cf0b5ccb4d0bbb19069e6847aa49799224381ff25ae55bffec4df",
-      "validate.yml": "4752b59717d5afac967926b737d73d575ef99681ef56163495e147d48c42c7ce"
+      "test-hardening.py": "ff9c7e56f0b5f73f439f9ff02bcd4a3e720133ec434c3adea57a9d745e53caf1",
+      "validate.yml": "37d09b74ee886a0270452f40eb3e560f204fbc64ad92e768d84a950bfc734f2b"
     }
   },
   "targets": {
-    ".github/workflows/validate.yml": "4752b59717d5afac967926b737d73d575ef99681ef56163495e147d48c42c7ce",
+    ".github/workflows/validate.yml": "37d09b74ee886a0270452f40eb3e560f204fbc64ad92e768d84a950bfc734f2b",
     "scripts/claude-eval-adapter.py": "3189453325a50d6c28dd808f40acb44eb2e6c40a7e56b4a39e18579b8f37e8f9",
     "scripts/doctor.py": "625861bbf083143a1bc8af61d68436eeb193beeac230655e604e979f04c7a8d0",
     "scripts/evaluate-skills.py": "43272002c9183dfbb7a0f0d5658c06a47e9b8c1e97aa209d8889802a0a8eab9d",
     "scripts/release.py": "281880055f52c48e5c2e64931150f369b8fc2f97c004ac05c82ecb4bcf275fb6",
     "scripts/sync-runtime.py": "0645945d3edd74766de3ff95461e68404390b924acd873380bd9fb0e99df6ad5",
-    "scripts/test-hardening.py": "2d17593e271cf0b5ccb4d0bbb19069e6847aa49799224381ff25ae55bffec4df"
+    "scripts/test-hardening.py": "ff9c7e56f0b5f73f439f9ff02bcd4a3e720133ec434c3adea57a9d745e53caf1"
   }
 }
