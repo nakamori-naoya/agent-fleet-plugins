@@ -4,6 +4,47 @@ YAMLのFleet Specを正本に、logical agent、task、command、eventを管理�
 
 配布単位は`agent-fleet-core`と`agent-fleet-herdr`である。`agent-fleet-session-hooks`はHerdrが所有する同梱sidecarで、marketplace entryはCodexで有効化する配布面にすぎず、独立した実装domainではない。Coreだけを使う利用者へHerdr操作権限を同梱せず、通常セッションへ艦隊専用Hookを登録しない。Fleet Specにはdesired stateだけを記載し、pane IDや実行状態はSQLiteのobserved stateへ分離する。
 
+## こんなときに使う
+
+**複数のAIエージェントへ役割と仕事を割り当て、報告とレビューを追跡したいときに使う。** 単に複数のCLIを並べるのではなく、誰が何を担当し、どの報告を受けて完了とするかを論理的に管理する。
+
+- manager、worker、advisor、reviewerを決めて一つの開発目標へ取り組ませたい
+- workerの自己申告だけで完了にせず、reviewerの確認後にmanagerが受け入れたい
+- CodexとClaude Codeを同じ艦隊へ混在させたい
+- AIアカウント、モデル、思考量、pane配置を利用者設定として切り替えたい
+- Herdrを起動せず、タスク、指示、報告、Outboxだけを管理したい
+
+一人のエージェントで完了する作業には向かない。複数ホストの常駐制御や艦隊間通信も現在の対象外である。
+
+## どれを入れるか
+
+| やりたいこと | 必要なplugin |
+|---|---|
+| Fleet Specとタスク状態だけを管理する | `agent-fleet-core` |
+| Herdr上へpaneを作り、エージェントを起動する | `agent-fleet-core`と`agent-fleet-herdr` |
+| Codexの艦隊セッションだけへ役割Hookを渡す | 上記に加えて`agent-fleet-session-hooks`をinstallし、通常時は無効化する |
+
+役割の意味は`agent-roles`、実行するAI製品とモデルはFleet Spec、画面配置はViewProfileがそれぞれ所有する。これらを一つの設定へ混ぜないことで、艦隊編成を変えずに表示方法やアカウントを交換できる。
+
+## 利用の流れ
+
+1. `agent-roles`から検査済みRole Catalogを書き出す。
+2. Fleet Specへメンバー、役割、モデルを記載する。
+3. AgentCommandProfile、Herdr LaunchProfile、ViewProfileを利用者領域へ置く。
+4. `fleet-runtime plan <launch_id>`で解決結果を確認する。
+5. `fleet-runtime start <launch_id> --execute`で艦隊を起動する。
+6. taskの報告、レビュー、managerの受け入れを状態として追跡する。
+
+たとえば、次のように依頼できる。
+
+```text
+manager 1人、worker 2人、advisor 1人、reviewer 1人の艦隊をdry-runで検査して。
+```
+
+```text
+development-squadを起動し、workerの報告後にreviewerが確認するところまで進捗を追って。
+```
+
 ## MVP境界
 
 - manager 1、worker複数、advisor任意
