@@ -66,7 +66,7 @@ role catalogは別marketplaceの`agent-roles`を使う。Coreだけを使う場�
 
 ## 依存関係
 
-外部pluginは`plugin@marketplace`のidentityで指定する。install commandではversionを固定しない。現在のFleet pluginは0.7.0であり、`roles.harness/v1`のcatalog version 1とHerdr 0.8.xのCLI surfaceを前提とする。
+外部pluginは`plugin@marketplace`のidentityで指定する。install commandではversionを固定しない。Fleetの公開バージョンはmarketplaceの定義を確認してください。`roles.harness/v1`のcatalog version 1とHerdr 0.8.xのCLI surfaceを前提とする。
 
 | 依存 | 必須度 | 用途 |
 |---|---|---|
@@ -83,6 +83,8 @@ role catalogは別marketplaceの`agent-roles`を使う。Coreだけを使う場�
 SQLiteはPython標準libraryを使うため、`sqlite3` CLIの追加installは不要である。repositoryの`bash scripts/validate.sh`を実行する開発者は、追加で`bash`、`jq`、Mike Farah `yq` v4、`rg`を用意する。
 
 ## インストール
+
+公開するインストール対象は`agent-fleet-core@agent-fleet`、`agent-fleet-herdr@agent-fleet`です。内部の処理やスキルを個別にインストールする必要はありません。
 
 先にRole CatalogとCoreをinstallする。Herdr連携を使う場合だけ、Herdr CLIとAdapterを追加する。
 
@@ -158,6 +160,40 @@ Hook登録はHerdr package内のsidecarへ閉じ、個別に配布しない。Ho
 固定実行版の対象は、CoreとHerdr連携部が実行時に必要とするentry point、Python module、schema、defaults、およびClaude用Hook登録の明示allowlistである。`fleet-runtime`自身はこれらの固定実行物を検査・選択する制御境界であり、固定実行版へは含めない。tests、SKILL、README、`__pycache__`、`.pyc`などの実行に不要なfileも含めない。一方、`python3`、Herdr 0.8.x、各AI製品のCLIと認証、Codexの`agent-fleet-herdr`名前解決は外部前提である。Codexの登録宣言は固定した`role_context.py`を起動する薄い境界だけに限り、新しいCodex paneを作る前にHerdr packageが登録済みであることを検査する。
 
 レビューはworkerが`reported`を明示した直後に始め、managerがレビュー結果と報告を照合してから`task.accept`する。したがってreviewer taskをworker taskの`depends_on`に置いて、`accepted`後までレビューを遅らせない。
+
+## 更新する
+
+GitHubから登録したmarketplaceを更新し、その公開パッケージを更新します。新規インストールと同じCodexの設定環境、Claude Codeの適用範囲を使ってください。
+
+### Codex
+
+Herdrを使わない場合、以下のHerdrの追加・更新行は実行しません。CoreとHerdrは引き続き別の公開パッケージです。
+
+```bash
+codex plugin marketplace upgrade agent-fleet
+codex plugin add agent-fleet-core@agent-fleet
+codex plugin add agent-fleet-herdr@agent-fleet
+codex plugin list
+```
+
+更新後は新しい会話で確認してください。ローカルのパスからmarketplaceを登録した場合は、Git版の更新コマンドではなく、その登録先のソースを更新してから追加し直します。
+
+### Claude Code
+
+```bash
+# インストール時に合わせてuser / project / localを選ぶ
+CLAUDE_PLUGIN_SCOPE=user
+claude plugin marketplace update agent-fleet
+claude plugin update agent-fleet-core@agent-fleet --scope "$CLAUDE_PLUGIN_SCOPE"
+claude plugin update agent-fleet-herdr@agent-fleet --scope "$CLAUDE_PLUGIN_SCOPE"
+claude plugin list
+```
+
+更新後はClaude Codeを再起動してください。`agent-roles`も、そのREADMEの手順で更新してください。
+
+marketplaceの取得と、インストール済みパッケージの更新は分けて確認します。同じバージョンとして公開された変更は、更新コマンドだけでは反映されない場合があります。「最新」と表示された場合は公開バージョンを確認し、キャッシュ内のファイルを直接編集しないでください。
+
+コマンドは2026-09-06時点のCLIヘルプと、[Codexのmarketplace管理](https://developers.openai.com/plugins/build/plugins)、[Claude Codeの更新仕様](https://code.claude.com/docs/en/plugins-reference#plugin-update)を確認しています。
 
 ## 検証
 
