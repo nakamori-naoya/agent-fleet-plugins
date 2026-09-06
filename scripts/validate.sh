@@ -256,8 +256,8 @@ bash -n "$HERDR/adapter/scripts/fleet-controller" || failed=1
 bash -n "$HERDR/adapter/scripts/fleet-runtime" || failed=1
 test -x "$HERDR/adapter/scripts/fleet-controller" || failed=1
 test -x "$HERDR/adapter/scripts/fleet-runtime" || failed=1
-rg -n '^name: control-agent-fleet$' "$CORE/SKILL.md" >/dev/null || failed=1
-rg -n '^name: provision-herdr-fleet$' "$HERDR/SKILL.md" >/dev/null || failed=1
+rg -n '^name: control-agent-fleet$' "$CORE/skills/control-agent-fleet/SKILL.md" >/dev/null || failed=1
+rg -n '^name: provision-herdr-fleet$' "$HERDR/skills/provision-herdr-fleet/SKILL.md" >/dev/null || failed=1
 
 if [ "$failed" -eq 0 ]; then
   echo 'Validation: passed (unit tests + dry-run integration)'
