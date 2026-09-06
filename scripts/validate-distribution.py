@@ -381,7 +381,9 @@ def expect_mutation_rejected(root: Path, mutation: str, expected_error: str) -> 
             shutil.rmtree(skills_root / "skills", ignore_errors=True)
             (skills_root / "SKILL.md").unlink(missing_ok=True)
         elif mutation in {"skill-zero-byte", "skill-whitespace"}:
-            skill_file = next(skills_root.rglob("SKILL.md"))
+            manifest = load_json(skills_root / ".claude-plugin/plugin.json")
+            declared_skills = resolve_declared_path(skills_root, manifest.get("skills"), "claude skills path")
+            skill_file = next(declared_skills.rglob("SKILL.md"))
             skill_file.write_text("" if mutation == "skill-zero-byte" else " \n\t\n", encoding="utf-8")
         elif mutation == "skills-intermediate-symlink":
             (skills_root / "skill-alias").symlink_to(".", target_is_directory=True)
