@@ -1,0 +1,27 @@
+apiVersion: fleet.herdr.harness/v2
+kind: ViewProfile
+metadata:
+  id: builtin/role-columns
+  version: 1
+spec:
+  constraints:
+    min_members: 3
+    max_members: 7
+  layout:
+    type: split
+    direction: horizontal
+    children:
+      - type: stack
+        id: management
+        selector:
+          role_ids: [manager]
+        weight: 34
+        direction: vertical
+        distribution: equal
+      - type: stack
+        id: members
+        selector:
+          remaining: true
+        weight: 66
+        direction: vertical
+        distribution: equal

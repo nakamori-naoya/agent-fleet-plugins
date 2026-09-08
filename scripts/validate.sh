@@ -47,20 +47,9 @@ jq -e '.name=="agent-fleet" and (.plugins|length==2) and ([.plugins[].name]|sort
   "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \
-  "$HERDR/adapter/schema/launch-profile.schema.yml" \
-  "$HERDR/adapter/schema/agent-command-profile.schema.yml" \
   "$HERDR/adapter/schema/view-profile.schema.yml" \
   "$ROOT/configs/fleets/development-squad.yml" "$ROOT/configs/fleets/quick-review.yml" \
   "$ROOT/configs/fleets/release-readiness.yml" \
-  "$ROOT/configs/herdr-launch-profiles/development-squad.yml" \
-  "$ROOT/configs/herdr-launch-profiles/development-squad-personal.yml" \
-  "$ROOT/configs/herdr-launch-profiles/development-squad-work.yml" \
-  "$ROOT/configs/herdr-launch-profiles/quick-review.yml" \
-  "$ROOT/configs/herdr-launch-profiles/release-readiness.yml" \
-  "$ROOT/configs/agent-command-profiles/codex-personal.v1.yml" \
-  "$ROOT/configs/agent-command-profiles/codex-work.v1.yml" \
-  "$ROOT/configs/agent-command-profiles/claude-personal.v1.yml" \
-  "$ROOT/configs/agent-command-profiles/claude-work.v1.yml" \
   "$ROOT/configs/view-profiles/development-focus.v1.yml" \
   "$ROOT/configs/view-profiles/review-grid.v1.yml" \
   "$ROOT/configs/view-profiles/role-columns.v1.yml"; do
@@ -77,14 +66,13 @@ python3 -m unittest discover -s "$ROOT/tests" -p 'test_*.py' >/dev/null || faile
 fleet_json=$(python3 -S "$CORE/spec/scripts/validate_fleet.py" \
   "$ROOT/configs/fleets/development-squad.yml" \
   --role-catalog "$ROLE_CATALOG" --output-json) || failed=1
-launch_profile_json=$(yq -o=json '.' "$ROOT/configs/herdr-launch-profiles/development-squad.yml") || failed=1
 view_profile_json=$(yq -o=json '.' "$ROOT/configs/view-profiles/role-columns.v1.yml") || failed=1
 if [ -n "${fleet_json:-}" ]; then
-  fleet_state="$TMP_ROOT/hook-state/fleets/development-squad"
+  fleet_state="$TMP_ROOT/hook-state/runs/development-squad-validation"
   hook_runtime_dir="$fleet_state/hook-runtimes/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   fixed_core_root="$fleet_state/execution-runtimes/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/agent-fleet-core"
-  runtime_manifest="$TMP_ROOT/hook-state/runtimes/development-squad.json"
-  mkdir -p "$hook_runtime_dir" "$fixed_core_root" "$(dirname "$runtime_manifest")" || failed=1
+  runtime_manifest="$fleet_state/manifest.json"
+  mkdir -p "$hook_runtime_dir" "$fixed_core_root" || failed=1
   cp "$HERDR/hooks/role_context.py" "$hook_runtime_dir/role_context.py" || failed=1
   cp -R "$CORE/." "$fixed_core_root/" || failed=1
   chmod 0400 "$hook_runtime_dir/role_context.py" || failed=1
@@ -99,6 +87,33 @@ if [ -n "${fleet_json:-}" ]; then
     --role-catalog "$ROLE_CATALOG" \
     > "$TMP_ROOT/core.json" || failed=1
   jq -e '.ok==true and .result.members==5 and .result.tasks==4' "$TMP_ROOT/core.json" >/dev/null || failed=1
+
+  # Two runs compiled from one definition must remain independent even when
+  # they use the same logical task IDs.
+  yq -o=json '.' "$ROOT/configs/fleets/development-squad.yml" \
+    | jq '.metadata.id="development-squad-runone"' > "$TMP_ROOT/run-one.json" || failed=1
+  yq -o=json '.' "$ROOT/configs/fleets/development-squad.yml" \
+    | jq '.metadata.id="development-squad-runtwo"' > "$TMP_ROOT/run-two.json" || failed=1
+  for run in one two; do
+    "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/run-$run.sqlite3" \
+      fleet.provision --config "$TMP_ROOT/run-$run.json" \
+      --role-catalog "$ROLE_CATALOG" >/dev/null || failed=1
+    "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/run-$run.sqlite3" task.assign \
+      --fleet "development-squad-run$run" --task architecture-advice \
+      --agent-ref advisor --manager-ref manager \
+      --command-id "assign-$run" >/dev/null || failed=1
+  done
+  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/run-one.sqlite3" task.report \
+    --fleet development-squad-runone --task architecture-advice \
+    --agent-ref advisor --status running >/dev/null || failed=1
+  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/run-one.sqlite3" task.list \
+    --fleet development-squad-runone > "$TMP_ROOT/run-one-tasks.json" || failed=1
+  "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/run-two.sqlite3" task.list \
+    --fleet development-squad-runtwo > "$TMP_ROOT/run-two-tasks.json" || failed=1
+  jq -e '.result.tasks[] | select(.task_id=="architecture-advice") | .status=="running"' \
+    "$TMP_ROOT/run-one-tasks.json" >/dev/null || failed=1
+  jq -e '.result.tasks[] | select(.task_id=="architecture-advice") | .status=="assigned"' \
+    "$TMP_ROOT/run-two-tasks.json" >/dev/null || failed=1
 
   "$CORE/core/scripts/fleet-control" --db "$TMP_ROOT/deadline.sqlite3" \
     fleet.provision --config "$ROOT/configs/fleets/development-squad.yml" \
@@ -171,11 +186,11 @@ if [ -n "${fleet_json:-}" ]; then
     "$TMP_ROOT/hook-result.json" >/dev/null || failed=1
 
   "$HERDR/adapter/scripts/fleet-herdr" --state-db "$TMP_ROOT/herdr.sqlite3" \
-    provision --fleet-json "$fleet_json" --launch-profile-json "$launch_profile_json" \
+    provision --fleet-json "$fleet_json" \
     --view-profile-json "$view_profile_json" \
     --cwd "$ROOT" \
     > "$TMP_ROOT/herdr-plan.json" || failed=1
-  jq -e '.ok==true and .result.mode=="dry-run" and .result.status=="planned" and (.result.plan.operations|length)==10 and (.result.plan.placements|length)==5' \
+  jq -e '.ok==true and .result.mode=="dry-run" and .result.status=="planned" and (.result.plan.operations|length)==15 and (.result.plan.placements|length)==5' \
     "$TMP_ROOT/herdr-plan.json" >/dev/null || failed=1
 fi
 
@@ -183,57 +198,23 @@ fi
   --role-catalog "$ROLE_CATALOG" \
   --core-command "$CORE/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
-  --launch-dir "$ROOT/configs/herdr-launch-profiles" \
-  --agent-command-profile-dir "$ROOT/configs/agent-command-profiles" \
   --profile-dir "$ROOT/configs/view-profiles" \
   --state-dir "$TMP_ROOT/runtime-state" > "$TMP_ROOT/fleet-list.json" || failed=1
-jq -e '.ok==true and (.result|length)==5 and all(.result[]; .profile_resolved==true)' \
+jq -e '.ok==true and (.result|length)==3 and all(.result[]; .profile_resolved==true)' \
   "$TMP_ROOT/fleet-list.json" >/dev/null || failed=1
-"$HERDR/adapter/scripts/fleet-runtime" plan development-squad \
+"$HERDR/adapter/scripts/fleet-runtime" plan "$ROOT/configs/fleets/development-squad.yml" \
   --role-catalog "$ROLE_CATALOG" \
   --core-command "$CORE/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
-  --launch-dir "$ROOT/configs/herdr-launch-profiles" \
-  --agent-command-profile-dir "$ROOT/configs/agent-command-profiles" \
   --profile-dir "$ROOT/configs/view-profiles" \
   --state-dir "$TMP_ROOT/runtime-state" --cwd "$ROOT" \
   > "$TMP_ROOT/fleet-plan.json" || failed=1
-jq -e '.ok==true and .result.status=="planned" and .result.profile_ref=="local/role-columns@1" and (.result.herdr.plan.placements|length)==5' \
+jq -e '.ok==true and .result.status=="planned" and .result.profile_ref=="builtin/role-columns@1" and (.result.herdr.plan.placements|length)==5' \
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
-jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.start:worker-implementation" or .id=="agent.start:worker-verification"); (.argv|index("codex")) != null and (.argv|index("gpt-5.6-sol")) != null and (.argv|index("plugins.agent-fleet-herdr@agent-fleet.enabled=true")) != null and (.argv|index("model_reasoning_effort=\"medium\"")) != null)' \
+jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.run:worker-implementation" or .id=="agent.run:worker-verification"); (.argv|join(" ")|contains("codex")) and (.argv|join(" ")|contains("your-codex-model-id")) and (.argv|join(" ")|contains("plugins.agent-fleet-herdr@agent-fleet.enabled=true")) and (.argv|join(" ")|contains("model_reasoning_effort")))' \
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
-jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.start:manager" or .id=="agent.start:advisor" or .id=="agent.start:reviewer"); (.argv|index("claude")) != null and (.argv|index("claude-fable-5-1")) != null and (.argv|index("--plugin-dir")) != null and (.argv|index("high")) != null and (.argv|index("{\"switchModelsOnFlag\":false}")) != null)' \
+jq -e 'all(.result.herdr.plan.operations[] | select(.id=="agent.run:manager" or .id=="agent.run:advisor" or .id=="agent.run:reviewer"); (.argv|join(" ")|contains("claude")) and (.argv|join(" ")|contains("your-claude-model-id")) and (.argv|join(" ")|contains("--plugin-dir")) and (.argv|join(" ")|contains("switchModelsOnFlag")))' \
   "$TMP_ROOT/fleet-plan.json" >/dev/null || failed=1
-
-"$HERDR/adapter/scripts/fleet-runtime" plan development-squad-personal \
-  --role-catalog "$ROLE_CATALOG" \
-  --core-command "$CORE/core/scripts/fleet-control" \
-  --fleet-dir "$ROOT/configs/fleets" \
-  --launch-dir "$ROOT/configs/herdr-launch-profiles" \
-  --agent-command-profile-dir "$ROOT/configs/agent-command-profiles" \
-  --profile-dir "$ROOT/configs/view-profiles" \
-  --state-dir "$TMP_ROOT/runtime-state" --cwd "$ROOT" \
-  > "$TMP_ROOT/personal-fleet-plan.json" || failed=1
-jq -e '.ok==true and .result.agent_command_profiles.manager.command=="claude-personal" and .result.agent_command_profiles["worker-implementation"].command=="codex-personal"' \
-  "$TMP_ROOT/personal-fleet-plan.json" >/dev/null || failed=1
-python3 - "$TMP_ROOT/personal-fleet-plan.json" <<'PY' || failed=1
-import json, shlex, sys
-plan = json.load(open(sys.argv[1]))
-runs = {operation["id"].split(":", 1)[1]: operation["argv"]
-        for operation in plan["result"]["herdr"]["plan"]["operations"]
-        if operation["id"].startswith("agent.run:")}
-assert set(runs) == {"manager", "advisor", "reviewer", "worker-implementation", "worker-verification"}
-for member, argv in runs.items():
-    assert len(argv) == 5, argv
-    args = shlex.split(argv[4])
-    claude = member in {"manager", "advisor", "reviewer"}
-    assert args[0] == ("claude-personal" if claude else "codex-personal")
-    assert args[args.index("--model") + 1] == ("claude-fable-5-1" if claude else "gpt-5.6-sol")
-    if claude:
-        assert json.loads(args[args.index("--settings") + 1]) == {"switchModelsOnFlag": False}
-    else:
-        assert 'model_reasoning_effort="medium"' in args
-PY
 test ! -e "$TMP_ROOT/runtime-state" || failed=1
 
 mkdir -p "$TMP_ROOT/separate/core" "$TMP_ROOT/separate/herdr"
@@ -243,11 +224,9 @@ cp -R "$HERDR/." "$TMP_ROOT/separate/herdr/"
   --role-catalog "$ROLE_CATALOG" \
   --core-command "$TMP_ROOT/separate/core/core/scripts/fleet-control" \
   --fleet-dir "$ROOT/configs/fleets" \
-  --launch-dir "$ROOT/configs/herdr-launch-profiles" \
-  --agent-command-profile-dir "$ROOT/configs/agent-command-profiles" \
   --profile-dir "$ROOT/configs/view-profiles" \
   --state-dir "$TMP_ROOT/separate-state" > "$TMP_ROOT/separate-list.json" || failed=1
-jq -e '.ok==true and (.result|length)==5' "$TMP_ROOT/separate-list.json" >/dev/null || failed=1
+jq -e '.ok==true and (.result|length)==3' "$TMP_ROOT/separate-list.json" >/dev/null || failed=1
 test ! -e "$TMP_ROOT/separate-state" || failed=1
 
 bash -n "$CORE/core/scripts/fleet-control" || failed=1

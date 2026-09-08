@@ -235,18 +235,17 @@ def _fleet_state_root() -> Path:
     ):
         raise ActivationError("固定Hookが艦隊stateの内容address付き配置にありません。")
     fleet_state = resolved.parents[2]
-    if fleet_state.parent.name != "fleets":
+    if fleet_state.parent.name != "runs":
         raise ActivationError("固定Hookの艦隊state境界を確認できません。")
     return fleet_state
 
 
 def _runtime_manifest(fleet_state: Path) -> Mapping[str, Any]:
-    state_root = fleet_state.parents[1]
-    manifest_path = state_root / "runtimes" / f"{fleet_state.name}.json"
+    manifest_path = fleet_state / "manifest.json"
     trusted_manifest = _trusted_regular_path(
         str(manifest_path),
         "現在の艦隊runtime manifest",
-        allowed_root=state_root / "runtimes",
+        allowed_root=fleet_state,
         private=True,
     )
     try:

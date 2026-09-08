@@ -48,8 +48,8 @@ class FleetValidatorTest(unittest.TestCase):
 
     def test_member_runtime_requires_supported_product_model_and_effort(self) -> None:
         for product, model in (
-            ("codex", "gpt-5.6-sol"),
-            ("claude", "claude-fable-5-1"),
+            ("codex", "codex-model"),
+            ("claude", "claude-model"),
         ):
             with self.subTest(product=product):
                 errors = self.errors_for(
@@ -59,6 +59,7 @@ class FleetValidatorTest(unittest.TestCase):
                         "runtime",
                         {
                             "product": selected_product,
+                            "command": selected_product,
                             "model": selected_model,
                             "effort": "medium",
                             "fallback": "fail",
@@ -97,18 +98,45 @@ class FleetValidatorTest(unittest.TestCase):
             errors,
         )
 
-    def test_member_runtime_is_required_and_legacy_top_level_model_is_rejected(self) -> None:
+    def test_member_runtime_is_required_and_top_level_model_is_rejected(self) -> None:
         errors = self.errors_for(
             lambda doc: doc["spec"]["members"][0].pop("runtime")
         )
         self.assertIn("spec.members[0].runtime: is required", errors)
 
-        def use_legacy_model(doc):
+        def use_top_level_model(doc):
             member = doc["spec"]["members"][0]
             member["model"] = member.pop("runtime")["model"]
 
-        errors = self.errors_for(use_legacy_model)
+        errors = self.errors_for(use_top_level_model)
         self.assertIn("spec.members[0].model: is not allowed", errors)
+
+    def test_runtime_requires_a_safe_command(self) -> None:
+        def use_custom_command(doc):
+            doc["spec"]["view_profile"] = "./custom-view.yml"
+            doc["spec"]["codex_hook_trust"] = "preapproved"
+            for member in doc["spec"]["members"]:
+                member["runtime"]["command"] = "codex-wrapper"
+
+        self.assertEqual([], self.errors_for(use_custom_command))
+
+        def missing_command(doc):
+            use_custom_command(doc)
+            doc["spec"]["members"][0]["runtime"].pop("command")
+
+        self.assertIn(
+            "spec.members[0].runtime.command: is required",
+            self.errors_for(missing_command),
+        )
+
+        def unsafe_command(doc):
+            use_custom_command(doc)
+            doc["spec"]["members"][0]["runtime"]["command"] = "codex --unsafe"
+
+        self.assertIn(
+            "spec.members[0].runtime.command: must be one shell command name or an absolute executable path",
+            self.errors_for(unsafe_command),
+        )
 
     def test_fleet_rejects_herdr_runtime_and_view_configuration(self) -> None:
         def add_adapter_configuration(doc):
@@ -123,16 +151,11 @@ class FleetValidatorTest(unittest.TestCase):
         self.assertIn("spec.runtime: is not allowed", errors)
         self.assertIn("spec.view: is not allowed", errors)
 
-    def test_legacy_v1_accepts_adapter_fields_during_migration(self) -> None:
-        def use_legacy_contract(doc):
-            doc["apiVersion"] = "fleet.harness/v1"
-            doc["spec"]["runtime"] = {
-                "provider": "herdr",
-                "codex_hook_trust": "preapproved",
-            }
-            doc["spec"]["view"] = {"profile_ref": "local/review-grid@1"}
-
-        self.assertEqual([], self.errors_for(use_legacy_contract))
+    def test_other_api_versions_are_rejected(self) -> None:
+        errors = self.errors_for(
+            lambda doc: doc.__setitem__("apiVersion", "fleet.harness/unsupported")
+        )
+        self.assertIn("$.apiVersion: must be 'fleet.harness/v3'", errors)
 
     def test_requires_fleet_and_task_completion_contracts(self) -> None:
         def mutate(doc):
@@ -171,7 +194,7 @@ class FleetValidatorTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("", result.stderr)
         normalized = json.loads(result.stdout)
-        self.assertEqual("fleet.harness/v2", normalized["apiVersion"])
+        self.assertEqual("fleet.harness/v3", normalized["apiVersion"])
         self.assertEqual("Fleet", normalized["kind"])
         self.assertEqual("release-readiness", normalized["metadata"]["id"])
         self.assertEqual("manager-1", normalized["spec"]["members"][0]["agent_ref"])

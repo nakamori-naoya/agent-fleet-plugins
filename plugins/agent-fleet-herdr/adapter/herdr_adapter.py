@@ -11,6 +11,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -25,8 +26,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
-from agent_command_profiles import COMMAND_PATTERN, PROFILE_REF_PATTERN
-from launch_profiles import validate_document as validate_launch_profile
 from view_profiles import (
     ViewProfileError,
     profile_identity,
@@ -194,14 +193,6 @@ class AdapterState:
                 parent.chmod(0o700)
         with self.connect() as db:
             db.executescript(ADAPTER_SCHEMA)
-            placement_columns = {
-                row[1] for row in db.execute("PRAGMA table_info(view_placements)")
-            }
-            if "profile_ref" not in placement_columns:
-                db.execute(
-                    "ALTER TABLE view_placements ADD COLUMN profile_ref TEXT NOT NULL "
-                    "DEFAULT 'legacy/unversioned@1'"
-                )
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -677,6 +668,15 @@ class Herdr08Commands:
     def pane_get(self, pane_id: str) -> list[str]:
         return [self.binary, "pane", "get", safe_token(pane_id, "pane_id")]
 
+    def pane_layout(self, pane_id: str) -> list[str]:
+        return [
+            self.binary,
+            "pane",
+            "layout",
+            "--pane",
+            safe_token(pane_id, "pane_id"),
+        ]
+
     def agent_prompt(
         self,
         pane_id: str,
@@ -742,11 +742,10 @@ class HerdrAdapter:
         str,
         tuple[tuple[str, str], ...],
         Mapping[str, Mapping[str, str]],
-        Mapping[str, str],
     ]:
         api_version = fleet.get("apiVersion")
-        if api_version not in {"fleet.harness/v1", "fleet.harness/v2"} or fleet.get("kind") != "Fleet":
-            raise HerdrAdapterError("provision requires a supported Fleet document")
+        if api_version != "fleet.harness/v3" or fleet.get("kind") != "Fleet":
+            raise HerdrAdapterError("provision requires a fleet.harness/v3 Fleet document")
         metadata = fleet.get("metadata")
         fleet_spec = fleet.get("spec")
         if not isinstance(metadata, Mapping) or not isinstance(fleet_spec, Mapping):
@@ -763,12 +762,6 @@ class HerdrAdapter:
             raise HerdrAdapterError("Fleet spec.members must be a list")
         if not isinstance(collaboration, Mapping):
             raise HerdrAdapterError("Fleet spec.collaboration must be a JSON object")
-        if api_version == "fleet.harness/v2" and (
-            "runtime" in fleet_spec or "view" in fleet_spec
-        ):
-            raise HerdrAdapterError(
-                "portable Fleet v2 must not contain adapter runtime or view configuration"
-            )
         manager_ref = collaboration.get("manager")
         if not isinstance(manager_ref, str) or not manager_ref:
             raise HerdrAdapterError("Fleet spec.collaboration.manager must be an agent_ref")
@@ -776,7 +769,6 @@ class HerdrAdapter:
         refs: list[str] = []
         member_roles: list[tuple[str, str]] = []
         member_runtimes: dict[str, Mapping[str, str]] = {}
-        models: dict[str, str] = {}
         for index, member in enumerate(members):
             if not isinstance(member, Mapping):
                 raise HerdrAdapterError(f"Fleet spec.members[{index}] must be a JSON object")
@@ -801,13 +793,9 @@ class HerdrAdapter:
             refs.append(agent_ref)
             member_roles.append((agent_ref, role_ref))
             member_runtime = member.get("runtime")
-            if api_version == "fleet.harness/v2" and member_runtime is None:
+            if member_runtime is None:
                 raise HerdrAdapterError(
-                    f"Fleet spec.members[{index}].runtime is required for portable Fleet v2"
-                )
-            if api_version == "fleet.harness/v2" and "model" in member:
-                raise HerdrAdapterError(
-                    f"Fleet spec.members[{index}].model is legacy; use runtime.model"
+                    f"Fleet spec.members[{index}].runtime is required"
                 )
             if member_runtime is not None:
                 if not isinstance(member_runtime, Mapping):
@@ -815,12 +803,17 @@ class HerdrAdapter:
                         f"Fleet spec.members[{index}].runtime must be a JSON object"
                     )
                 product = member_runtime.get("product")
+                command = member_runtime.get("command")
                 model = member_runtime.get("model")
                 effort = member_runtime.get("effort")
                 fallback = member_runtime.get("fallback")
                 if product not in {"claude", "codex"}:
                     raise HerdrAdapterError(
                         f"Fleet spec.members[{index}].runtime.product must be claude or codex"
+                    )
+                if not isinstance(command, str) or not command.strip():
+                    raise HerdrAdapterError(
+                        f"Fleet spec.members[{index}].runtime.command must be a non-empty string"
                     )
                 if not isinstance(model, str) or not model.strip():
                     raise HerdrAdapterError(
@@ -836,20 +829,14 @@ class HerdrAdapter:
                     )
                 member_runtimes[agent_ref] = {
                     "product": product,
+                    "command": command,
                     "model": model,
                     "effort": effort,
                     "fallback": fallback,
                 }
-            model = member.get("model")
-            if model is not None:
-                if not isinstance(model, str) or not model.strip():
-                    raise HerdrAdapterError(
-                        f"Fleet spec.members[{index}].model must be a non-empty string"
-                    )
-                models[agent_ref] = model
         if refs.count(manager_ref) != 1:
             raise HerdrAdapterError("Fleet must contain exactly one declared manager member")
-        return fleet_id, manager_ref, tuple(member_roles), member_runtimes, models
+        return fleet_id, manager_ref, tuple(member_roles), member_runtimes
 
     def plan_provision(
         self,
@@ -857,77 +844,26 @@ class HerdrAdapter:
         cwd: str,
         agent_kind: str,
         view_profile: Mapping[str, Any],
-        launch_profile: Mapping[str, Any],
         agent_environment: Mapping[str, str] | None = None,
-        agent_command_profiles: Mapping[str, Any] | None = None,
     ) -> ProvisionPlan:
         (
             fleet_id,
             manager_ref,
             members,
             member_runtimes,
-            models,
         ) = self._fleet_parts(fleet)
-        if models and agent_kind not in {"claude", "codex"}:
-            raise HerdrAdapterError(
-                f"per-member model selection is not supported for agent kind {agent_kind!r}"
-            )
-
-        command_profiles = dict(agent_command_profiles or {})
-        member_products = {
-            agent_ref: member_runtimes.get(agent_ref, {}).get("product", agent_kind)
-            for agent_ref, _ in members
-        }
-        member_refs = set(member_products)
-        for agent_ref, profile in command_profiles.items():
-            if agent_ref not in member_refs:
-                raise HerdrAdapterError(
-                    f"AgentCommandProfile targets unknown Fleet member {agent_ref!r}"
-                )
-            if not isinstance(profile, Mapping):
-                raise HerdrAdapterError(
-                    f"AgentCommandProfile for {agent_ref!r} must be a JSON object"
-                )
-            unknown = set(profile) - {"profile_ref", "product", "command"}
-            if unknown:
-                raise HerdrAdapterError(
-                    f"AgentCommandProfile for {agent_ref!r} has unsupported fields: "
-                    + ", ".join(sorted(unknown))
-                )
-            profile_ref = profile.get("profile_ref")
-            product = profile.get("product")
-            command = profile.get("command")
-            if (
-                not isinstance(profile_ref, str)
-                or PROFILE_REF_PATTERN.fullmatch(profile_ref) is None
-            ):
-                raise HerdrAdapterError(
-                    f"AgentCommandProfile for {agent_ref!r} has an invalid profile_ref"
-                )
-            if product != member_products[agent_ref]:
-                raise HerdrAdapterError(
-                    f"AgentCommandProfile product for {agent_ref!r} does not match "
-                    "Fleet runtime product"
-                )
-            if (
-                not isinstance(command, str)
-                or COMMAND_PATTERN.fullmatch(command) is None
-            ):
-                raise HerdrAdapterError(
-                    f"AgentCommandProfile for {agent_ref!r} has an invalid command"
-                )
-
-        hook_trust = "review"
+        fleet_spec = fleet["spec"]
+        hook_trust = str(fleet_spec.get("codex_hook_trust", "review"))
         provision_environment = dict(agent_environment or {})
         configured_products = {
             runtime["product"] for runtime in member_runtimes.values()
         }
-        if not member_runtimes or "codex" in configured_products:
+        if "codex" in configured_products:
             provision_environment["AGENT_FLEET_CODEX_HOOK_TRUST"] = hook_trust
 
         def member_execution(agent_ref: str) -> tuple[str, tuple[str, ...]]:
-            configured = member_runtimes.get(agent_ref)
-            product = configured["product"] if configured is not None else agent_kind
+            configured = member_runtimes[agent_ref]
+            product = configured["product"]
             args: list[str] = []
             if product == "codex":
                 args.extend(["--config", CODEX_SESSION_HOOK_PLUGIN_CONFIG])
@@ -939,38 +875,25 @@ class HerdrAdapter:
                 raise HerdrAdapterError(
                     f"Fleet member {agent_ref!r} has unsupported agent product {product!r}"
                 )
-            model = configured["model"] if configured is not None else models.get(agent_ref)
-            if model:
-                args.extend(["--model", model])
-            if configured is not None:
-                effort = configured["effort"]
-                if product == "claude":
-                    args.extend(["--effort", effort])
-                    if configured["fallback"] == "fail":
-                        args.extend(["--settings", '{"switchModelsOnFlag":false}'])
-                else:
-                    args.extend(["--config", f'model_reasoning_effort="{effort}"'])
+            args.extend(["--model", configured["model"]])
+            effort = configured["effort"]
+            if product == "claude":
+                args.extend(["--effort", effort])
+                if configured["fallback"] == "fail":
+                    args.extend(["--settings", '{"switchModelsOnFlag":false}'])
+            else:
+                args.extend(["--config", f'model_reasoning_effort="{effort}"'])
             return product, tuple(args)
 
         def agent_operations(
             agent_ref: str, pane_ref: str
         ) -> list[Mapping[str, Any]]:
-            product, args = member_execution(agent_ref)
-            profile = command_profiles.get(agent_ref)
-            if profile is None:
-                return [
-                    {
-                        "id": f"agent.start:{agent_ref}",
-                        "argv": self.commands.agent_start(
-                            agent_ref, product, pane_ref, args
-                        ),
-                    }
-                ]
+            _, args = member_execution(agent_ref)
             return [
                 {
                     "id": f"agent.run:{agent_ref}",
                     "argv": self.commands.agent_run(
-                        str(profile["command"]), pane_ref, args
+                        str(member_runtimes[agent_ref]["command"]), pane_ref, args
                     ),
                 },
                 {
@@ -986,34 +909,6 @@ class HerdrAdapter:
         except ViewProfileError as exc:
             raise HerdrAdapterError(str(exc)) from exc
         profile_ref = resolved_profile_ref
-        launch_errors = validate_launch_profile(launch_profile)
-        if launch_errors:
-            raise HerdrAdapterError(
-                "invalid LaunchProfile: " + "; ".join(launch_errors)
-            )
-        launch_spec = launch_profile["spec"]
-        if launch_spec["fleet_ref"] != fleet_id:
-            raise HerdrAdapterError(
-                "LaunchProfile fleet_ref does not match Fleet metadata.id"
-            )
-        if launch_spec["view_profile_ref"] != profile_ref:
-            raise HerdrAdapterError(
-                "LaunchProfile view_profile_ref does not match ViewProfile identity"
-            )
-        requested_command_profiles = dict(
-            launch_spec.get("agent_command_profiles", {})
-        )
-        actual_command_profile_refs = {
-            agent_ref: profile["profile_ref"]
-            for agent_ref, profile in command_profiles.items()
-        }
-        if requested_command_profiles != actual_command_profile_refs:
-            raise HerdrAdapterError(
-                "resolved AgentCommandProfiles do not match LaunchProfile references"
-            )
-        hook_trust = launch_spec["codex_hook_trust"]
-        if not member_runtimes or "codex" in configured_products:
-            provision_environment["AGENT_FLEET_CODEX_HOOK_TRUST"] = hook_trust
         profile_spec = view_profile["spec"]
         constraints = profile_spec["constraints"]
         member_count = len(members)
@@ -1092,16 +987,9 @@ class HerdrAdapter:
         placements: list[Mapping[str, Any]] = []
         placement_order = 0
         total_weight = sum(group.weight for group in groups)
-        legacy_view_profile = (
-            view_profile["apiVersion"] == "fleet.herdr.harness/v1"
-        )
         for group in groups:
             for position, agent_ref in enumerate(group.member_refs, 1):
-                pane_slot = (
-                    group.group_id
-                    if legacy_view_profile and agent_ref == manager_ref
-                    else f"{group.group_id}.{position}"
-                )
+                pane_slot = f"{group.group_id}.{position}"
                 placements.append(
                     {
                         "agent_ref": agent_ref,
@@ -1121,12 +1009,10 @@ class HerdrAdapter:
         composition_hash = content_hash(
             {
                 "fleet": fleet,
-                "launch_profile": launch_profile,
                 "view_profile": view_profile,
                 "cwd": cwd,
                 "agent_kind": agent_kind,
                 "agent_environment": provision_environment,
-                "agent_command_profiles": command_profiles,
             }
         )
         return ProvisionPlan(
@@ -1259,6 +1145,177 @@ class HerdrAdapter:
             )
         return safe_token(pane_id, "pane split ID")
 
+    def _validate_executed_layout(
+        self,
+        plan: ProvisionPlan,
+        workspace_id: str,
+        tab_id: str,
+        pane_ids: Mapping[str, str],
+    ) -> Mapping[str, Any]:
+        root_pane_id = pane_ids["$workspace.root_pane"]
+        completed = self._execute_argv(
+            self.commands.pane_layout(root_pane_id),
+            "herdr pane layout validation",
+        )
+        value = self._json_value(completed.stdout, "herdr pane layout")
+        result = value.get("result") if isinstance(value, Mapping) else None
+        layout = result.get("layout") if isinstance(result, Mapping) else None
+        if not isinstance(layout, Mapping):
+            raise HerdrAdapterError(
+                "Herdr pane layout did not return layout geometry; bindings were not saved"
+            )
+        if layout.get("workspace_id") != workspace_id or layout.get("tab_id") != tab_id:
+            raise HerdrAdapterError(
+                "Herdr pane layout belongs to a different workspace or tab; bindings were not saved"
+            )
+        if layout.get("zoomed") is not False:
+            raise HerdrAdapterError(
+                "Herdr pane layout is zoomed and cannot be validated; bindings were not saved"
+            )
+
+        observed_panes = layout.get("panes")
+        expected_ids = set(pane_ids.values())
+        if not isinstance(observed_panes, list) or len(observed_panes) != len(plan.member_refs):
+            raise HerdrAdapterError(
+                "Herdr pane count does not match Fleet member count; bindings were not saved"
+            )
+        observed_ids = {
+            pane.get("pane_id")
+            for pane in observed_panes
+            if isinstance(pane, Mapping)
+        }
+        if observed_ids != expected_ids or len(observed_ids) != len(observed_panes):
+            raise HerdrAdapterError(
+                "Herdr panes do not match the Fleet member bindings one-to-one; bindings were not saved"
+            )
+
+        area = layout.get("area")
+        rects: list[tuple[int, int, int, int]] = []
+        observed_rects: dict[str, tuple[int, int, int, int]] = {}
+        if not isinstance(area, Mapping):
+            raise HerdrAdapterError("Herdr layout area is missing; bindings were not saved")
+        try:
+            area_x = int(area["x"])
+            area_y = int(area["y"])
+            area_width = int(area["width"])
+            area_height = int(area["height"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HerdrAdapterError(
+                "Herdr layout area is invalid; bindings were not saved"
+            ) from exc
+        if area_width <= 0 or area_height <= 0:
+            raise HerdrAdapterError(
+                "Herdr layout width and height must be positive; bindings were not saved"
+            )
+        for pane in observed_panes:
+            rect = pane.get("rect") if isinstance(pane, Mapping) else None
+            if not isinstance(rect, Mapping):
+                raise HerdrAdapterError(
+                    "Herdr pane rectangle is missing; bindings were not saved"
+                )
+            try:
+                x = int(rect["x"])
+                y = int(rect["y"])
+                width = int(rect["width"])
+                height = int(rect["height"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise HerdrAdapterError(
+                    "Herdr pane rectangle is invalid; bindings were not saved"
+                ) from exc
+            if (
+                width <= 0
+                or height <= 0
+                or x < area_x
+                or y < area_y
+                or x + width > area_x + area_width
+                or y + height > area_y + area_height
+            ):
+                raise HerdrAdapterError(
+                    "Herdr pane width, height, or position is outside the layout; bindings were not saved"
+                )
+            rects.append((x, y, width, height))
+            observed_rects[str(pane["pane_id"])] = (x, y, width, height)
+        for index, (x, y, width, height) in enumerate(rects):
+            for other_x, other_y, other_width, other_height in rects[index + 1 :]:
+                if (
+                    x < other_x + other_width
+                    and other_x < x + width
+                    and y < other_y + other_height
+                    and other_y < y + height
+                ):
+                    raise HerdrAdapterError(
+                        "Herdr pane rectangles overlap; bindings were not saved"
+                    )
+        if sum(width * height for _, _, width, height in rects) != area_width * area_height:
+            raise HerdrAdapterError(
+                "Herdr pane widths and heights do not cover the requested layout; bindings were not saved"
+            )
+
+        expected_splits = [
+            operation
+            for operation in plan.operations
+            if str(operation["id"]).startswith("pane.split:")
+        ]
+        expected_rects: dict[str, tuple[int, int, int, int]] = {
+            root_pane_id: (area_x, area_y, area_width, area_height)
+        }
+        for operation in expected_splits:
+            argv = list(operation["argv"])
+            target_token = str(argv[3])
+            produces = operation.get("produces")
+            if (
+                target_token not in pane_ids
+                or not isinstance(produces, list)
+                or len(produces) != 1
+                or str(produces[0]) not in pane_ids
+            ):
+                raise HerdrAdapterError(
+                    "Herdr split plan cannot be mapped to pane IDs; bindings were not saved"
+                )
+            target_id = pane_ids[target_token]
+            new_id = pane_ids[str(produces[0])]
+            if target_id not in expected_rects:
+                raise HerdrAdapterError(
+                    "Herdr split target has no expected rectangle; bindings were not saved"
+                )
+            x, y, width, height = expected_rects[target_id]
+            direction = str(argv[argv.index("--direction") + 1])
+            ratio = float(argv[argv.index("--ratio") + 1])
+            if direction == "right":
+                retained = math.floor(width * ratio + 0.5)
+                expected_rects[target_id] = (x, y, retained, height)
+                expected_rects[new_id] = (x + retained, y, width - retained, height)
+            elif direction == "down":
+                retained = math.floor(height * ratio + 0.5)
+                expected_rects[target_id] = (x, y, width, retained)
+                expected_rects[new_id] = (x, y + retained, width, height - retained)
+            else:
+                raise HerdrAdapterError(
+                    f"unsupported Herdr split direction {direction!r}; bindings were not saved"
+                )
+        if observed_rects != expected_rects:
+            raise HerdrAdapterError(
+                "Herdr pane x/y/width/height do not match the ViewProfile split plan; "
+                "bindings were not saved"
+            )
+        observed_splits = layout.get("splits")
+        if not isinstance(observed_splits, list) or len(observed_splits) != len(expected_splits):
+            raise HerdrAdapterError(
+                "Herdr split count does not match the ViewProfile; bindings were not saved"
+            )
+        for expected, observed in zip(expected_splits, observed_splits):
+            if not isinstance(observed, Mapping):
+                raise HerdrAdapterError(
+                    "Herdr split geometry is invalid; bindings were not saved"
+                )
+            argv = list(expected["argv"])
+            direction = argv[argv.index("--direction") + 1]
+            if observed.get("direction") != direction:
+                raise HerdrAdapterError(
+                    "Herdr split direction does not match the ViewProfile; bindings were not saved"
+                )
+        return layout
+
     def _execute_argv(
         self,
         argv: Sequence[str],
@@ -1350,20 +1407,16 @@ class HerdrAdapter:
         cwd: str,
         agent_kind: str,
         view_profile: Mapping[str, Any],
-        launch_profile: Mapping[str, Any],
         *,
         execute: bool = False,
         agent_environment: Mapping[str, str] | None = None,
-        agent_command_profiles: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         plan = self.plan_provision(
             fleet,
             cwd,
             agent_kind,
             view_profile,
-            launch_profile,
             agent_environment,
-            agent_command_profiles,
         )
         with self.state.fleet_lock(plan.fleet_id):
             return self._provision_locked(plan, execute=execute)
@@ -1425,7 +1478,7 @@ class HerdrAdapter:
             if observed_composition_hash != plan.composition_hash:
                 raise HerdrAdapterError(
                     f"composition conflict for fleet {plan.fleet_id!r}; "
-                    "deprovision it before changing Fleet, LaunchProfile, ViewProfile, "
+                    "deprovision it before changing Fleet, ViewProfile, "
                     "working directory, or agent launch settings"
                 )
             if (
@@ -1482,6 +1535,27 @@ class HerdrAdapter:
                 pane_ids[f"$pane:{worker_ref}"] = pane_id
                 binding_panes[worker_ref] = pane_id
 
+        try:
+            verified_layout = self._validate_executed_layout(
+                plan, workspace_id, tab_id, pane_ids
+            )
+        except HerdrAdapterError as layout_error:
+            cleanup_error: HerdrAdapterError | None = None
+            try:
+                self._execute_argv(
+                    self.commands.workspace_close(workspace_id),
+                    "close Fleet workspace after layout validation failure",
+                )
+            except HerdrAdapterError as exc:
+                cleanup_error = exc
+            finally:
+                self.state.clear_fleet(plan.fleet_id)
+            if cleanup_error is not None:
+                raise HerdrAdapterError(
+                    f"{layout_error}; workspace cleanup also failed: {cleanup_error}"
+                ) from layout_error
+            raise
+
         ordered_refs = plan.member_refs
         bindings = [
             RuntimeBinding(
@@ -1505,6 +1579,7 @@ class HerdrAdapter:
             "workspace_id": workspace_id,
             "tab_id": tab_id,
             "bindings": [binding.__dict__ for binding in bindings],
+            "verified_layout": dict(verified_layout),
             "plan": plan.as_dict(),
         }
 
@@ -1720,8 +1795,6 @@ def build_parser() -> argparse.ArgumentParser:
     provision = sub.add_parser("provision")
     provision.add_argument("--fleet-json", type=json_object, required=True)
     provision.add_argument("--view-profile-json", type=json_object, required=True)
-    provision.add_argument("--launch-profile-json", type=json_object, required=True)
-    provision.add_argument("--agent-command-profiles-json", type=json_object, default={})
     provision.add_argument("--cwd", required=True)
     provision.add_argument("--agent-kind", default="codex", help=argparse.SUPPRESS)
     provision.add_argument("--agent-core-command")
@@ -1796,9 +1869,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.cwd,
                 args.agent_kind,
                 args.view_profile_json,
-                args.launch_profile_json,
                 provision_environment,
-                args.agent_command_profiles_json,
             )
         if args.action in {"provision", "deprovision"} and not args.execute:
             state = (
@@ -1817,10 +1888,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.cwd,
                 args.agent_kind,
                 args.view_profile_json,
-                args.launch_profile_json,
                 execute=args.execute,
                 agent_environment=provision_environment,
-                agent_command_profiles=args.agent_command_profiles_json,
             )
         elif args.action == "deprovision":
             result = adapter.deprovision(args.fleet, execute=args.execute)

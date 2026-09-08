@@ -21,10 +21,10 @@ class FleetLoadError(Exception):
 ROLE_REF_PATTERN = re.compile(
     r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*@[1-9][0-9]*$"
 )
-VIEW_PROFILE_REF_PATTERN = re.compile(
-    r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:/[a-z][a-z0-9]*(?:-[a-z0-9]+)*)?@[1-9][0-9]*$"
-)
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+COMMAND_PATTERN = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_.+-]*|/(?:[A-Za-z0-9_.+-]+/)*[A-Za-z0-9_.+-]+)$"
+)
 
 
 def _load_with_ruby(path: Path) -> Any:
@@ -156,14 +156,16 @@ def _members(value: Any, errors: list[str]) -> dict[str, str]:
             runtime_path = f"{member_path}.runtime"
             runtime = _mapping(member["runtime"], runtime_path, errors)
             if runtime is not None:
+                runtime_required = {"product", "command", "model", "effort", "fallback"}
+                runtime_allowed = set(runtime_required)
                 _keys(
                     runtime,
                     runtime_path,
-                    {"product", "model", "effort", "fallback"},
-                    {"product", "model", "effort", "fallback"},
+                    runtime_required,
+                    runtime_allowed,
                     errors,
                 )
-                for field in ("product", "model", "effort", "fallback"):
+                for field in ("product", "model", "effort", "fallback", "command"):
                     if field in runtime:
                         _string(runtime[field], f"{runtime_path}.{field}", errors)
                 product = runtime.get("product")
@@ -189,6 +191,16 @@ def _members(value: Any, errors: list[str]) -> dict[str, str]:
                 }:
                     errors.append(
                         f"{runtime_path}.fallback: must be 'fail' or 'product-default'"
+                    )
+                command = runtime.get("command")
+                if (
+                    command is not None
+                    and _non_empty_string(command)
+                    and COMMAND_PATTERN.fullmatch(command) is None
+                ):
+                    errors.append(
+                        f"{runtime_path}.command: must be one shell command name "
+                        "or an absolute executable path"
                     )
         agent_ref = member.get("agent_ref")
         if _non_empty_string(agent_ref):
@@ -359,41 +371,6 @@ def _collaboration(
         errors.append(f"{reporting_path}.include_task_updates: must be a boolean")
 
 
-def _legacy_runtime(value: Any, errors: list[str]) -> None:
-    path = "spec.runtime"
-    runtime = _mapping(value, path, errors)
-    if runtime is None:
-        return
-    _keys(runtime, path, {"provider"}, {"provider", "codex_hook_trust"}, errors)
-    if "provider" in runtime:
-        _string(runtime.get("provider"), f"{path}.provider", errors)
-    hook_trust = runtime.get("codex_hook_trust")
-    if "codex_hook_trust" in runtime and hook_trust not in {
-        "preapproved",
-        "review",
-    }:
-        errors.append(
-            f"{path}.codex_hook_trust: must be 'preapproved' or 'review'"
-        )
-
-
-def _legacy_view(value: Any, errors: list[str]) -> None:
-    path = "spec.view"
-    view = _mapping(value, path, errors)
-    if view is None:
-        return
-    _keys(view, path, {"profile_ref"}, {"profile_ref"}, errors)
-    profile_ref = view.get("profile_ref")
-    if "profile_ref" in view:
-        _string(profile_ref, f"{path}.profile_ref", errors)
-    if _non_empty_string(profile_ref) and not VIEW_PROFILE_REF_PATTERN.fullmatch(
-        profile_ref
-    ):
-        errors.append(
-            f"{path}.profile_ref: must match '<namespace/>name@<positive-version>'"
-        )
-
-
 def validate_document(document: Any) -> list[str]:
     """Return deterministic diagnostics; an empty list means valid."""
     errors: list[str] = []
@@ -408,8 +385,8 @@ def validate_document(document: Any) -> list[str]:
         errors,
     )
     api_version = root.get("apiVersion")
-    if api_version not in {"fleet.harness/v1", "fleet.harness/v2"}:
-        errors.append("$.apiVersion: must be 'fleet.harness/v1' or 'fleet.harness/v2'")
+    if api_version != "fleet.harness/v3":
+        errors.append("$.apiVersion: must be 'fleet.harness/v3'")
     if root.get("kind") != "Fleet":
         errors.append("$.kind: must be 'Fleet'")
 
@@ -422,7 +399,6 @@ def validate_document(document: Any) -> list[str]:
     fleet_spec = _mapping(root.get("spec"), "spec", errors)
     if fleet_spec is None:
         return errors
-    adapter_fields = {"runtime", "view"} if api_version == "fleet.harness/v1" else set()
     _keys(
         fleet_spec,
         "spec",
@@ -441,7 +417,8 @@ def validate_document(document: Any) -> list[str]:
             "members",
             "tasks",
             "collaboration",
-            *adapter_fields,
+            "view_profile",
+            "codex_hook_trust",
         },
         errors,
     )
@@ -456,11 +433,13 @@ def validate_document(document: Any) -> list[str]:
     members_by_ref = _members(fleet_spec.get("members"), errors)
     _tasks(fleet_spec.get("tasks"), members_by_ref, errors)
     _collaboration(fleet_spec.get("collaboration"), members_by_ref, errors)
-    if api_version == "fleet.harness/v1":
-        if "runtime" in fleet_spec:
-            _legacy_runtime(fleet_spec.get("runtime"), errors)
-        if "view" in fleet_spec:
-            _legacy_view(fleet_spec.get("view"), errors)
+    if "view_profile" in fleet_spec:
+        _string(fleet_spec["view_profile"], "spec.view_profile", errors)
+    if fleet_spec.get("codex_hook_trust", "review") not in {
+        "preapproved",
+        "review",
+    }:
+        errors.append("spec.codex_hook_trust: must be 'preapproved' or 'review'")
     return errors
 
 
