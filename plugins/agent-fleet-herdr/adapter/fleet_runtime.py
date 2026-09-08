@@ -12,26 +12,22 @@ import re
 import shutil
 import shlex
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence, TextIO
-
-from agent_command_profiles import (
-    AgentCommandProfileCatalog,
-    AgentCommandProfileError,
-)
-from launch_profiles import LaunchProfileCatalog, LaunchProfileError
-
 
 from runtime_models import (Runner, DEFAULT_HOOK_SOURCE, MANIFEST_FORMAT_VERSION, RUNTIME_PHASES,
                             FleetRuntimeError, ExecutionBundle, ResolvedFleet, _content_hash, _load_document)
 from execution_identity import ExecutionIdentity
+
+DEFAULT_VIEW_PROFILE = Path(__file__).resolve().parent / "config" / "default-view-profile.yml"
 
 
 def _config_paths(roots: Sequence[Path]) -> list[Path]:
@@ -56,9 +52,6 @@ class FleetRuntime(ExecutionIdentity):
         sleeper: Callable[[float], None] = time.sleep,
         hook_source: Path = DEFAULT_HOOK_SOURCE,
         role_catalog: Path | None = None,
-        launch_dirs: Sequence[Path] = (),
-        agent_command_profile_dirs: Sequence[Path] = (),
-        allow_legacy_fleet: bool = False,
     ):
         self.core_command = tuple(core_command)
         self.herdr_command = tuple(herdr_command)
@@ -67,14 +60,23 @@ class FleetRuntime(ExecutionIdentity):
         self.sleeper = sleeper
         self.hook_source = hook_source
         self.role_catalog = role_catalog
-        self.launch_dirs = tuple(launch_dirs)
-        self.agent_command_profile_dirs = tuple(agent_command_profile_dirs)
-        self.allow_legacy_fleet = allow_legacy_fleet
 
-    def _launch_roots(self, fleet_dirs: Sequence[Path]) -> tuple[Path, ...]:
-        if self.launch_dirs:
-            return self.launch_dirs
-        return tuple(path.parent / "herdr-launch-profiles" for path in fleet_dirs)
+    @staticmethod
+    def _requested_fleet_id(fleet_name: str) -> str:
+        path = Path(fleet_name)
+        if not path.is_absolute():
+            return fleet_name
+        document = _load_document(path)
+        metadata = document.get("metadata")
+        fleet_id = metadata.get("id") if isinstance(metadata, Mapping) else None
+        if (
+            not isinstance(fleet_id, str)
+            or re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", fleet_id) is None
+        ):
+            raise FleetRuntimeError(
+                f"Fleet file has no safe metadata.id: {path}"
+            )
+        return fleet_id
 
     def _role_catalog_args(self) -> list[str]:
         return (
@@ -105,7 +107,7 @@ class FleetRuntime(ExecutionIdentity):
         shell_value = os.environ.get("SHELL") or shutil.which("zsh") or shutil.which("bash")
         if not shell_value:
             raise FleetRuntimeError(
-                "an interactive shell is required to resolve AgentCommandProfile commands"
+                "an interactive shell is required to resolve Fleet member commands"
             )
         shell_name = Path(shell_value).name
         supported_shells = {
@@ -123,7 +125,7 @@ class FleetRuntime(ExecutionIdentity):
         )
         if shell is None:
             raise FleetRuntimeError(
-                "AgentCommandProfile aliases require an executable /bin or /usr/bin "
+                "Fleet member command aliases require an executable /bin or /usr/bin "
                 f"bash/zsh shell (configured shell={shell_value!r})"
             )
         return [str(shell), "-lic", shlex.join([command, *arguments])]
@@ -137,9 +139,6 @@ class FleetRuntime(ExecutionIdentity):
             sleeper=self.sleeper,
             hook_source=self.hook_source,
             role_catalog=self.role_catalog,
-            launch_dirs=self.launch_dirs,
-            agent_command_profile_dirs=self.agent_command_profile_dirs,
-            allow_legacy_fleet=self.allow_legacy_fleet,
         )
         # Preserve explicit instance-level test/integration seams while changing
         # only the executable commands. Normal CLI instances have none of these.
@@ -153,29 +152,6 @@ class FleetRuntime(ExecutionIdentity):
                 setattr(runtime, name, self.__dict__[name])
         return runtime
 
-
-    def _assert_no_other_active_launch(
-        self, resolved: ResolvedFleet, state_dir: Path
-    ) -> None:
-        runtime_root = state_dir / "runtimes"
-        if not runtime_root.is_dir():
-            return
-        current_path = self._manifest_path(state_dir, resolved.launch_id)
-        for manifest_path in sorted(runtime_root.glob("*.json"), key=str):
-            if manifest_path.resolve() == current_path:
-                continue
-            manifest = _load_document(manifest_path)
-            if (
-                manifest.get("fleet_id") == resolved.fleet_id
-                and manifest.get("phase") != "stopped"
-            ):
-                other_launch = str(
-                    manifest.get("launch_id") or manifest_path.stem
-                )
-                raise FleetRuntimeError(
-                    f"Fleet {resolved.fleet_id!r} already has active LaunchProfile "
-                    f"{other_launch!r}; stop it before starting {resolved.launch_id!r}"
-                )
 
     def _run_json(
         self,
@@ -262,11 +238,108 @@ class FleetRuntime(ExecutionIdentity):
                 catalog[fleet_id] = (path, source, fleet, source_hash)
         return catalog
 
+    def _validated_fleet_path(
+        self,
+        path: Path,
+        validation_db: Path,
+        role_catalog: Mapping[str, Any] | None,
+    ) -> tuple[Path, Mapping[str, Any], Mapping[str, Any], str]:
+        if not path.is_absolute():
+            raise FleetRuntimeError("Fleet file path must be absolute")
+        if path.is_symlink() or not path.is_file():
+            raise FleetRuntimeError(f"Fleet file is unavailable or unsafe: {path}")
+        resolved_path = path.resolve()
+        source = _load_document(resolved_path)
+        source_hash = _content_hash(source)
+        with tempfile.TemporaryDirectory(prefix="agent-fleet-validation-") as temporary:
+            snapshot_root = Path(temporary)
+            fleet_snapshot = snapshot_root / "fleet.json"
+            self._write_fixed_snapshot(fleet_snapshot, source)
+            role_catalog_path: Path | None = None
+            if role_catalog is not None:
+                role_catalog_path = snapshot_root / "role-catalog.json"
+                self._write_fixed_snapshot(role_catalog_path, role_catalog)
+            fleet = self._run_json(
+                [
+                    *self.core_command,
+                    "--db",
+                    str(validation_db),
+                    "spec.validate",
+                    "--config",
+                    str(fleet_snapshot),
+                    *(
+                        ["--role-catalog", str(role_catalog_path)]
+                        if role_catalog_path is not None
+                        else []
+                    ),
+                ],
+                f"Fleet validation ({resolved_path})",
+            )
+        if _content_hash(_load_document(resolved_path)) != source_hash:
+            raise FleetRuntimeError(
+                f"configuration changed during Fleet validation: {resolved_path}"
+            )
+        return resolved_path, source, fleet, source_hash
+
+    def _resolve_direct_fleet(
+        self,
+        fleet_path: Path,
+        state_dir: Path,
+    ) -> ResolvedFleet:
+        role_catalog = (
+            _load_document(self.role_catalog)
+            if self.role_catalog is not None
+            else None
+        )
+        role_catalog_hash = (
+            _content_hash(role_catalog) if role_catalog is not None else None
+        )
+        path, source, fleet, source_hash = self._validated_fleet_path(
+            fleet_path,
+            state_dir / ".validation-does-not-write.sqlite3",
+            role_catalog,
+        )
+        if fleet.get("apiVersion") != "fleet.harness/v3":
+            raise FleetRuntimeError("Fleet apiVersion must be fleet.harness/v3")
+        spec = fleet.get("spec")
+        metadata = fleet.get("metadata")
+        if not isinstance(spec, Mapping) or not isinstance(metadata, Mapping):
+            raise FleetRuntimeError("validated Fleet has invalid metadata or spec")
+        fleet_id = str(metadata["id"])
+        configured_profile = spec.get("view_profile")
+        if configured_profile is None:
+            profile_path = DEFAULT_VIEW_PROFILE
+        else:
+            candidate = Path(str(configured_profile))
+            profile_path = (
+                candidate if candidate.is_absolute() else path.parent / candidate
+            )
+        if profile_path.is_symlink() or not profile_path.is_file():
+            raise FleetRuntimeError(
+                f"ViewProfile file is unavailable or unsafe: {profile_path}"
+            )
+        profile_path = profile_path.resolve()
+        profile = _load_document(profile_path)
+        profile_ref = self._profile_identity(profile, profile_path)
+
+        return ResolvedFleet(
+            fleet_id,
+            path,
+            source,
+            fleet,
+            profile_ref,
+            profile_path,
+            profile,
+            str(spec.get("codex_hook_trust", "review")),
+            source_hash,
+            role_catalog,
+            role_catalog_hash,
+        )
+
     @staticmethod
     def _profile_identity(profile: Mapping[str, Any], path: Path) -> str:
         if (
-            profile.get("apiVersion")
-            not in {"fleet.herdr.harness/v1", "fleet.herdr.harness/v2"}
+            profile.get("apiVersion") != "fleet.herdr.harness/v2"
             or profile.get("kind") != "ViewProfile"
         ):
             raise FleetRuntimeError(f"not a ViewProfile: {path}")
@@ -300,69 +373,6 @@ class FleetRuntime(ExecutionIdentity):
             catalog[identity] = (path, profile)
         return catalog
 
-    def _resolve_agent_command_profiles(
-        self,
-        launch: Mapping[str, Any],
-        fleet: Mapping[str, Any],
-    ) -> tuple[dict[str, dict[str, str]], tuple[dict[str, str], ...]]:
-        launch_spec = launch.get("spec")
-        requested = (
-            launch_spec.get("agent_command_profiles", {})
-            if isinstance(launch_spec, Mapping)
-            else {}
-        )
-        if not isinstance(requested, Mapping):
-            raise FleetRuntimeError(
-                "LaunchProfile agent_command_profiles must be an object"
-            )
-        if not requested:
-            return {}, ()
-        try:
-            catalog = AgentCommandProfileCatalog.from_directories(
-                self.agent_command_profile_dirs
-            )
-        except AgentCommandProfileError as exc:
-            raise FleetRuntimeError(str(exc)) from exc
-        fleet_spec = fleet.get("spec")
-        members = (
-            fleet_spec.get("members") if isinstance(fleet_spec, Mapping) else None
-        )
-        member_products = {
-            member.get("agent_ref"): member.get("runtime", {}).get("product")
-            for member in members or []
-            if isinstance(member, Mapping)
-            and isinstance(member.get("runtime"), Mapping)
-        }
-        resolved: dict[str, dict[str, str]] = {}
-        sources: dict[str, dict[str, str]] = {}
-        for agent_ref, profile_ref in requested.items():
-            if agent_ref not in member_products:
-                raise FleetRuntimeError(
-                    f"LaunchProfile AgentCommandProfile targets unknown Fleet member: {agent_ref}"
-                )
-            try:
-                path, document = catalog.resolve(str(profile_ref))
-            except AgentCommandProfileError as exc:
-                raise FleetRuntimeError(str(exc)) from exc
-            profile_product = str(document["spec"]["product"])
-            if profile_product != member_products[agent_ref]:
-                raise FleetRuntimeError(
-                    f"AgentCommandProfile {profile_ref} product {profile_product!r} "
-                    f"does not match Fleet member {agent_ref!r} product "
-                    f"{member_products[agent_ref]!r}"
-                )
-            resolved[str(agent_ref)] = {
-                "profile_ref": str(profile_ref),
-                "product": profile_product,
-                "command": str(document["spec"]["command"]),
-            }
-            sources[str(profile_ref)] = {
-                "profile_ref": str(profile_ref),
-                "path": str(path),
-                "hash": _content_hash(document),
-            }
-        return resolved, tuple(sources[key] for key in sorted(sources))
-
     def resolve(
         self,
         fleet_name: str,
@@ -370,108 +380,10 @@ class FleetRuntime(ExecutionIdentity):
         profile_dirs: Sequence[Path],
         state_dir: Path,
     ) -> ResolvedFleet:
-        role_catalog = (
-            _load_document(self.role_catalog)
-            if self.role_catalog is not None
-            else None
-        )
-        role_catalog_hash = (
-            _content_hash(role_catalog) if role_catalog is not None else None
-        )
-        fleets = self._validated_fleets(
-            fleet_dirs,
-            state_dir / ".validation-does-not-write.sqlite3",
-            role_catalog,
-        )
-        if (
-            self.role_catalog is not None
-            and _content_hash(_load_document(self.role_catalog))
-            != role_catalog_hash
-        ):
-            raise FleetRuntimeError(
-                f"configuration changed during role catalog validation: {self.role_catalog}"
-            )
-        profiles = self._profiles(profile_dirs)
-        try:
-            launch_path, launch = LaunchProfileCatalog.from_directories(
-                self._launch_roots(fleet_dirs)
-            ).resolve(fleet_name)
-        except LaunchProfileError as exc:
-            if "not found" not in str(exc):
-                raise FleetRuntimeError(str(exc)) from exc
-            if not self.allow_legacy_fleet:
-                raise FleetRuntimeError(f"LaunchProfile not found: {fleet_name}") from exc
-            selected = fleets.get(fleet_name)
-            if selected is None:
-                raise FleetRuntimeError(f"LaunchProfile not found: {fleet_name}") from exc
-            fleet_path, fleet_source, fleet, fleet_source_hash = selected
-            spec = fleet.get("spec")
-            runtime = spec.get("runtime") if isinstance(spec, Mapping) else None
-            view = spec.get("view") if isinstance(spec, Mapping) else None
-            profile_ref = view.get("profile_ref") if isinstance(view, Mapping) else None
-            if (
-                fleet.get("apiVersion") != "fleet.harness/v1"
-                or not isinstance(runtime, Mapping)
-                or runtime.get("provider") != "herdr"
-                or not isinstance(profile_ref, str)
-                or not profile_ref
-            ):
-                raise FleetRuntimeError(f"LaunchProfile not found: {fleet_name}") from exc
-            launch = {
-                "apiVersion": "fleet.herdr.harness/v1",
-                "kind": "LaunchProfile",
-                "metadata": {"id": fleet_name},
-                "spec": {
-                    "fleet_ref": fleet_name,
-                    "view_profile_ref": profile_ref,
-                    "codex_hook_trust": runtime.get("codex_hook_trust", "review"),
-                },
-            }
-            launch_path = None
-            legacy = True
-        else:
-            launch_spec = launch["spec"]
-            fleet_ref = launch_spec["fleet_ref"]
-            selected = fleets.get(fleet_ref)
-            if selected is None:
-                raise FleetRuntimeError(
-                    f"Fleet not found for LaunchProfile {fleet_name}: {fleet_ref}"
-                )
-            fleet_path, fleet_source, fleet, fleet_source_hash = selected
-            spec = fleet.get("spec")
-            if isinstance(spec, Mapping) and ("runtime" in spec or "view" in spec):
-                raise FleetRuntimeError(
-                    "LaunchProfile cannot be combined with legacy Fleet runtime/view fields"
-                )
-            profile_ref = launch_spec["view_profile_ref"]
-            legacy = False
-        resolved_profile = profiles.get(profile_ref)
-        if resolved_profile is None:
-            raise FleetRuntimeError(f"ViewProfile not found: {profile_ref}")
-        profile_path, profile = resolved_profile
-        agent_command_profiles, agent_command_profile_sources = (
-            self._resolve_agent_command_profiles(launch, fleet)
-        )
-        metadata = fleet["metadata"]
-        return ResolvedFleet(
-            fleet_name,
-            launch_path,
-            launch,
-            str(metadata["id"]),
-            fleet_path,
-            fleet_source,
-            fleet,
-            profile_ref,
-            profile_path,
-            profile,
-            str(launch["spec"]["codex_hook_trust"]),
-            fleet_source_hash,
-            role_catalog,
-            role_catalog_hash,
-            agent_command_profiles,
-            agent_command_profile_sources,
-            legacy=legacy,
-        )
+        requested_path = Path(fleet_name)
+        if not requested_path.is_absolute():
+            raise FleetRuntimeError("Fleet file path must be absolute")
+        return self._resolve_direct_fleet(requested_path, state_dir)
 
     def list_configs(
         self,
@@ -480,10 +392,6 @@ class FleetRuntime(ExecutionIdentity):
         state_dir: Path,
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        catalog = LaunchProfileCatalog.from_directories(
-            self._launch_roots(fleet_dirs)
-        )
-        launch_ids = [identity for identity, _, _ in catalog.entries()]
         fleets = self._validated_fleets(
             fleet_dirs,
             state_dir / ".validation-does-not-write.sqlite3",
@@ -493,22 +401,8 @@ class FleetRuntime(ExecutionIdentity):
                 else None
             ),
         )
-        for fleet_id, (_, _, fleet, _) in sorted(fleets.items()):
-            spec = fleet.get("spec")
-            if (
-                self.allow_legacy_fleet
-                and
-                fleet.get("apiVersion") == "fleet.harness/v1"
-                and isinstance(spec, Mapping)
-                and isinstance(spec.get("runtime"), Mapping)
-                and isinstance(spec.get("view"), Mapping)
-                and fleet_id not in launch_ids
-            ):
-                launch_ids.append(fleet_id)
-        for launch_id in sorted(launch_ids):
-            resolved = self.resolve(
-                launch_id, fleet_dirs, profile_dirs, state_dir
-            )
+        for fleet_id, (fleet_path, _, _, _) in sorted(fleets.items()):
+            resolved = self.resolve(str(fleet_path), fleet_dirs, profile_dirs, state_dir)
             spec = resolved.fleet["spec"]
             self._run_json(
                 [
@@ -518,18 +412,6 @@ class FleetRuntime(ExecutionIdentity):
                     "provision",
                     "--fleet-json",
                     json.dumps(resolved.fleet, ensure_ascii=False, sort_keys=True),
-                    "--launch-profile-json",
-                    json.dumps(
-                        resolved.launch_profile,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
-                    "--agent-command-profiles-json",
-                    json.dumps(
-                        resolved.agent_command_profiles,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
                     "--view-profile-json",
                     json.dumps(resolved.profile, ensure_ascii=False, sort_keys=True),
                     "--cwd",
@@ -537,11 +419,10 @@ class FleetRuntime(ExecutionIdentity):
                     "--agent-kind",
                     "codex",
                 ],
-                f"Launch composition validation ({launch_id})",
+                f"Fleet composition validation ({fleet_id})",
             )
             rows.append(
                 {
-                    "launch_id": launch_id,
                     "fleet_id": resolved.fleet_id,
                     "path": str(resolved.fleet_path),
                     "objective": spec["objective"],
@@ -550,15 +431,13 @@ class FleetRuntime(ExecutionIdentity):
                         member["agent_ref"]: dict(member["runtime"])
                         for member in spec["members"]
                     },
-                    "agent_command_profiles": resolved.agent_command_profiles,
                     "profile_ref": resolved.profile_ref,
                     "profile_resolved": True,
-                    "legacy": resolved.legacy,
                     "start_command": shlex.join(
                         [
                             "fleet-runtime",
                             "start",
-                            launch_id,
+                            str(resolved.fleet_path),
                             *self._role_catalog_args(),
                             "--execute",
                         ]
@@ -587,7 +466,7 @@ class FleetRuntime(ExecutionIdentity):
         agent_kind: str,
         hook_sha256: str | None = None,
     ) -> dict[str, Any]:
-        fleet_state_dir = self._fleet_state_dir(state_dir, resolved.launch_id)
+        fleet_state_dir = self._fleet_state_dir(state_dir, resolved.fleet_id)
         if hook_sha256 is None:
             hook_sha256 = hashlib.sha256(self._capture_hook_source()).hexdigest()
         planned_hook_runtime = (
@@ -604,16 +483,6 @@ class FleetRuntime(ExecutionIdentity):
                 "provision",
                 "--fleet-json",
                 json.dumps(resolved.fleet, ensure_ascii=False, sort_keys=True),
-                "--launch-profile-json",
-                json.dumps(
-                    resolved.launch_profile, ensure_ascii=False, sort_keys=True
-                ),
-                "--agent-command-profiles-json",
-                json.dumps(
-                    resolved.agent_command_profiles,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
                 "--view-profile-json",
                 json.dumps(resolved.profile, ensure_ascii=False, sort_keys=True),
                 "--cwd",
@@ -631,12 +500,6 @@ class FleetRuntime(ExecutionIdentity):
         )
         return {
             "status": "planned",
-            "launch_id": resolved.launch_id,
-            "launch_path": (
-                str(resolved.launch_path) if resolved.launch_path is not None else None
-            ),
-            "launch_hash": resolved.launch_hash,
-            "legacy": resolved.legacy,
             "fleet_id": resolved.fleet_id,
             "fleet_path": str(resolved.fleet_path),
             "fleet_hash": resolved.fleet_hash,
@@ -644,7 +507,6 @@ class FleetRuntime(ExecutionIdentity):
             "profile_ref": resolved.profile_ref,
             "profile_path": str(resolved.profile_path),
             "profile_hash": resolved.profile_hash,
-            "agent_command_profiles": resolved.agent_command_profiles,
             "composition_hash": resolved.composition_hash,
             "herdr": dict(herdr_plan),
         }
@@ -656,7 +518,7 @@ class FleetRuntime(ExecutionIdentity):
         cwd: str,
         agent_kind: str,
     ) -> None:
-        """Validate Fleet/Launch/View composition without creating runtime state."""
+        """Validate Fleet and ViewProfile composition without creating runtime state."""
         self._run_json(
             [
                 *self.herdr_command,
@@ -665,16 +527,6 @@ class FleetRuntime(ExecutionIdentity):
                 "provision",
                 "--fleet-json",
                 json.dumps(resolved.fleet, ensure_ascii=False, sort_keys=True),
-                "--launch-profile-json",
-                json.dumps(
-                    resolved.launch_profile, ensure_ascii=False, sort_keys=True
-                ),
-                "--agent-command-profiles-json",
-                json.dumps(
-                    resolved.agent_command_profiles,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
                 "--view-profile-json",
                 json.dumps(resolved.profile, ensure_ascii=False, sort_keys=True),
                 "--cwd",
@@ -682,20 +534,16 @@ class FleetRuntime(ExecutionIdentity):
                 "--agent-kind",
                 agent_kind,
             ],
-            f"Launch composition validation ({resolved.launch_id})",
+            f"Fleet composition validation ({resolved.fleet_id})",
         )
 
     @staticmethod
     def _manifest_path(state_dir: Path, fleet_id: str) -> Path:
-        root = (state_dir / "runtimes").resolve()
-        path = (root / f"{fleet_id}.json").resolve()
-        if path.parent != root:
-            raise FleetRuntimeError("Fleet identity escapes the runtime state directory")
-        return path
+        return (FleetRuntime._fleet_state_dir(state_dir, fleet_id) / "manifest.json").resolve()
 
     @staticmethod
     def _fleet_state_dir(state_dir: Path, fleet_id: str) -> Path:
-        root = (state_dir / "fleets").resolve()
+        root = (state_dir / "runs").resolve()
         path = (root / fleet_id).resolve()
         if path.parent != root:
             raise FleetRuntimeError("Fleet identity escapes the fleet state directory")
@@ -723,8 +571,8 @@ class FleetRuntime(ExecutionIdentity):
         return FleetRuntime._operation_lock_path(state_dir, "fleet", fleet_id)
 
     @staticmethod
-    def _launch_lock_path(state_dir: Path, launch_id: str) -> Path:
-        return FleetRuntime._operation_lock_path(state_dir, "launch", launch_id)
+    def _process_lock_path(state_dir: Path, fleet_id: str) -> Path:
+        return FleetRuntime._operation_lock_path(state_dir, "process", fleet_id)
 
     @staticmethod
     def _open_fleet_lock(path: Path) -> TextIO:
@@ -743,18 +591,18 @@ class FleetRuntime(ExecutionIdentity):
             raise
 
     @staticmethod
-    def _stop_request_dir(state_dir: Path, launch_id: str) -> Path:
+    def _stop_request_dir(state_dir: Path, fleet_id: str) -> Path:
         root = (state_dir / "stop-requests").resolve()
-        request_dir = (root / launch_id).resolve()
+        request_dir = (root / fleet_id).resolve()
         if request_dir.parent != root:
-            raise FleetRuntimeError("Launch identity escapes the stop request directory")
+            raise FleetRuntimeError("Fleet identity escapes the stop request directory")
         return request_dir
 
     @contextmanager
     def _publish_stop_request(
-        self, state_dir: Path, launch_id: str
+        self, state_dir: Path, fleet_id: str
     ) -> Iterator[Path]:
-        request_dir = self._stop_request_dir(state_dir, launch_id)
+        request_dir = self._stop_request_dir(state_dir, fleet_id)
         if request_dir.is_symlink():
             raise FleetRuntimeError("stop request directory must not be a symbolic link")
         request_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -781,8 +629,8 @@ class FleetRuntime(ExecutionIdentity):
             if completed:
                 self._clear_completed_stop_requests(request_dir, request_path)
 
-    def _stop_requested(self, state_dir: Path, launch_id: str) -> bool:
-        request_dir = self._stop_request_dir(state_dir, launch_id)
+    def _stop_requested(self, state_dir: Path, fleet_id: str) -> bool:
+        request_dir = self._stop_request_dir(state_dir, fleet_id)
         if not request_dir.is_dir():
             return False
         for request_path in request_dir.glob("*.request"):
@@ -794,10 +642,10 @@ class FleetRuntime(ExecutionIdentity):
             pass
         return False
 
-    def _raise_if_stop_requested(self, state_dir: Path, launch_id: str) -> None:
-        if self._stop_requested(state_dir, launch_id):
+    def _raise_if_stop_requested(self, state_dir: Path, fleet_id: str) -> None:
+        if self._stop_requested(state_dir, fleet_id):
             raise FleetRuntimeError(
-                f"Fleet launch {launch_id!r} was cancelled by a stop request"
+                f"Fleet {fleet_id!r} was cancelled by a stop request"
             )
 
     def _clear_completed_stop_requests(
@@ -860,16 +708,16 @@ class FleetRuntime(ExecutionIdentity):
                 lock.close()
 
     @contextmanager
-    def _hold_launch_lock(
+    def _hold_process_lock(
         self,
         state_dir: Path,
-        launch_id: str,
+        fleet_id: str,
         *,
         timeout_seconds: float,
         timeout_message: str,
     ) -> Iterator[None]:
         with self._hold_identity_lock(
-            self._launch_lock_path(state_dir, launch_id),
+            self._process_lock_path(state_dir, fleet_id),
             timeout_seconds=timeout_seconds,
             timeout_message=timeout_message,
         ):
@@ -890,31 +738,6 @@ class FleetRuntime(ExecutionIdentity):
             timeout_message=timeout_message,
         ):
             yield
-
-    @contextmanager
-    def _hold_runtime_locks(
-        self,
-        state_dir: Path,
-        launch_id: str,
-        fleet_id: str,
-        *,
-        timeout_seconds: float,
-        timeout_message: str,
-    ) -> Iterator[None]:
-        """Compatibility helper; lifecycle code always locks launch, then Fleet."""
-        with self._hold_launch_lock(
-            state_dir,
-            launch_id,
-            timeout_seconds=timeout_seconds,
-            timeout_message=timeout_message,
-        ):
-            with self._hold_fleet_lock(
-                state_dir,
-                fleet_id,
-                timeout_seconds=timeout_seconds,
-                timeout_message=timeout_message,
-            ):
-                yield
 
     @staticmethod
     def _write_manifest(path: Path, desired: Mapping[str, Any], phase: str) -> None:
@@ -946,6 +769,99 @@ class FleetRuntime(ExecutionIdentity):
             temporary.unlink(missing_ok=True)
             raise
         path.chmod(0o600)
+        FleetRuntime._index_manifest(path, {**desired, "phase": phase})
+
+    @staticmethod
+    def _index_manifest(path: Path, manifest: Mapping[str, Any]) -> None:
+        run_id = manifest.get("run_id")
+        definition_id = manifest.get("definition_id")
+        if not isinstance(run_id, str) or not isinstance(definition_id, str):
+            return
+        registry = path.parents[2] / "registry.sqlite3"
+        with closing(sqlite3.connect(registry)) as connection, connection:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS runs (
+                    run_id TEXT PRIMARY KEY,
+                    definition_id TEXT NOT NULL,
+                    fleet_path TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    runtime_generation TEXT NOT NULL,
+                    manifest_path TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO runs (
+                    run_id, definition_id, fleet_path, config_hash, phase,
+                    runtime_generation, manifest_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    phase=excluded.phase,
+                    runtime_generation=excluded.runtime_generation,
+                    manifest_path=excluded.manifest_path,
+                    updated_at=CURRENT_TIMESTAMP""",
+                (
+                    run_id, definition_id, str(manifest.get("fleet_path") or ""),
+                    str(manifest.get("fleet_source_hash") or ""),
+                    str(manifest.get("phase") or ""),
+                    str(manifest.get("runtime_generation") or ""), str(path),
+                ),
+            )
+        registry.chmod(0o600)
+
+    @staticmethod
+    def _mark_run_removed(state_dir: Path, run_id: str) -> None:
+        registry = state_dir / "registry.sqlite3"
+        if not registry.exists():
+            return
+        with closing(sqlite3.connect(registry)) as connection, connection:
+            connection.execute(
+                "UPDATE runs SET phase='removed', manifest_path=NULL, "
+                "updated_at=CURRENT_TIMESTAMP WHERE run_id=?", (run_id,)
+            )
+
+    @staticmethod
+    def _new_run_id(definition_id: str) -> str:
+        return f"{definition_id}-{uuid.uuid4().hex}"
+
+    @staticmethod
+    def _instantiate_run(resolved: ResolvedFleet, run_id: str) -> ResolvedFleet:
+        if re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", run_id) is None:
+            raise FleetRuntimeError(f"run ID is unsafe: {run_id}")
+        fleet_source = json.loads(json.dumps(resolved.fleet_source))
+        fleet = json.loads(json.dumps(resolved.fleet))
+        fleet_source["metadata"]["id"] = run_id
+        fleet["metadata"]["id"] = run_id
+        return ResolvedFleet(
+            run_id, resolved.fleet_path, fleet_source, fleet,
+            resolved.profile_ref, resolved.profile_path, resolved.profile,
+            resolved.codex_hook_trust, resolved.fleet_source_hash,
+            resolved.role_catalog, resolved.role_catalog_hash,
+            definition_id=resolved.fleet_id,
+        )
+
+    def runs(
+        self, state_dir: Path, definition_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        registry = state_dir / "registry.sqlite3"
+        if not registry.is_file():
+            return []
+        query = (
+            "SELECT run_id, definition_id, fleet_path, config_hash, phase, "
+            "runtime_generation, manifest_path, created_at, updated_at FROM runs"
+        )
+        parameters: tuple[str, ...] = ()
+        if definition_id is not None:
+            query += " WHERE definition_id=?"
+            parameters = (definition_id,)
+        query += " ORDER BY created_at, run_id"
+        with closing(sqlite3.connect(registry)) as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        keys = ("run_id", "definition_id", "fleet_path", "config_hash", "phase",
+                "runtime_generation", "manifest_path", "created_at", "updated_at")
+        return [dict(zip(keys, row)) for row in rows]
 
     def _materialize_hook_runtime(
         self, fleet_state_dir: Path, payload: bytes
@@ -1091,107 +1007,38 @@ class FleetRuntime(ExecutionIdentity):
         execute: bool = False,
         once: bool = False,
         poll_seconds: float = 0.25,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         if not execute:
             return self.plan(
                 fleet_name, fleet_dirs, profile_dirs, state_dir, cwd, agent_kind
             )
-        state_dir_existed = state_dir.exists()
-        with self._hold_launch_lock(
-            state_dir,
-            fleet_name,
+        definition_id = self._requested_fleet_id(fleet_name)
+        run_id = run_id or self._new_run_id(definition_id)
+        if self._manifest_path(state_dir, run_id).exists():
+            raise FleetRuntimeError(
+                f"run {run_id!r} already exists; use resume {run_id}"
+            )
+        with self._hold_process_lock(
+            state_dir, run_id,
             timeout_seconds=0,
-            timeout_message=(
-                f"Fleet {fleet_name!r} already has an active runtime process"
-            ),
+            timeout_message=f"run {run_id!r} is already being started",
         ):
-            known_manifest_path = self._manifest_path(state_dir, fleet_name)
-            if known_manifest_path.exists():
-                known = _load_document(known_manifest_path)
-                self._validate_runtime_manifest(known)
-                if known.get("phase") != "stopped":
-                    execution_bundle = self._execution_bundle_from_manifest(
-                        known, state_dir, fleet_name
-                    )
-                    if known["phase"] == "stopping":
-                        raise FleetRuntimeError(
-                            "Fleet stop is incomplete; rerun stop instead of start"
-                        )
-                    if known["phase"] == "removing":
-                        raise FleetRuntimeError(
-                            "Fleet removal is incomplete; rerun remove instead of start"
-                        )
-                    stable_runtime = self._with_execution_bundle(execution_bundle)
-                    hook_runtime = Path(str(known["hook_runtime"]))
-                    hook_payload = hook_runtime.read_bytes()
-                    resolved = stable_runtime.resolve(
-                        fleet_name, fleet_dirs, profile_dirs, state_dir
-                    )
-                    if resolved.launch_id != fleet_name:
-                        raise FleetRuntimeError(
-                            "resolved LaunchProfile identity differs from the requested identity"
-                        )
-                    self._raise_if_stop_requested(state_dir, resolved.launch_id)
-                    self._assert_no_other_active_launch(resolved, state_dir)
-                    self._assert_config_snapshot(resolved)
-                    with self._hold_fleet_lock(
-                        state_dir,
-                        resolved.fleet_id,
-                        timeout_seconds=0,
-                        timeout_message=(
-                            f"Fleet {resolved.fleet_id!r} already has an active runtime process"
-                        ),
-                    ):
-                        self._assert_no_other_active_launch(resolved, state_dir)
-                        self._assert_config_snapshot(resolved)
-                        self._raise_if_stop_requested(state_dir, resolved.launch_id)
-                        stable_runtime._validate_composition(
-                            resolved, state_dir, cwd, agent_kind
-                        )
-                        stable_runtime._preflight_runtime(
-                            resolved,
-                            cwd,
-                            require_codex_registration=(
-                                known["phase"] in {"planned", "core_provisioned"}
-                            ),
-                            require_agent_launch=(
-                                known["phase"] in {"planned", "core_provisioned"}
-                            ),
-                        )
-                        runtime_preflight = dict(known["runtime_preflight"])
-                        self._assert_config_snapshot(resolved)
-                        self._raise_if_stop_requested(state_dir, resolved.launch_id)
-                        return stable_runtime._start_locked(
-                            fleet_name,
-                            fleet_dirs,
-                            profile_dirs,
-                            state_dir,
-                            cwd,
-                            agent_kind,
-                            known["execution_identity"],
-                            hook_payload,
-                            resolved,
-                            runtime_preflight,
-                            execution_bundle,
-                            once=once,
-                            poll_seconds=poll_seconds,
-                        )
             hook_payload = self._capture_hook_source()
             with self._capture_execution_bundle(hook_payload) as temporary_bundle:
                 execution_identity = temporary_bundle.source_identity
                 snapshot_runtime = self._with_execution_bundle(temporary_bundle)
-                self._raise_if_stop_requested(state_dir, fleet_name)
-                resolved = snapshot_runtime.resolve(
+                definition = snapshot_runtime.resolve(
                     fleet_name, fleet_dirs, profile_dirs, state_dir
                 )
-                if resolved.launch_id != fleet_name:
+                if definition.fleet_id != definition_id:
                     raise FleetRuntimeError(
-                        "resolved LaunchProfile identity differs from the requested identity"
+                        "resolved Fleet identity differs from the requested identity"
                     )
-                self._raise_if_stop_requested(state_dir, resolved.launch_id)
-                self._assert_no_other_active_launch(resolved, state_dir)
+                resolved = self._instantiate_run(definition, run_id)
+                self._raise_if_stop_requested(state_dir, resolved.fleet_id)
                 self._assert_config_snapshot(resolved)
-                self._raise_if_stop_requested(state_dir, resolved.launch_id)
+                self._raise_if_stop_requested(state_dir, resolved.fleet_id)
                 with self._hold_fleet_lock(
                     state_dir,
                     resolved.fleet_id,
@@ -1200,9 +1047,8 @@ class FleetRuntime(ExecutionIdentity):
                         f"Fleet {resolved.fleet_id!r} already has an active runtime process"
                     ),
                 ):
-                    self._assert_no_other_active_launch(resolved, state_dir)
                     self._assert_config_snapshot(resolved)
-                    self._raise_if_stop_requested(state_dir, resolved.launch_id)
+                    self._raise_if_stop_requested(state_dir, resolved.fleet_id)
                     snapshot_runtime._validate_composition(
                         resolved, state_dir, cwd, agent_kind
                     )
@@ -1210,10 +1056,10 @@ class FleetRuntime(ExecutionIdentity):
                         resolved, cwd
                     )
                     self._assert_config_snapshot(resolved)
-                    self._raise_if_stop_requested(state_dir, resolved.launch_id)
+                    self._raise_if_stop_requested(state_dir, resolved.fleet_id)
                     published_bundle = self._publish_execution_bundle(
                         temporary_bundle,
-                        self._fleet_state_dir(state_dir, resolved.launch_id),
+                        self._fleet_state_dir(state_dir, resolved.fleet_id),
                         hook_payload,
                     )
                     stable_runtime = self._with_execution_bundle(published_bundle)
@@ -1226,12 +1072,9 @@ class FleetRuntime(ExecutionIdentity):
                             hook_sha256=str(execution_identity["hook_sha256"]),
                         )
                         self._raise_if_stop_requested(
-                            state_dir, resolved.launch_id
+                            state_dir, resolved.fleet_id
                         )
                         return stable_runtime._start_locked(
-                            fleet_name,
-                            fleet_dirs,
-                            profile_dirs,
                             state_dir,
                             cwd,
                             agent_kind,
@@ -1245,36 +1088,22 @@ class FleetRuntime(ExecutionIdentity):
                         )
                     except Exception:
                         manifest_path = self._manifest_path(
-                            state_dir, resolved.launch_id
+                            state_dir, resolved.fleet_id
                         )
-                        bundle_committed = False
                         if manifest_path.exists():
                             try:
-                                bundle_committed = (
-                                    _load_document(manifest_path).get(
-                                        "execution_snapshot_root"
-                                    )
-                                    == str(published_bundle.root)
-                                )
+                                failed = _load_document(manifest_path)
+                                self._write_manifest(manifest_path, failed, "failed")
                             except FleetRuntimeError:
-                                bundle_committed = False
-                        if not bundle_committed:
+                                pass
+                        else:
                             self._discard_uncommitted_execution_bundle(
                                 published_bundle
                             )
-                            if not state_dir_existed:
-                                for empty in (state_dir / "fleets", state_dir):
-                                    try:
-                                        empty.rmdir()
-                                    except OSError:
-                                        pass
                         raise
 
     def _start_locked(
         self,
-        fleet_name: str,
-        fleet_dirs: Sequence[Path],
-        profile_dirs: Sequence[Path],
         state_dir: Path,
         cwd: str,
         agent_kind: str,
@@ -1287,18 +1116,15 @@ class FleetRuntime(ExecutionIdentity):
         once: bool = False,
         poll_seconds: float = 0.25,
     ) -> dict[str, Any]:
-        manifest_path = self._manifest_path(state_dir, resolved.launch_id)
-        fleet_state_dir = self._fleet_state_dir(state_dir, resolved.launch_id)
+        manifest_path = self._manifest_path(state_dir, resolved.fleet_id)
+        fleet_state_dir = self._fleet_state_dir(state_dir, resolved.fleet_id)
         fleet_snapshot_path, role_catalog_snapshot_path = (
             self._configuration_snapshot_paths(resolved, fleet_state_dir)
         )
         desired = {
             "manifest_format_version": MANIFEST_FORMAT_VERSION,
-            "launch_id": resolved.launch_id,
-            "launch_path": (
-                str(resolved.launch_path) if resolved.launch_path is not None else None
-            ),
-            "launch_hash": resolved.launch_hash,
+            "run_id": resolved.fleet_id,
+            "definition_id": resolved.definition_id,
             "fleet_id": resolved.fleet_id,
             "fleet_path": str(resolved.fleet_path),
             "fleet_hash": resolved.fleet_hash,
@@ -1307,16 +1133,11 @@ class FleetRuntime(ExecutionIdentity):
             "profile_path": str(resolved.profile_path),
             "profile_hash": resolved.profile_hash,
             "composition_hash": resolved.composition_hash,
-            "legacy": resolved.legacy,
             "cwd": str(Path(cwd).resolve()),
             "member_runtimes": {
                 member["agent_ref"]: dict(member["runtime"])
                 for member in resolved.fleet["spec"]["members"]
             },
-            "agent_command_profiles": resolved.agent_command_profiles,
-            "agent_command_profile_sources": list(
-                resolved.agent_command_profile_sources
-            ),
             "runtime_preflight": dict(runtime_preflight),
             "fleet_snapshot_path": str(fleet_snapshot_path),
             "execution_snapshot_root": str(execution_bundle.root),
@@ -1330,56 +1151,16 @@ class FleetRuntime(ExecutionIdentity):
             )
         phase = "planned"
         runtime_generation = uuid.uuid4().hex
-        restarting = False
-        current: Mapping[str, Any] | None = None
         if manifest_path.exists():
-            current = _load_document(manifest_path)
-            phase = str(current.get("phase") or "active")
-            if phase != "stopped":
-                # Repeat under both locks to close the early-check window.
-                self._assert_runtime_identity(current, execution_identity)
-            stable_configuration = {
-                key: value
-                for key, value in desired.items()
-                if phase != "stopped"
-                or key not in {
-                    "execution_snapshot_root",
-                    "runtime_commands",
-                    "runtime_preflight",
-                }
-            }
-            if not all(
-                current.get(key) == value
-                for key, value in stable_configuration.items()
-            ):
-                raise FleetRuntimeError(
-                    "configuration conflict: stop the active Fleet before changing its config"
-                )
-            runtime_generation = str(
-                current.get("runtime_generation") or runtime_generation
+            raise FleetRuntimeError(
+                f"run {resolved.fleet_id!r} already exists; use resume"
             )
-            if phase == "stopped":
-                phase = "planned"
-                runtime_generation = uuid.uuid4().hex
-                restarting = True
         self._materialize_configuration_snapshots(
             resolved, fleet_snapshot_path, role_catalog_snapshot_path
         )
-        if current is not None and not restarting and current.get("hook_runtime"):
-            hook_runtime = self._validate_hook_runtime(
-                fleet_state_dir,
-                Path(str(current["hook_runtime"])),
-                str(current.get("hook_sha256") or ""),
-            )
-            hook_sha256 = str(current["hook_sha256"])
-        elif current is not None and phase in {"active", "herdr_provisioned"}:
-            raise FleetRuntimeError(
-                "active Fleet predates stable hook runtimes; stop and restart it once"
-            )
-        else:
-            hook_runtime, hook_sha256 = self._materialize_hook_runtime(
-                fleet_state_dir, hook_payload
-            )
+        hook_runtime, hook_sha256 = self._materialize_hook_runtime(
+            fleet_state_dir, hook_payload
+        )
         runtime_manifest = {
             **desired,
             "execution_identity": dict(execution_identity),
@@ -1387,29 +1168,14 @@ class FleetRuntime(ExecutionIdentity):
             "hook_runtime": str(hook_runtime),
             "hook_sha256": hook_sha256,
         }
-        if current is None:
-            self._write_manifest(
-                manifest_path,
-                runtime_manifest,
-                phase,
-            )
-        elif phase == "active":
-            monitor = self.monitor(
-                resolved.launch_id,
-                state_dir,
-                once=once,
-                poll_seconds=poll_seconds,
-            )
-            return {**runtime_manifest, "status": "resumed", "monitor": monitor}
-        elif restarting or not current.get("hook_runtime"):
-            self._write_manifest(manifest_path, runtime_manifest, phase)
+        self._write_manifest(manifest_path, runtime_manifest, phase)
         core_db = fleet_state_dir / "core.sqlite3"
         herdr_db = fleet_state_dir / "herdr.sqlite3"
         phases = ["planned", "core_provisioned", "herdr_provisioned", "active"]
         if phase not in phases:
             raise FleetRuntimeError(f"unknown runtime phase: {phase}")
         if phases.index(phase) < phases.index("core_provisioned"):
-            self._raise_if_stop_requested(state_dir, resolved.launch_id)
+            self._raise_if_stop_requested(state_dir, resolved.fleet_id)
             self._run_json(
                 [
                     *self.core_command,
@@ -1426,28 +1192,12 @@ class FleetRuntime(ExecutionIdentity):
                 ],
                 "Core fleet provision",
             )
-            self._raise_if_stop_requested(state_dir, resolved.launch_id)
+            self._raise_if_stop_requested(state_dir, resolved.fleet_id)
             phase = "core_provisioned"
             self._write_manifest(manifest_path, runtime_manifest, phase)
-        if restarting:
-            self._raise_if_stop_requested(state_dir, resolved.launch_id)
-            self._run_json(
-                [
-                    *self.core_command,
-                    "--db",
-                    str(core_db),
-                    "context.invalidate",
-                    "--fleet",
-                    resolved.fleet_id,
-                    "--operation-id",
-                    f"runtime-restart:{resolved.launch_id}:{runtime_generation}",
-                ],
-                "Core context invalidation",
-            )
-            self._raise_if_stop_requested(state_dir, resolved.launch_id)
         provisioned: Mapping[str, Any] = {"status": "already_provisioned"}
         if phases.index(phase) < phases.index("herdr_provisioned"):
-            self._raise_if_stop_requested(state_dir, resolved.launch_id)
+            self._raise_if_stop_requested(state_dir, resolved.fleet_id)
             provisioned = self._run_json(
                 [
                     *self.herdr_command,
@@ -1456,18 +1206,6 @@ class FleetRuntime(ExecutionIdentity):
                     "provision",
                     "--fleet-json",
                     json.dumps(resolved.fleet, ensure_ascii=False, sort_keys=True),
-                    "--launch-profile-json",
-                    json.dumps(
-                        resolved.launch_profile,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
-                    "--agent-command-profiles-json",
-                    json.dumps(
-                        resolved.agent_command_profiles,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
                     "--view-profile-json",
                     json.dumps(resolved.profile, ensure_ascii=False, sort_keys=True),
                     "--cwd",
@@ -1490,7 +1228,7 @@ class FleetRuntime(ExecutionIdentity):
                     "AGENT_FLEET_CORE_DB": str(core_db),
                 },
             )
-            self._raise_if_stop_requested(state_dir, resolved.launch_id)
+            self._raise_if_stop_requested(state_dir, resolved.fleet_id)
             phase = "herdr_provisioned"
             self._write_manifest(manifest_path, runtime_manifest, phase)
         spec = resolved.fleet["spec"]
@@ -1498,7 +1236,7 @@ class FleetRuntime(ExecutionIdentity):
         for task in spec["tasks"]:
             if task.get("depends_on"):
                 continue
-            self._raise_if_stop_requested(state_dir, resolved.launch_id)
+            self._raise_if_stop_requested(state_dir, resolved.fleet_id)
             self._run_json(
                 [
                     *self.core_command,
@@ -1518,9 +1256,9 @@ class FleetRuntime(ExecutionIdentity):
                 ],
                 f"Task assignment ({task['id']})",
             )
-            self._raise_if_stop_requested(state_dir, resolved.launch_id)
+            self._raise_if_stop_requested(state_dir, resolved.fleet_id)
         for member in spec["members"]:
-            self._raise_if_stop_requested(state_dir, resolved.launch_id)
+            self._raise_if_stop_requested(state_dir, resolved.fleet_id)
             agent_ref = member["agent_ref"]
             control = {
                 "fleet_id": resolved.fleet_id,
@@ -1566,11 +1304,11 @@ class FleetRuntime(ExecutionIdentity):
                 ],
                 f"Context activation ({agent_ref})",
             )
-            self._raise_if_stop_requested(state_dir, resolved.launch_id)
-        self._raise_if_stop_requested(state_dir, resolved.launch_id)
+            self._raise_if_stop_requested(state_dir, resolved.fleet_id)
+        self._raise_if_stop_requested(state_dir, resolved.fleet_id)
         self._write_manifest(manifest_path, runtime_manifest, "active")
         monitor = self.monitor(
-            resolved.launch_id,
+            resolved.fleet_id,
             state_dir,
             once=once,
             poll_seconds=poll_seconds,
@@ -1582,34 +1320,59 @@ class FleetRuntime(ExecutionIdentity):
             "monitor": monitor,
         }
 
-    def stop(
-        self, launch_id: str, state_dir: Path, *, execute: bool = False
+    def resume(
+        self, run_id: str, state_dir: Path, *, once: bool = False,
+        poll_seconds: float = 0.25,
     ) -> dict[str, Any]:
-        manifest_path = self._manifest_path(state_dir, launch_id)
+        manifest_path = self._manifest_path(state_dir, run_id)
+        if not manifest_path.is_file():
+            raise FleetRuntimeError(f"runtime manifest not found: {run_id}")
+        with self._hold_process_lock(
+            state_dir, run_id, timeout_seconds=0,
+            timeout_message=f"run {run_id!r} already has a controller",
+        ):
+            manifest = _load_document(manifest_path)
+            self._validate_runtime_manifest(manifest)
+            if manifest["run_id"] != run_id:
+                raise FleetRuntimeError("runtime manifest run identity changed")
+            if manifest["phase"] != "active":
+                raise FleetRuntimeError(
+                    f"run {run_id!r} is {manifest['phase']!r}; only an active run can be resumed"
+                )
+            bundle = self._execution_bundle_from_manifest(manifest, state_dir, run_id)
+            monitor = self._with_execution_bundle(bundle).monitor(
+                run_id, state_dir, once=once, poll_seconds=poll_seconds
+            )
+        return {**manifest, "status": "resumed", "monitor": monitor}
+
+    def stop(
+        self, fleet_id: str, state_dir: Path, *, execute: bool = False
+    ) -> dict[str, Any]:
+        manifest_path = self._manifest_path(state_dir, fleet_id)
         if not execute:
             if not manifest_path.exists():
-                return {"launch_id": launch_id, "status": "inactive"}
+                return {"run_id": fleet_id, "status": "inactive"}
             manifest = _load_document(manifest_path)
             fleet_id = str(manifest.get("fleet_id") or "")
             if not fleet_id:
                 raise FleetRuntimeError("runtime manifest has no fleet_id")
             return {
-                "launch_id": launch_id,
+                "run_id": fleet_id,
                 "fleet_id": fleet_id,
                 "status": "planned",
                 "action": "stop",
             }
-        with self._publish_stop_request(state_dir, launch_id):
-            with self._hold_launch_lock(
+        with self._publish_stop_request(state_dir, fleet_id):
+            with self._hold_process_lock(
                 state_dir,
-                launch_id,
+                fleet_id,
                 timeout_seconds=30,
                 timeout_message=(
-                    f"Fleet launch {launch_id!r} did not stop within 30 seconds"
+                    f"Fleet {fleet_id!r} did not stop within 30 seconds"
                 ),
             ):
                 if not manifest_path.exists():
-                    return {"launch_id": launch_id, "status": "inactive"}
+                    return {"run_id": fleet_id, "status": "inactive"}
                 manifest = _load_document(manifest_path)
                 fleet_id = str(manifest.get("fleet_id") or "")
                 if not fleet_id:
@@ -1623,7 +1386,7 @@ class FleetRuntime(ExecutionIdentity):
                     ),
                 ):
                     if not manifest_path.exists():
-                        return {"launch_id": launch_id, "status": "inactive"}
+                        return {"run_id": fleet_id, "status": "inactive"}
                     locked_manifest = _load_document(manifest_path)
                     locked_fleet_id = str(locked_manifest.get("fleet_id") or "")
                     if locked_fleet_id != fleet_id:
@@ -1631,7 +1394,7 @@ class FleetRuntime(ExecutionIdentity):
                             "runtime manifest Fleet identity changed while stopping"
                         )
                     bundle = self._execution_bundle_from_manifest(
-                        locked_manifest, state_dir, launch_id
+                        locked_manifest, state_dir, fleet_id
                     )
                     stable_runtime = self._with_execution_bundle(bundle)
                     phase = str(locked_manifest.get("phase") or "active")
@@ -1654,14 +1417,13 @@ class FleetRuntime(ExecutionIdentity):
                             manifest_path, stopping_manifest, "stopping"
                         )
                         herdr = stable_runtime._stop_locked(
-                            launch_id,
+                            fleet_id,
                             state_dir,
                             manifest_path,
                             stopping_manifest,
-                            fleet_id,
                         )
         return {
-            "launch_id": launch_id,
+            "run_id": fleet_id,
             "fleet_id": fleet_id,
             "status": "stopped",
             "herdr": dict(herdr),
@@ -1669,13 +1431,12 @@ class FleetRuntime(ExecutionIdentity):
 
     def _stop_locked(
         self,
-        launch_id: str,
+        fleet_id: str,
         state_dir: Path,
         manifest_path: Path,
         manifest: Mapping[str, Any],
-        fleet_id: str,
     ) -> Mapping[str, Any]:
-        fleet_state = self._fleet_state_dir(state_dir, launch_id)
+        fleet_state = self._fleet_state_dir(state_dir, fleet_id)
         core_db = fleet_state / "core.sqlite3"
         stop_from_phase = str(
             manifest.get("stop_from_phase") or manifest.get("phase") or "active"
@@ -1695,7 +1456,7 @@ class FleetRuntime(ExecutionIdentity):
                     "--fleet",
                     fleet_id,
                     "--operation-id",
-                    f"runtime-stop:{launch_id}:{manifest['runtime_generation']}",
+                    f"runtime-stop:{fleet_id}:{manifest['runtime_generation']}",
                 ],
                 "Core context invalidation",
             )
@@ -1715,26 +1476,27 @@ class FleetRuntime(ExecutionIdentity):
         return herdr
 
     def remove(
-        self, launch_id: str, state_dir: Path, *, execute: bool = False
+        self, fleet_id: str, state_dir: Path, *, execute: bool = False
     ) -> dict[str, Any]:
-        manifest_path = self._manifest_path(state_dir, launch_id)
+        manifest_path = self._manifest_path(state_dir, fleet_id)
         if not execute:
             return {
-                "launch_id": launch_id,
+                "run_id": fleet_id,
+                "fleet_id": fleet_id,
                 "status": "planned",
                 "action": "remove",
             }
-        with self._publish_stop_request(state_dir, launch_id):
-            with self._hold_launch_lock(
+        with self._publish_stop_request(state_dir, fleet_id):
+            with self._hold_process_lock(
                 state_dir,
-                launch_id,
+                fleet_id,
                 timeout_seconds=30,
                 timeout_message=(
-                    f"Fleet launch {launch_id!r} did not stop within 30 seconds"
+                    f"Fleet {fleet_id!r} did not stop within 30 seconds"
                 ),
             ):
                 if not manifest_path.exists():
-                    return {"launch_id": launch_id, "status": "inactive"}
+                    return {"run_id": fleet_id, "status": "inactive"}
                 manifest = _load_document(manifest_path)
                 fleet_id = str(manifest.get("fleet_id") or "")
                 if not fleet_id:
@@ -1748,7 +1510,7 @@ class FleetRuntime(ExecutionIdentity):
                     ),
                 ):
                     if not manifest_path.exists():
-                        return {"launch_id": launch_id, "status": "inactive"}
+                        return {"run_id": fleet_id, "status": "inactive"}
                     locked_manifest = _load_document(manifest_path)
                     locked_fleet_id = str(locked_manifest.get("fleet_id") or "")
                     if locked_fleet_id != fleet_id:
@@ -1756,7 +1518,7 @@ class FleetRuntime(ExecutionIdentity):
                             "runtime manifest Fleet identity changed while removing"
                         )
                     bundle = self._execution_bundle_from_manifest(
-                        locked_manifest, state_dir, launch_id
+                        locked_manifest, state_dir, fleet_id
                     )
                     stable_runtime = self._with_execution_bundle(bundle)
                     phase = str(locked_manifest.get("phase") or "active")
@@ -1773,23 +1535,21 @@ class FleetRuntime(ExecutionIdentity):
                             manifest_path, stopping_manifest, "stopping"
                         )
                         herdr = stable_runtime._stop_locked(
-                            launch_id,
+                            fleet_id,
                             state_dir,
                             manifest_path,
                             stopping_manifest,
-                            fleet_id,
                         )
                     else:
                         herdr = {"status": "already_stopped", "idempotent": True}
                     stopped = {
-                        "launch_id": launch_id,
                         "fleet_id": fleet_id,
                         "status": "stopped",
                         "herdr": dict(herdr),
                     }
                     self._write_manifest(manifest_path, locked_manifest, "removing")
                     core_db = (
-                        self._fleet_state_dir(state_dir, launch_id)
+                        self._fleet_state_dir(state_dir, fleet_id)
                         / "core.sqlite3"
                     )
                     if core_db.exists() and core_db.stat().st_size > 0:
@@ -1814,8 +1574,12 @@ class FleetRuntime(ExecutionIdentity):
                         }
                     if manifest_path.exists():
                         manifest_path.unlink()
+                    run_state = self._fleet_state_dir(state_dir, fleet_id)
+                    if run_state.exists():
+                        self._remove_execution_tree(run_state)
+                    self._mark_run_removed(state_dir, fleet_id)
         return {
-            "launch_id": launch_id,
+            "run_id": fleet_id,
             "fleet_id": fleet_id,
             "status": "removed",
             "stop": stopped,
@@ -1832,8 +1596,6 @@ class FleetRuntime(ExecutionIdentity):
         for path in [
             *fleet_dirs,
             *profile_dirs,
-            *self._launch_roots(fleet_dirs),
-            *self.agent_command_profile_dirs,
             state_dir,
         ]:
             path_existed = path.exists()
@@ -1854,8 +1616,6 @@ class FleetRuntime(ExecutionIdentity):
         for label, paths in (
             ("fleet_dirs", fleet_dirs),
             ("profile_dirs", profile_dirs),
-            ("launch_dirs", self._launch_roots(fleet_dirs)),
-            ("agent_command_profile_dirs", self.agent_command_profile_dirs),
         ):
             checks.append(
                 {
@@ -1907,7 +1667,7 @@ class FleetRuntime(ExecutionIdentity):
 
     def monitor(
         self,
-        launch_id: str,
+        fleet_id: str,
         state_dir: Path,
         *,
         once: bool,
@@ -1915,15 +1675,15 @@ class FleetRuntime(ExecutionIdentity):
     ) -> dict[str, Any]:
         if poll_seconds <= 0:
             raise FleetRuntimeError("poll_seconds must be positive")
-        manifest_path = self._manifest_path(state_dir, launch_id)
+        manifest_path = self._manifest_path(state_dir, fleet_id)
         if not manifest_path.exists():
-            raise FleetRuntimeError(f"runtime manifest not found: {launch_id}")
+            raise FleetRuntimeError(f"runtime manifest not found: {fleet_id}")
         manifest = _load_document(manifest_path)
         fleet_id = str(manifest.get("fleet_id") or "")
         if not fleet_id:
             raise FleetRuntimeError("runtime manifest has no fleet_id")
         execution_bundle = self._execution_bundle_from_manifest(
-            manifest, state_dir, launch_id
+            manifest, state_dir, fleet_id
         )
         execution_runtime = self._with_execution_bundle(execution_bundle)
         processed = 0
@@ -1940,7 +1700,7 @@ class FleetRuntime(ExecutionIdentity):
         previous_term = signal.signal(signal.SIGTERM, stop)
         try:
             while not stopping:
-                if self._stop_requested(state_dir, launch_id):
+                if self._stop_requested(state_dir, fleet_id):
                     stopping = True
                     break
                 if manifest_path.exists():
@@ -1957,9 +1717,9 @@ class FleetRuntime(ExecutionIdentity):
                             "--herdr-command",
                             execution_runtime.herdr_command[0],
                             "--core-db",
-                            str(self._fleet_state_dir(state_dir, launch_id) / "core.sqlite3"),
+                            str(self._fleet_state_dir(state_dir, fleet_id) / "core.sqlite3"),
                             "--herdr-db",
-                            str(self._fleet_state_dir(state_dir, launch_id) / "herdr.sqlite3"),
+                            str(self._fleet_state_dir(state_dir, fleet_id) / "herdr.sqlite3"),
                             "--fleet",
                             fleet_id,
                             "--worker-id",
@@ -2000,16 +1760,16 @@ class FleetRuntime(ExecutionIdentity):
             "last_error": last_error,
         }
 
-    def status(self, launch_id: str, state_dir: Path) -> dict[str, Any]:
-        manifest_path = self._manifest_path(state_dir, launch_id)
+    def status(self, fleet_id: str, state_dir: Path) -> dict[str, Any]:
+        manifest_path = self._manifest_path(state_dir, fleet_id)
         if not manifest_path.exists():
-            return {"launch_id": launch_id, "status": "inactive"}
+            return {"run_id": fleet_id, "status": "inactive"}
         manifest = _load_document(manifest_path)
         fleet_id = str(manifest.get("fleet_id") or "")
         if not fleet_id:
             raise FleetRuntimeError("runtime manifest has no fleet_id")
         execution_bundle = self._execution_bundle_from_manifest(
-            manifest, state_dir, launch_id
+            manifest, state_dir, fleet_id
         )
         phase = str(manifest["phase"])
         if phase in {
@@ -2019,9 +1779,10 @@ class FleetRuntime(ExecutionIdentity):
             "stopping",
             "stopped",
             "removing",
+            "failed",
         }:
             return {
-                "launch_id": launch_id,
+                "run_id": fleet_id,
                 "fleet_id": fleet_id,
                 "status": phase,
                 "recovery_required": phase in {"stopping", "removing"},
@@ -2030,42 +1791,22 @@ class FleetRuntime(ExecutionIdentity):
         execution_runtime = self._with_execution_bundle(execution_bundle)
         drift = False
         for path_key, hash_key in (
-            ("launch_path", "launch_hash"),
             ("fleet_path", "fleet_source_hash"),
             ("profile_path", "profile_hash"),
             ("role_catalog_path", "role_catalog_hash"),
         ):
             configured_path = manifest.get(path_key)
-            if configured_path is None and path_key == "launch_path" and manifest.get("legacy"):
-                continue
             if not isinstance(configured_path, str) or not Path(configured_path).is_file():
                 drift = True
                 continue
             drift = drift or _content_hash(_load_document(Path(configured_path))) != manifest.get(
                 hash_key
             )
-        command_sources = manifest.get("agent_command_profile_sources", [])
-        if not isinstance(command_sources, list):
-            drift = True
-        else:
-            for source in command_sources:
-                if not isinstance(source, Mapping):
-                    drift = True
-                    continue
-                configured_path = source.get("path")
-                expected_hash = source.get("hash")
-                if (
-                    not isinstance(configured_path, str)
-                    or not Path(configured_path).is_file()
-                    or _content_hash(_load_document(Path(configured_path)))
-                    != expected_hash
-                ):
-                    drift = True
         core = execution_runtime._run_json(
             [
                 *execution_runtime.core_command,
                 "--db",
-                str(self._fleet_state_dir(state_dir, launch_id) / "core.sqlite3"),
+                str(self._fleet_state_dir(state_dir, fleet_id) / "core.sqlite3"),
                 "status",
                 "--fleet",
                 fleet_id,
@@ -2076,7 +1817,7 @@ class FleetRuntime(ExecutionIdentity):
             [
                 *execution_runtime.herdr_command,
                 "--state-db",
-                str(self._fleet_state_dir(state_dir, launch_id) / "herdr.sqlite3"),
+                str(self._fleet_state_dir(state_dir, fleet_id) / "herdr.sqlite3"),
                 "status",
                 "--fleet",
                 fleet_id,
@@ -2084,7 +1825,7 @@ class FleetRuntime(ExecutionIdentity):
             "Herdr fleet status",
         )
         return {
-            "launch_id": launch_id,
+            "run_id": fleet_id,
             "fleet_id": fleet_id,
             "status": "configuration_drift" if drift else "active",
             "configuration": dict(manifest),
@@ -2098,6 +1839,14 @@ def _default_state_dir() -> Path:
     return Path(root) / "agent-fleet" if root else Path.home() / ".local/state/agent-fleet"
 
 
+def _default_role_catalog() -> Path | None:
+    configured = os.environ.get("AGENT_ROLES_CATALOG")
+    if configured:
+        return Path(configured)
+    default = Path.home() / ".config/agent-roles/catalogs/builtin@1.json"
+    return default if default.is_file() else None
+
+
 def build_parser() -> argparse.ArgumentParser:
     adapter_root = Path(__file__).resolve().parent
     core_default = os.environ.get("AGENT_FLEET_CORE_COMMAND") or shutil.which(
@@ -2106,20 +1855,11 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--fleet-dir", type=Path, action="append")
     common.add_argument("--profile-dir", type=Path, action="append", default=[])
-    common.add_argument("--launch-dir", type=Path, action="append", default=[])
-    common.add_argument(
-        "--agent-command-profile-dir", type=Path, action="append", default=[]
-    )
-    common.add_argument(
-        "--legacy-fleet",
-        action="store_true",
-        help="deprecated: build an in-memory LaunchProfile from a Fleet v1 document",
-    )
     common.add_argument("--state-dir", type=Path, default=_default_state_dir())
     common.add_argument(
         "--role-catalog",
         type=Path,
-        default=(Path(os.environ["AGENT_ROLES_CATALOG"]) if os.environ.get("AGENT_ROLES_CATALOG") else None),
+        default=_default_role_catalog(),
     )
     common.add_argument("--core-command", default=core_default)
     common.add_argument(
@@ -2134,7 +1874,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", parents=[common])
     sub.add_parser("list", parents=[common])
     plan = sub.add_parser("plan", parents=[common])
-    plan.add_argument("fleet")
+    plan.add_argument(
+        "fleet",
+        help="absolute Fleet YAML path",
+    )
     plan.add_argument("--cwd", default=str(Path.cwd()))
     plan.add_argument(
         "--agent-kind",
@@ -2143,7 +1886,10 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     start = sub.add_parser("start", parents=[common])
-    start.add_argument("fleet")
+    start.add_argument(
+        "fleet",
+        help="absolute Fleet YAML path",
+    )
     start.add_argument("--cwd", default=str(Path.cwd()))
     start.add_argument(
         "--agent-kind",
@@ -2152,15 +1898,25 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     start.add_argument("--execute", action="store_true")
+    start.add_argument(
+        "--run-id",
+        help="explicit unique run ID (normally generated automatically)",
+    )
     start.add_argument("--once", action="store_true")
     start.add_argument("--poll-seconds", type=float, default=0.25)
+    runs = sub.add_parser("runs", parents=[common])
+    runs.add_argument("definition_id", nargs="?")
+    resume = sub.add_parser("resume", parents=[common])
+    resume.add_argument("run_id")
+    resume.add_argument("--once", action="store_true")
+    resume.add_argument("--poll-seconds", type=float, default=0.25)
     status = sub.add_parser("status", parents=[common])
-    status.add_argument("fleet")
+    status.add_argument("run_id")
     stop = sub.add_parser("stop", parents=[common])
-    stop.add_argument("fleet")
+    stop.add_argument("run_id")
     stop.add_argument("--execute", action="store_true")
     remove = sub.add_parser("remove", parents=[common])
-    remove.add_argument("fleet")
+    remove.add_argument("run_id")
     remove.add_argument("--execute", action="store_true")
     return parser
 
@@ -2170,23 +1926,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     config_root = Path.home() / ".config" / "agent-fleet"
     fleet_dirs = args.fleet_dir or [config_root / "fleets"]
     profile_dirs = args.profile_dir or [config_root / "view-profiles"]
-    launch_dirs = args.launch_dir or [config_root / "herdr-launch-profiles"]
-    agent_command_profile_dirs = args.agent_command_profile_dir or [
-        config_root / "agent-command-profiles"
-    ]
     try:
         if args.action in {"list", "plan", "start"} and args.role_catalog is None:
             raise FleetRuntimeError(
-                "Role Catalog is required: pass --role-catalog or set AGENT_ROLES_CATALOG"
+                "Role Catalog is required: install/export agent-roles builtin@1, "
+                "pass --role-catalog, or set AGENT_ROLES_CATALOG"
             )
         runtime = FleetRuntime(
             [args.core_command],
             [args.herdr_command],
             [args.controller_command],
             role_catalog=args.role_catalog,
-            launch_dirs=launch_dirs,
-            agent_command_profile_dirs=agent_command_profile_dirs,
-            allow_legacy_fleet=args.legacy_fleet,
         )
         if args.action == "init":
             result = runtime.initialize_user_config(
@@ -2218,13 +1968,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 execute=args.execute,
                 once=args.once,
                 poll_seconds=args.poll_seconds,
+                run_id=args.run_id,
+            )
+        elif args.action == "runs":
+            result = runtime.runs(args.state_dir, args.definition_id)
+        elif args.action == "resume":
+            result = runtime.resume(
+                args.run_id, args.state_dir, once=args.once,
+                poll_seconds=args.poll_seconds,
             )
         elif args.action == "status":
-            result = runtime.status(args.fleet, args.state_dir)
+            result = runtime.status(args.run_id, args.state_dir)
         elif args.action == "stop":
-            result = runtime.stop(args.fleet, args.state_dir, execute=args.execute)
+            result = runtime.stop(args.run_id, args.state_dir, execute=args.execute)
         else:
-            result = runtime.remove(args.fleet, args.state_dir, execute=args.execute)
+            result = runtime.remove(args.run_id, args.state_dir, execute=args.execute)
     except (FleetRuntimeError, OSError, subprocess.SubprocessError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2

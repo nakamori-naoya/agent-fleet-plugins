@@ -19,9 +19,7 @@ PROFILE_REF_PATTERN = re.compile(
     r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:/[a-z][a-z0-9]*(?:-[a-z0-9]+)*)?@[1-9][0-9]*$"
 )
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
-SUPPORTED_API_VERSIONS = frozenset(
-    {"fleet.herdr.harness/v1", "fleet.herdr.harness/v2"}
-)
+SUPPORTED_API_VERSIONS = frozenset({"fleet.herdr.harness/v2"})
 FORBIDDEN_KEYS = frozenset(
     {"fleet", "fleet_id", "fleet_ref", "pane", "pane_id", "workspace_id", "tab_id"}
 )
@@ -79,69 +77,6 @@ def _identifier_list(value: Any, path: str, errors: list[str]) -> None:
             errors.append(f"{path}[{index}]: duplicate identifier {item!r}")
         elif isinstance(item, str):
             seen.add(item)
-
-
-def _validate_v1_layout(layout: Mapping[str, Any], errors: list[str]) -> None:
-    children = layout.get("children")
-    if not isinstance(children, list) or len(children) != 2:
-        errors.append("$.spec.layout.children: must contain manager slot and member stack")
-        return
-    slot, stack = children
-    if not isinstance(slot, Mapping):
-        errors.append("$.spec.layout.children[0]: must be an object")
-    else:
-        _unknown_keys(
-            slot,
-            {"type", "selector", "weight", "pane_slot"},
-            "$.spec.layout.children[0]",
-            errors,
-        )
-        if slot.get("type") != "slot" or slot.get("selector") != "manager":
-            errors.append("$.spec.layout.children[0]: must be a slot selecting manager")
-        if "pane_slot" in slot and (
-            not isinstance(slot.get("pane_slot"), str) or not slot.get("pane_slot")
-        ):
-            errors.append("$.spec.layout.children[0].pane_slot: must be non-empty")
-    if not isinstance(stack, Mapping):
-        errors.append("$.spec.layout.children[1]: must be an object")
-    else:
-        _unknown_keys(
-            stack,
-            {
-                "type",
-                "selector",
-                "weight",
-                "direction",
-                "distribution",
-                "pane_slot_prefix",
-            },
-            "$.spec.layout.children[1]",
-            errors,
-        )
-        if stack.get("type") != "stack" or stack.get("selector") != "non-manager":
-            errors.append(
-                "$.spec.layout.children[1]: must be a stack selecting non-manager"
-            )
-        if stack.get("direction") not in {"horizontal", "vertical"}:
-            errors.append(
-                "$.spec.layout.children[1].direction: must be horizontal or vertical"
-            )
-        if stack.get("distribution") != "equal":
-            errors.append("$.spec.layout.children[1].distribution: must be equal")
-        if "pane_slot_prefix" in stack and (
-            not isinstance(stack.get("pane_slot_prefix"), str)
-            or not stack.get("pane_slot_prefix")
-        ):
-            errors.append(
-                "$.spec.layout.children[1].pane_slot_prefix: must be non-empty"
-            )
-    for index, child in enumerate(children):
-        if isinstance(child, Mapping):
-            _positive_weight(
-                child.get("weight"),
-                f"$.spec.layout.children[{index}].weight",
-                errors,
-            )
 
 
 def _validate_v2_layout(layout: Mapping[str, Any], errors: list[str]) -> None:
@@ -215,7 +150,7 @@ def validate_document(document: Any) -> list[str]:
     _unknown_keys(document, {"apiVersion", "kind", "metadata", "spec"}, "$", errors)
     api_version = document.get("apiVersion")
     if api_version not in SUPPORTED_API_VERSIONS:
-        errors.append("$.apiVersion: must be fleet.herdr.harness/v1 or v2")
+        errors.append("$.apiVersion: must be fleet.herdr.harness/v2")
     if document.get("kind") != "ViewProfile":
         errors.append("$.kind: must be 'ViewProfile'")
 
@@ -261,9 +196,7 @@ def validate_document(document: Any) -> list[str]:
             errors.append("$.spec.layout.type: must be 'split'")
         if layout.get("direction") not in {"horizontal", "vertical"}:
             errors.append("$.spec.layout.direction: must be horizontal or vertical")
-        if api_version == "fleet.herdr.harness/v1":
-            _validate_v1_layout(layout, errors)
-        elif api_version == "fleet.herdr.harness/v2":
+        if api_version == "fleet.herdr.harness/v2":
             _validate_v2_layout(layout, errors)
 
     _forbidden_keys(document, "$", errors)
@@ -283,28 +216,6 @@ def resolve_layout_groups(
         agent_ref: role_ref.rsplit("@", 1)[0] for agent_ref, role_ref in members
     }
     layout = document["spec"]["layout"]
-    if document["apiVersion"] == "fleet.herdr.harness/v1":
-        manager_slot, member_stack = layout["children"]
-        non_manager_refs = tuple(ref for ref in member_refs if ref != manager_ref)
-        if not non_manager_refs:
-            raise ViewProfileError(
-                "View Profile non-manager stack requires at least one member"
-            )
-        return (
-            ResolvedLayoutGroup(
-                manager_slot.get("pane_slot", "manager"),
-                (manager_ref,),
-                manager_slot["weight"],
-                "vertical",
-            ),
-            ResolvedLayoutGroup(
-                member_stack.get("pane_slot_prefix", "members"),
-                non_manager_refs,
-                member_stack["weight"],
-                member_stack["direction"],
-            ),
-        )
-
     known_refs = set(member_refs)
     assigned: set[str] = set()
     groups: list[ResolvedLayoutGroup] = []

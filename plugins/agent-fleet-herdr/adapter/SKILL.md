@@ -7,13 +7,15 @@ description: logical agent_refをHerdr 0.8のworkspace、tab、pane、agentへ�
 
 ## 利用者向けの統合入口
 
-複数の艦隊を選択起動する場合は`scripts/fleet-runtime`を使う。既定では`~/.config/agent-fleet/fleets`、`~/.config/agent-fleet/herdr-launch-profiles`、`~/.config/agent-fleet/view-profiles`を読む。別の場所は`--fleet-dir`、`--launch-dir`、`--profile-dir`で指定する。役割定義は`agent-roles`が書き出した検査済みCatalogを`--role-catalog`または`AGENT_ROLES_CATALOG`で明示する。pluginのinstall先を暗黙探索しない。
+Fleetを起動する場合は`scripts/fleet-runtime plan /absolute/path/to/fleet.yml`と`scripts/fleet-runtime start /absolute/path/to/fleet.yml --execute`を使う。Fleetファイルは任意のdirectoryに置ける。各memberの起動コマンドとモデルはFleetに置き、`spec.view_profile`を省略するとplugin既定ViewProfileを使う。役割定義は`agent-roles`が書き出した検査済みCatalogを`--role-catalog`または`AGENT_ROLES_CATALOG`で明示し、既定の`~/.config/agent-roles/catalogs/builtin@1.json`が存在すればそれを使う。
 
-`init`は利用者の設定・状態directoryだけを作り、設定実体を埋め込まない。`doctor`は設定directory、Core CLI、Herdr、状態directoryを診断する。`list`は起動設定と解決状態を列挙する。`plan <launch_id>`は艦隊、Herdr起動、表示、必要なエージェント起動プロファイル、内容要約値、pane計画を返し、DBもdirectoryも作らない。`start <launch_id> --execute`はCore、Herdr、役割文脈、初期タスクを冪等に準備し、paneを持たない配送制御をforegroundで続ける。`status <launch_id>`はCoreとHerdrの公開CLIを通して状態を結合する。同じ内容で再起動した場合はpaneを増やさず配送制御を再開し、内容が変わっていれば暗黙適用せず競合として止める。旧Fleet v1を変換する場合だけ`--legacy-fleet`を明示する。
+`plan <absolute-fleet-path>`は艦隊、表示、起動コマンド、内容要約値、pane計画を返し、DBもdirectoryも作らない。`start <absolute-fleet-path> --execute`は新しいrunとしてCore、Herdr、役割文脈、初期タスクを準備し、paneを持たない配送制御をforegroundで続ける。`status <run-id>`はCoreとHerdrの公開CLIを通して対象runの状態を結合する。
+
+`start --execute`は起動ごとに一意なrun IDを発行する。同じFleet YAMLを繰り返し起動してよく、各runのworkspace、Core DB、Herdr DB、task、command、hook contextを分離する。YAMLの`metadata.id`はdefinition IDであり、実行操作には`runs [definition-id]`で得たrun IDを使う。`status`、`stop --execute`、`remove --execute`はrun IDを対象とし、controllerだけが終了したactive runは`resume <run-id>`で再開する。
 
 `RuntimeBinding` と `ViewPlacement` は `--state-db` で指定したadapter専用SQLiteへ保存する。Core DBにはpane IDを入れない。paneが見つからない場合はbindingを `lost` にして停止し、`bind` または `rebind` で明示的に修復する。MVPのreconcileはpane lostを検出するだけで自動再配置しない。
 
-`provision --fleet-json '<Portable Fleet JSON>' --launch-profile-json '<Herdr LaunchProfile JSON>' --agent-command-profiles-json '<メンバー別の解決済み起動コマンドJSON>' --view-profile-json '<ViewProfile JSON>' --cwd <path>` は、LaunchProfileの`fleet_ref`、`view_profile_ref`、`agent_command_profiles`が入力実体に一致すること、人数制約、全メンバーの一意な列割当を検査する。起動プロファイルを指定したメンバーはHerdr paneの対話シェルでそのコマンドを実行するため、alias・shell function・PATH上の実行可能ファイルを選べる。各メンバーの`runtime.product`、`runtime.model`、`runtime.effort`は製品別の起動引数として後から合成する。`fallback: fail`のClaudeにはモデル自動切替を無効にする設定を渡す。Profileのweightを決定的なHerdr 0.8逐次splitへ変換し、execute中にworkspace/tab/pane IDを解析できなければbindingやviewを保存せず停止する。同じFleet、Profile、member、設定文書の内容、作業directory、起動条件の合成hashが揃っていれば`already_provisioned`を返し、同一版名の内容変更を含む暗黙上書きは拒否する。
+`provision --fleet-json '<Fleet JSON>' --view-profile-json '<ViewProfile JSON>' --cwd <path>` は、起動設定、人数制約、全メンバーの一意な列割当を検査する。起動コマンドはHerdr paneの対話シェルで実行するため、alias・shell function・PATH上の実行可能ファイルを選べる。Profileのweightを決定的なHerdr 0.8逐次splitへ変換し、workspace作成後にpane数、pane ID、各矩形の幅・高さ・位置・被覆、split方向・比率を再取得して検査する。一つでも一致しなければbindingやviewを保存せずworkspaceを閉じる。同じFleet、Profile、member、設定文書の内容、作業directory、起動条件の合成hashが揃っていれば`already_provisioned`を返し、同一版名の内容変更を含む暗黙上書きは拒否する。
 
 `status --fleet <fleet_id>` はbinding、placement、`profile_ref`を公開JSONで返す読み取り専用操作である。HerdrへのprobeやSQLite更新は行わない。provisionのdry-runも指定されたstate DBや親directoryを作成しない。
 

@@ -6,7 +6,7 @@ additionalProperties: false
 required: [apiVersion, kind, metadata, spec]
 properties:
   apiVersion:
-    enum: [fleet.harness/v1, fleet.harness/v2]
+    const: fleet.harness/v3
   kind:
     const: Fleet
   metadata:
@@ -38,23 +38,13 @@ properties:
           $ref: "#/$defs/taskAssignment"
       collaboration:
         $ref: "#/$defs/collaboration"
-      runtime:
-        $ref: "#/$defs/legacyRuntimeBinding"
-      view:
-        $ref: "#/$defs/legacyViewPlacement"
-allOf:
-  - if:
-      properties:
-        apiVersion:
-          const: fleet.harness/v2
-      required: [apiVersion]
-    then:
-      properties:
-        spec:
-          not:
-            anyOf:
-              - required: [runtime]
-              - required: [view]
+      view_profile:
+        description: Optional path to a ViewProfile, resolved relative to this Fleet file.
+        $ref: "#/$defs/nonEmptyString"
+      codex_hook_trust:
+        description: Optional Codex hook trust policy.
+        type: string
+        enum: [preapproved, review]
 $defs:
   nonEmptyString:
     type: string
@@ -71,7 +61,7 @@ $defs:
     description: The AI product, model, and reasoning effort requested for one member.
     type: object
     additionalProperties: false
-    required: [product, model, effort, fallback]
+    required: [product, command, model, effort, fallback]
     properties:
       product:
         type: string
@@ -85,6 +75,10 @@ $defs:
         description: Whether the product may silently switch to another model.
         type: string
         enum: [fail, product-default]
+      command:
+        description: Interactive-shell command used to launch this member.
+        type: string
+        pattern: ^(?:[A-Za-z_][A-Za-z0-9_.+-]*|/(?:[A-Za-z0-9_.+-]+/)*[A-Za-z0-9_.+-]+)$
   agentInstance:
     description: A fleet member instance; it is not a reusable RoleDefinition.
     type: object
@@ -138,23 +132,3 @@ $defs:
             const: manager
           include_task_updates:
             type: boolean
-  legacyRuntimeBinding:
-    description: Deprecated v1-only Herdr binding. New Fleet v2 documents must use a Herdr LaunchProfile.
-    type: object
-    additionalProperties: false
-    required: [provider]
-    properties:
-      provider:
-        $ref: "#/$defs/nonEmptyString"
-      codex_hook_trust:
-        type: string
-        enum: [preapproved, review]
-  legacyViewPlacement:
-    description: Deprecated v1-only ViewProfile reference.
-    type: object
-    additionalProperties: false
-    required: [profile_ref]
-    properties:
-      profile_ref:
-        type: string
-        pattern: ^[a-z][a-z0-9]*(-[a-z0-9]+)*(/[a-z][a-z0-9]*(-[a-z0-9]+)*)?@[1-9][0-9]*$

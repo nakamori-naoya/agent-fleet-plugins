@@ -6,7 +6,7 @@ additionalProperties: false
 required: [apiVersion, kind, metadata, spec]
 properties:
   apiVersion:
-    enum: [fleet.herdr.harness/v1, fleet.herdr.harness/v2]
+    const: fleet.herdr.harness/v2
   kind:
     const: ViewProfile
   metadata:
@@ -48,37 +48,16 @@ properties:
           children:
             type: array
 allOf:
-  - if:
-      properties:
-        apiVersion:
-          const: fleet.herdr.harness/v1
-    then:
-      properties:
-        spec:
-          properties:
-            layout:
-              properties:
-                children:
-                  minItems: 2
-                  maxItems: 2
-                  prefixItems:
-                    - $ref: "#/$defs/managerSlot"
-                    - $ref: "#/$defs/memberStack"
-  - if:
-      properties:
-        apiVersion:
-          const: fleet.herdr.harness/v2
-    then:
-      properties:
-        spec:
-          properties:
-            layout:
-              properties:
-                children:
-                  minItems: 2
-                  maxItems: 8
-                  items:
-                    $ref: "#/$defs/layoutGroup"
+  - properties:
+      spec:
+        properties:
+          layout:
+            properties:
+              children:
+                minItems: 2
+                maxItems: 8
+                items:
+                  $ref: "#/$defs/layoutGroup"
 $defs:
   identifier:
     type: string
@@ -86,38 +65,6 @@ $defs:
   positiveWeight:
     type: integer
     minimum: 1
-  managerSlot:
-    type: object
-    additionalProperties: false
-    required: [type, selector, weight]
-    properties:
-      type:
-        const: slot
-      selector:
-        const: manager
-      weight:
-        $ref: "#/$defs/positiveWeight"
-      pane_slot:
-        type: string
-        minLength: 1
-  memberStack:
-    type: object
-    additionalProperties: false
-    required: [type, selector, weight, direction, distribution]
-    properties:
-      type:
-        const: stack
-      selector:
-        const: non-manager
-      weight:
-        $ref: "#/$defs/positiveWeight"
-      direction:
-        enum: [horizontal, vertical]
-      distribution:
-        const: equal
-      pane_slot_prefix:
-        type: string
-        minLength: 1
   layoutGroup:
     type: object
     additionalProperties: false

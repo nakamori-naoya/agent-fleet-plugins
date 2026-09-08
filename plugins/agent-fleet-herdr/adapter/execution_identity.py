@@ -113,14 +113,11 @@ class ExecutionIdentity:
             candidates = [
                 root / "fleet_controller.py",
                 root / "herdr_adapter.py",
-                root / "launch_profiles.py",
-                root / "agent_command_profiles.py",
                 root / "view_profiles.py",
                 root / "scripts" / "fleet-controller",
                 root / "scripts" / "fleet-herdr",
-                root / "schema" / "launch-profile.schema.yml",
-                root / "schema" / "agent-command-profile.schema.yml",
                 root / "schema" / "view-profile.schema.yml",
+                root / "config" / "default-view-profile.yml",
                 hook_plugin / "hooks" / "claude-hooks.json",
                 hook_plugin / ".claude-plugin" / "plugin.json",
             ]
@@ -543,12 +540,12 @@ class ExecutionIdentity:
         self,
         manifest: Mapping[str, Any],
         state_dir: Path,
-        launch_id: str,
+        fleet_id: str,
     ) -> ExecutionBundle:
         self._validate_runtime_manifest(manifest)
-        if manifest["launch_id"] != launch_id:
+        if manifest["fleet_id"] != fleet_id:
             raise FleetRuntimeError(
-                "runtime manifest launch identity does not match the requested launch"
+                "runtime manifest Fleet identity does not match the requested Fleet"
             )
         source_identity = manifest.get("execution_identity")
         snapshot_root_value = manifest.get("execution_snapshot_root")
@@ -562,7 +559,7 @@ class ExecutionIdentity:
                 "runtime has no immutable execution snapshot; remove it with its "
                 "original plugin version and start it again"
             )
-        fleet_state_dir = self._fleet_state_dir(state_dir, launch_id)
+        fleet_state_dir = self._fleet_state_dir(state_dir, fleet_id)
         allowed_root = self._prepare_private_runtime_directory(
             fleet_state_dir,
             "execution-runtimes",
@@ -626,7 +623,7 @@ class ExecutionIdentity:
         if not isinstance(hook_sha256, str) or not isinstance(hook_runtime, str):
             raise FleetRuntimeError("runtime manifest has no fixed hook runtime")
         hook_payload = self._validate_hook_runtime(
-            self._fleet_state_dir(state_dir, launch_id),
+            self._fleet_state_dir(state_dir, fleet_id),
             Path(hook_runtime),
             hook_sha256,
         ).read_bytes()
@@ -648,10 +645,17 @@ class ExecutionIdentity:
         phase = manifest.get("phase")
         if not isinstance(phase, str) or phase not in RUNTIME_PHASES:
             raise FleetRuntimeError("runtime manifest has an invalid or missing phase")
-        for key in ("launch_id", "fleet_id"):
-            value = manifest.get(key)
-            if not isinstance(value, str) or not value:
-                raise FleetRuntimeError(f"runtime manifest has no {key}")
+        value = manifest.get("fleet_id")
+        if not isinstance(value, str) or not value:
+            raise FleetRuntimeError("runtime manifest has no fleet_id")
+        run_id = manifest.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            raise FleetRuntimeError("runtime manifest has no run_id")
+        if value != run_id:
+            raise FleetRuntimeError("runtime manifest fleet_id must equal run_id")
+        definition_id = manifest.get("definition_id")
+        if not isinstance(definition_id, str) or not definition_id:
+            raise FleetRuntimeError("runtime manifest has no definition_id")
         runtime_generation = manifest.get("runtime_generation")
         if not isinstance(runtime_generation, str) or not runtime_generation:
             raise FleetRuntimeError("runtime manifest has no runtime_generation")
@@ -786,29 +790,12 @@ class ExecutionIdentity:
         products = sorted(
             {member["runtime"]["product"] for member in resolved.fleet["spec"]["members"]}
         )
-        unprofiled_products = {
-            member["runtime"]["product"]
+        commands_by_agent = {
+            str(member["agent_ref"]): str(member["runtime"]["command"])
             for member in resolved.fleet["spec"]["members"]
-            if str(member["agent_ref"]) not in resolved.agent_command_profiles
         }
-        commands_by_agent: dict[str, str] = {}
-        for member in resolved.fleet["spec"]["members"]:
-            agent_ref = str(member["agent_ref"])
-            profile = resolved.agent_command_profiles.get(agent_ref)
-            command = (
-                str(profile["command"])
-                if profile is not None
-                else str(member["runtime"]["product"])
-            )
-            commands_by_agent[agent_ref] = command
         if require_agent_launch:
-            profiled_commands = sorted(
-                {
-                    profile["command"]
-                    for profile in resolved.agent_command_profiles.values()
-                }
-            )
-            for command in profiled_commands:
+            for command in sorted(set(commands_by_agent.values())):
                 completed = self.runner(
                     self._interactive_shell_argv("command", ["-v", command]),
                     capture_output=True,
@@ -817,19 +804,9 @@ class ExecutionIdentity:
                 )
                 if completed.returncode != 0:
                     raise FleetRuntimeError(
-                        "AgentCommandProfile command is unavailable in the "
+                        "Fleet member command is unavailable in the "
                         f"interactive shell: {command}"
                     )
-        if require_agent_launch:
-            missing = sorted(
-                product
-                for product in unprofiled_products
-                if shutil.which(product) is None
-            )
-            if missing:
-                raise FleetRuntimeError(
-                    "required agent product is unavailable: " + ", ".join(missing)
-                )
         preflight: dict[str, Any] = {
             "herdr_version": version,
             "products": products,
@@ -946,42 +923,18 @@ class ExecutionIdentity:
             preflight["codex_hook_registrations"] = registrations
         return preflight
 
-    @staticmethod
-    def _assert_runtime_identity(current: Mapping[str, Any], expected: Mapping[str, Any]) -> None:
-        if "execution_identity" not in current:
-            raise FleetRuntimeError("runtime identity conflict: the existing Fleet has a legacy manifest with no recorded identity. Start with a new fleet ID, or remove this runtime using the same installed version.")
-        if current.get("execution_identity") != expected:
-            raise FleetRuntimeError(
-                "runtime identity conflict: the existing Fleet was started with a "
-                f"different executable identity (actual={current.get('execution_identity')!r}, "
-                f"expected={expected!r}). Start with a new fleet ID, or remove the existing runtime."
-            )
-
     def _assert_config_snapshot(self, resolved: ResolvedFleet) -> None:
-        """Reject source changes made after the three documents were composed."""
+        """Reject source changes made after the configuration was resolved."""
         checks: list[tuple[str, Path, str]] = [
             ("Fleet", resolved.fleet_path, resolved.fleet_source_hash),
             ("ViewProfile", resolved.profile_path, resolved.profile_source_hash),
         ]
-        if resolved.launch_path is not None and resolved.launch_source_hash is not None:
-            checks.append(
-                ("LaunchProfile", resolved.launch_path, resolved.launch_source_hash)
-            )
         if self.role_catalog is not None and resolved.role_catalog_hash is not None:
             checks.append(
                 ("role catalog", self.role_catalog, resolved.role_catalog_hash)
-            )
-        for source in resolved.agent_command_profile_sources:
-            checks.append(
-                (
-                    f"AgentCommandProfile {source['profile_ref']}",
-                    Path(source["path"]),
-                    source["hash"],
-                )
             )
         for label, path, expected in checks:
             if _content_hash(_load_document(path)) != expected:
                 raise FleetRuntimeError(
                     f"configuration changed during launch preflight: {label} ({path})"
                 )
-

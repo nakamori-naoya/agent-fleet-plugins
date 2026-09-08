@@ -1,216 +1,220 @@
 # Agent Fleet Plugins
 
-YAMLのFleet Specを正本に、logical agent、task、command、eventを管理し、Herdr 0.8へruntime/view操作を委譲するClaude Code/Codex両対応marketplaceである。
+YAMLでmanager、worker、advisor、reviewerと使用モデルを定義し、Herdr上でClaude CodeとCodexの艦隊を起動するpluginである。
 
-公開インストール単位は`agent-fleet-core`と`agent-fleet-herdr`である。Fleetは実行基盤なので、利用者の権限を最小にするためCoreとHerdr Adapterだけは分ける。役割HookはHerdr package内の実装であり、個別のmarketplace entryやインストール対象にはしない。Coreだけを使う利用者へHerdr操作権限を同梱せず、通常セッションで役割文脈を注入しない。Fleet Specにはdesired stateだけを記載し、pane IDや実行状態はSQLiteのobserved stateへ分離する。
+このREADMEは、Fleetを設定して起動・確認・停止する手順を扱う。責務分離や状態管理の考え方は[コンセプトと設計](docs/concepts.md)に分けている。
 
-## こんなときに使う
+## 必要なもの
 
-**複数のAIエージェントへ役割と仕事を割り当て、報告とレビューを追跡したいときに使う。** 単に複数のCLIを並べるのではなく、誰が何を担当し、どの報告を受けて完了とするかを論理的に管理する。
+- Python 3.10以上
+- Herdr 0.8.x
+- Claude CodeまたはCodex CLI
+- `agent-roles@agent-roles`
+- `agent-fleet-core@agent-fleet`
+- `agent-fleet-herdr@agent-fleet`
+- `~/.config/agent-roles/catalogs/builtin@1.json`に書き出したRole Catalog
 
-- manager、worker、advisor、reviewerを決めて一つの開発目標へ取り組ませたい
-- workerの自己申告だけで完了にせず、reviewerの確認後にmanagerが受け入れたい
-- CodexとClaude Codeを同じ艦隊へ混在させたい
-- AIアカウント、モデル、思考量、pane配置を利用者設定として切り替えたい
-- Herdrを起動せず、タスク、指示、報告、Outboxだけを管理したい
+このsource checkoutから操作する場合は、リポジトリ直下の`scripts/fleet-runtime`を使う。以下の例もリポジトリ直下で実行する。
 
-一人のエージェントで完了する作業には向かない。複数ホストの常駐制御や艦隊間通信も現在の対象外である。
+## pluginをインストールする
 
-## どれを入れるか
-
-| やりたいこと | 必要なplugin |
-|---|---|
-| Fleet Specとタスク状態だけを管理する | `agent-fleet-core` |
-| Herdr上へpaneを作り、エージェントを起動する | `agent-fleet-core`と`agent-fleet-herdr` |
-| 艦隊セッションだけへ役割Hookを渡す | `agent-fleet-herdr`が内包するHookを艦隊起動時だけ有効にする |
-
-役割の意味は`agent-roles`、実行するAI製品とモデルはFleet Spec、画面配置はViewProfileがそれぞれ所有する。これらを一つの設定へ混ぜないことで、艦隊編成を変えずに表示方法やアカウントを交換できる。
-
-## 利用の流れ
-
-1. `agent-roles`から検査済みRole Catalogを書き出す。
-2. Fleet Specへメンバー、役割、モデルを記載する。
-3. AgentCommandProfile、Herdr LaunchProfile、ViewProfileを利用者領域へ置く。
-4. `fleet-runtime plan <launch_id>`で解決結果を確認する。
-5. `fleet-runtime start <launch_id> --execute`で艦隊を起動する。
-6. taskの報告、レビュー、managerの受け入れを状態として追跡する。
-
-たとえば、次のように依頼できる。
-
-```text
-manager 1人、worker 2人、advisor 1人、reviewer 1人の艦隊をdry-runで検査して。
-```
-
-```text
-development-squadを起動し、workerの報告後にreviewerが確認するところまで進捗を追って。
-```
-
-## MVP境界
-
-- manager 1、worker複数、advisor任意
-- `fleet.provision`、`task.assign`、`message.send`、`task.report`、`fleet.reconcile`
-- Herdr 0.8のlocal workspace/pane/agent操作
-- task/event/outboxとruntime bindingのSQLite永続化
-- dry-run既定。prompt deliveryが不明なときは自動再送しない
-
-daemon、multi-host、fleet間gateway、独自Web UI、自動pane再作成は対象外である。
-
-## 公開インストール単位
-
-- `agent-fleet-core`: Fleet Spec、logical agent、task、command、event、outbox
-- `agent-fleet-herdr`: Herdr 0.8の実行時関連付け、利用者定義のpane配置、指示配送
-
-役割Hookは`agent-fleet-herdr`の内部sidecarであり、利用者は個別にインストールしない。
-
-role catalogは別marketplaceの`agent-roles`を使う。Coreだけを使う場合、Herdr pluginをinstallする必要はない。
-
-## 依存関係
-
-外部pluginは`plugin@marketplace`のidentityで指定する。install commandではversionを固定しない。Fleetの公開バージョンはmarketplaceの定義を確認してください。`roles.harness/v1`のcatalog version 1とHerdr 0.8.xのCLI surfaceを前提とする。
-
-| 依存 | 必須度 | 用途 |
-|---|---|---|
-| Codex CLIまたはClaude Code | 必須 | marketplaceとpluginのinstall、skill実行 |
-| Python 3.10以上 | 必須 | Fleet validator、Core、Herdr Adapter |
-| `agent-roles@agent-roles` 0.1.1以上 | Fleet設定の検査・起動で必須 | `role_ref`を検査済みRole Catalogへ解決し、RoleDefinitionの固定版を提供する |
-| `agent-fleet-core@agent-fleet` | 必須 | Fleet Specの検査、logical state、task、outboxの管理 |
-| `agent-fleet-herdr@agent-fleet` | 任意 | HerdrのRuntimeBinding、ViewPlacement、command配送 |
-| Herdr 0.8.x | Herdr Adapterの`--execute`時のみ必須 | local workspace、pane、agentの操作 |
-| PyYAMLまたはRuby標準`yaml` | いずれか必須 | Fleet YAMLの安全な読込 |
-
-`agent-fleet-core`は`agent-roles`やHerdrの内部fileを探索・importしない。利用者が`agent-roles`から書き出した検査済みCatalogを`--role-catalog`で明示し、Coreは`role_ref`の存在と必要な権限を解決する。解決したRoleDefinitionは起動時の固定版としてCoreへ保存し、Hookは内容を変更せず会話へ渡す。Herdrとは公開CLI/JSON契約で接続する。
-
-SQLiteはPython標準libraryを使うため、`sqlite3` CLIの追加installは不要である。repositoryの`bash scripts/validate.sh`を実行する開発者は、追加で`bash`、`jq`、Mike Farah `yq` v4、`rg`を用意する。
-
-## インストール
-
-公開するインストール対象は`agent-fleet-core@agent-fleet`、`agent-fleet-herdr@agent-fleet`です。内部の処理やスキルを個別にインストールする必要はありません。
-
-先にRole CatalogとCoreをinstallする。Herdr連携を使う場合だけ、Herdr CLIとAdapterを追加する。
-
-`agent-roles`のSkillで検査済みCatalogを利用者領域へ書き出し、Fleet起動時に次のどちらかで指定する。
-
-```bash
-export AGENT_ROLES_CATALOG="$HOME/.config/agent-roles/catalogs/builtin@1.json"
-# または fleet-runtimeの各commandへ次を渡す
-# --role-catalog "$HOME/.config/agent-roles/catalogs/builtin@1.json"
-```
-
-### Codex
+Codexでは次を実行する。
 
 ```bash
 codex plugin marketplace add nakamori-naoya/agent-roles-plugins
 codex plugin add agent-roles@agent-roles
-
 codex plugin marketplace add nakamori-naoya/agent-fleet-plugins
 codex plugin add agent-fleet-core@agent-fleet
-
-# Herdr連携を使う場合だけ
-herdr --version  # 0.8.x
 codex plugin add agent-fleet-herdr@agent-fleet
 ```
 
-CodexではHerdr packageを通常時に無効にし、艦隊を操作するセッションと、そこから起動する艦隊セッションでだけ有効にする。
-
-```toml
-[plugins."agent-fleet-herdr@agent-fleet"]
-enabled = false
-```
-
-艦隊を操作するCodexは`codex --config plugins.agent-fleet-herdr@agent-fleet.enabled=true`で開く。`fleet-runtime start`もHerdrから起動する各Codexへ同じ有効化を渡す。Hookは`AGENT_FLEET_HOOK_RUNTIME`を持つ艦隊agent sessionでだけ役割文脈を注入し、それ以外では何も返さない。
-
-### Claude Code
+Claude Codeでは次を実行する。
 
 ```bash
 claude plugin marketplace add nakamori-naoya/agent-roles-plugins
 claude plugin install agent-roles@agent-roles
-
 claude plugin marketplace add nakamori-naoya/agent-fleet-plugins
 claude plugin install agent-fleet-core@agent-fleet
-
-# Herdr連携を使う場合だけ
-herdr --version  # 0.8.x
 claude plugin install agent-fleet-herdr@agent-fleet
 ```
 
-Claude CodeではHerdr package自体にHookを登録しない。`fleet-runtime start`が各艦隊agentへpackage内のHook sidecarを`--plugin-dir`で渡し、そのsessionだけで読み込む。
+Role Catalogを既定以外へ置く場合は、絶対パスを環境変数へ指定する。
 
-Coreだけを利用する場合、Herdr CLIと`agent-fleet-herdr`は不要である。Adapterのdry-runはHerdrを実行しないが、`--execute`を使う前に`herdr --version`が0.8.xであることを確認する。
+```bash
+export AGENT_ROLES_CATALOG="/absolute/path/to/builtin@1.json"
+```
 
-Fleet YAMLの形式例は[manager 1・worker 2の利用者設定](configs/fleets/release-readiness.yml)にある。最初にCore validatorへFleet YAMLと検査済みRole Catalogを渡す。Coreは各`role_ref`を解決し、RoleDefinitionとCatalogのidentity・内容hashを含むnormalized JSONへ変換する。`fleet-runtime`はこれをHerdr起動設定、表示プロファイル、必要なエージェント起動プロファイルに合成してHerdr Adapterへ渡す。`provision`はdry-runが既定であり、`--execute`を付けない限りHerdrを変更しない。
+## 使用するCLIを準備する
 
-各メンバーの`runtime`へAI製品、モデル、思考量、代替モデル方針を指定する。開始例はCodexに`gpt-5.6-sol`、Claudeに`claude-fable-5-1`を使い、`fallback: fail`で古いモデルへの暗黙切替を許さない。Herdr Adapterはメンバーごとに`--kind codex`または`--kind claude`を選ぶため、同じ艦隊で両製品を混在できる。Role Catalogは役割の意味だけを持ち、AI製品やモデルを持たない。
+Fleetは各agentの`runtime.command`に指定したコマンドを、そのまま利用者の対話shellで解決して起動する。通常は`claude`または`codex`を指定できる。複数アカウントを切り替えるwrapperやaliasを使う場合は、そのコマンド名を指定する。
 
-艦隊編成、AIアカウントを選ぶエージェント起動プロファイル、Herdr起動設定、pane配置の正本はplugin外の利用者設定である。既定では`~/.config/agent-fleet/fleets`、`~/.config/agent-fleet/agent-command-profiles`、`~/.config/agent-fleet/herdr-launch-profiles`、`~/.config/agent-fleet/view-profiles`を読む。repositoryの[艦隊設定例](configs/fleets/development-squad.yml)、[エージェント起動プロファイル例](configs/agent-command-profiles/codex-personal.v1.yml)、[Herdr起動設定例](configs/herdr-launch-profiles/development-squad-personal.yml)、[表示設定例](configs/view-profiles/role-columns.v1.yml)は手元へ複製して編集するための例であり、pluginは自動読込しない。実行時SQLiteもrepository外のstate directoryへ保存する。
+起動前に、使用する各CLIを単独で実行でき、必要な認証とplugin設定が完了していることを確認する。認証方法はCLIの提供元や利用形態によって異なるため、それぞれの公式手順に従う。
 
-`AgentCommandProfile`は`codex-personal`、`codex-work`、`claude-personal`、`claude-work`のような一つのコマンド名と製品だけを持つ。aliasの展開内容、認証directory、秘密値、モデル引数は複製しない。Herdr起動設定の`spec.agent_command_profiles`が論理メンバーIDから版固定のプロファイルIDを参照し、Herdr Adapterは選ばれたコマンドへ艦隊設定のHook・モデル・思考量を合成する。プロファイルを指定しないメンバーは従来どおり`codex`または`claude`を起動する。
+Fleetはpaneを作る前に、設定された起動コマンド、認証状態、必要なpluginを検査する。準備できていないコマンドが一つでもあれば、workspaceを作らず終了する。
 
-Herdr 0.8の`pane run`は引数を連結した文字列をpaneのshellへ送るため、Adapterはこの境界でコマンドと各引数を引用する。利用者が設定値へshell用の引用符を追加する必要はない。Claudeの`--settings`に含むJSONの引用符、Codexの`--config`に含むTOML文字列の引用符、空白・改行は管理agentを含む各メンバーへそのまま渡す。通常の`agent start`経路にはこの追加引用を適用しない。
+## Fleet YAMLを1ファイル用意する
 
-プロファイル経由の起動では、Herdrへのagent登録前に`agent_not_found`が返る場合だけ、起動コマンドを再送せず待機を再試行する。登録待ちと状態待ちの合計上限は30秒で、権限エラーや通信失敗は即座に報告する。起動確認は`idle`または`done`を待ち、`blocked`を成功扱いしない。Herdrの`done`はこの起動確認だけに使い、Coreのタスク完了報告やmanagerによる受入を代替しない。
+Fleet YAMLは`fleet.harness/v3`を使う。置き場所は自由だが、`plan`と`start`には絶対パスを渡す。
 
-新しいpaneを作る前に、`fleet-runtime`は起動コマンドが利用者の対話シェルで解決できることを確認する。Claude用コマンドは`<command> auth status`、Codex用コマンドは`<command> plugin list --json`も同じアカウント用コマンド経由で検査する。Claudeが未ログインなら複数paneを作らず、`<command> auth login`を一度実行するよう示す。起動済みpaneの制御処理を再開するだけの場合、この起動前検査を繰り返さない。
+各memberの`runtime`には次の5項目を指定する。
 
-Herdr起動設定で`spec.codex_hook_trust: preapproved`を明示すると、Herdrから起動する各Codexだけに`--dangerously-bypass-hook-trust`を渡し、役割文脈Hookの起動時レビューを省略する。これはHookの信頼確認だけを省略し、tool承認やsandboxを無効にしない。`review`指定時は対話確認を維持し、プラグイン更新で旧実行ファイルが消えた場合も未確認の新版へ自動移行しない。利用者向けHerdr起動設定例3件は、毎回の艦隊起動を止めないよう`preapproved`を明示している。
+| 項目 | 例 | 意味 |
+|---|---|---|
+| `product` | `codex` | 起動する製品 |
+| `command` | `codex` | 実行可能なCLIコマンド、wrapper、またはalias |
+| `model` | `<model-id>` | 利用者が契約・利用できるモデルID |
+| `effort` | `high` | 思考量 |
+| `fallback` | `fail` | 指定モデルを使えない場合の扱い |
 
-Hook登録はHerdr package内のsidecarへ閉じ、個別に配布しない。Hookの実体は艦隊起動時に艦隊stateへ内容address付きで固定配置し、各paneへ`AGENT_FLEET_HOOK_RUNTIME`として渡す。`fleet-runtime`は起動時と再開時に固定版をSHA-256照合する。Hook宣言は固定版を起動するだけに留める。起動中の艦隊は導入元の更新を見に行かず、起動時の固定版で制御処理を再開する。新しいHook実体へ切り替わる境界は停止後の再起動である。
+最小構成は次の形である。既定ViewProfileは3〜7人に対応する。
 
-`--execute`は導入元のfleet-controller、Core、Herdr adapter、Hook sourceを一時固定版へ複製し、その一時固定版でFleet・Herdr起動設定・表示プロファイルと実行前提を検査する。fleet-controllerは副作用なしのdry-runで起動し、役割HookのPython構文とClaude用Hook登録の形式も確認する。検査が成功したときだけ、各fileの相対path、mode、size、SHA-256と相対command引数を持つ内容address付きの固定実行版を艦隊stateへ公開する。起動と継続監視はその固定実行版だけを使う。起動中の艦隊は現在のinstall pathや現在版を再捕捉しない。保存済み固定版が欠損または改ざんされている場合は、paneや配送を増やす前に拒否する。
+```yaml
+apiVersion: fleet.harness/v3
+kind: Fleet
+metadata:
+  id: mixed-review
+spec:
+  codex_hook_trust: preapproved
+  objective: 変更を実装し、独立レビューを完了する。
+  completion_criteria:
+    - managerが検証結果を確認して成果を受け入れている。
+  stop_conditions:
+    - 追加承認が必要な破壊的変更がある。
+  members:
+    - agent_ref: manager
+      role_ref: manager@1
+      runtime: {product: claude, command: claude, model: "your-claude-model-id", effort: high, fallback: fail}
+    - agent_ref: worker
+      role_ref: worker@1
+      runtime: {product: codex, command: codex, model: "your-codex-model-id", effort: medium, fallback: fail}
+    - agent_ref: advisor
+      role_ref: advisor@1
+      runtime: {product: codex, command: codex, model: "your-codex-model-id", effort: high, fallback: fail}
+  tasks:
+    - id: implementation
+      assignee: worker
+      depends_on: []
+      instructions: 要求を実装して検証する。
+      expected_output: 実装差分と検証結果。
+      completion_criteria:
+        - 自動テストが成功している。
+  collaboration:
+    manager: manager
+    advisor: advisor
+    reporting: {strategy: manager, include_task_updates: true}
+```
 
-固定実行版の対象は、CoreとHerdr連携部が実行時に必要とするentry point、Python module、schema、defaults、およびClaude用Hook登録の明示allowlistである。`fleet-runtime`自身はこれらの固定実行物を検査・選択する制御境界であり、固定実行版へは含めない。tests、SKILL、README、`__pycache__`、`.pyc`などの実行に不要なfileも含めない。一方、`python3`、Herdr 0.8.x、各AI製品のCLIと認証、Codexの`agent-fleet-herdr`名前解決は外部前提である。Codexの登録宣言は固定した`role_context.py`を起動する薄い境界だけに限り、新しいCodex paneを作る前にHerdr packageが登録済みであることを検査する。
+Roleの内容はFleetへ複製しない。`role_ref`は共通Role Catalogの`manager@1`、`worker@1`、`advisor@1`、`reviewer@1`を参照する。
 
-レビューはworkerが`reported`を明示した直後に始め、managerがレビュー結果と報告を照合してから`task.accept`する。したがってreviewer taskをworker taskの`depends_on`に置いて、`accepted`後までレビューを遅らせない。
+`your-claude-model-id`と`your-codex-model-id`は例示用のプレースホルダーである。利用するCLIで有効なモデルIDへ置き換える。
 
-## 更新する
+## planしてから起動する
 
-GitHubから登録したmarketplaceを更新し、その公開パッケージを更新します。新規インストールと同じCodexの設定環境、Claude Codeの適用範囲を使ってください。
+まずFleet YAMLの絶対パスを変数へ入れる。
 
-### Codex
+```bash
+FLEET="/absolute/path/to/fleet.yml"
+```
 
-Herdrを使わない場合、以下のHerdrの追加・更新行は実行しません。CoreとHerdrは引き続き別の公開パッケージです。
+設定、モデル、起動コマンド、pane構成をdry-runで確認する。この操作はworkspaceやstateを作らない。
+
+```bash
+scripts/fleet-runtime plan "$FLEET"
+```
+
+問題がなければ起動する。起動後は配送制御がforegroundで動き続ける。
+
+```bash
+scripts/fleet-runtime start "$FLEET" --execute
+```
+
+起動時には、Fleet人数とpane数、agentとpaneの一対一対応、paneの位置・幅・高さ、split方向と比率の結果を実際のHerdr表示から検査する。不一致ならbindingを保存せず、作成したworkspaceを閉じる。
+
+## 起動ごとのrunを確認・停止する
+
+`start --execute`は毎回、新しいrun IDを発行する。同じFleet YAMLから複数の艦隊を同時に起動でき、それぞれ独立したHerdr workspace、Core DB、Herdr DB、task状態を持つ。起動結果の`run_id`を以後の操作に使う。
+
+```bash
+scripts/fleet-runtime runs mixed-review
+scripts/fleet-runtime status mixed-review-0123456789abcdef0123456789abcdef
+scripts/fleet-runtime stop mixed-review-0123456789abcdef0123456789abcdef --execute
+```
+
+`Ctrl-C`はforegroundの配送制御だけを止める。Herdr workspaceも閉じる場合は`stop --execute`を実行する。
+
+Herdr側でworkspaceを直接閉じてもrunの論理状態は自動停止しない。既存runの配送制御だけが終了した場合は`resume <run-id>`で再開する。`start`は既存runを再利用せず、常に別runを作る。
+
+同じ定義から別の艦隊を増やす場合は、同じ起動コマンドをもう一度実行する。
+
+```bash
+scripts/fleet-runtime start "$FLEET" --execute
+```
+
+保存したrun状態まで削除する場合だけ`remove`を使う。
+
+```bash
+scripts/fleet-runtime remove mixed-review-0123456789abcdef0123456789abcdef --execute
+```
+
+各runは起動時の設定と実行物を固定snapshotとして保持する。モデル、command、ViewProfile、作業directoryを変更した場合は、そのYAMLから新しいrunを起動する。過去のtask状態が新しいrunへ混ざることはない。
+
+## pane配置を変更する
+
+`spec.view_profile`を省略すると、[既定ViewProfile](plugins/agent-fleet-herdr/adapter/config/default-view-profile.yml)を使う。独自ViewProfileはFleet YAMLからの相対パスまたは絶対パスで指定する。
+
+```yaml
+spec:
+  view_profile: ./view-profiles/my-layout.yml
+```
+
+ViewProfileを変更したら、起動前にもう一度`plan`を実行する。既存runの配置は変わらず、新しい設定は次に作るrunへ適用される。
+
+## よくある失敗を直す
+
+### Claudeが未認証と表示される
+
+エラーに表示された`runtime.command`をFleetの外で実行し、そのCLIの公式手順に従って認証する。wrapperやaliasを指定した場合は、同じ対話shellで解決できることも確認する。
+
+### Role Catalogが見つからない
+
+`agent-roles`から`builtin@1.json`を書き出すか、`AGENT_ROLES_CATALOG`へ絶対パスを指定する。
+
+### Fleet file path must be absoluteと表示される
+
+`pwd -P`などで絶対パスを作り、その値を`plan`または`start`へ渡す。
+
+### ViewProfileの人数制約で失敗する
+
+既定ViewProfileではmemberを3〜7人にする。別の人数を使う場合は、対応する独自ViewProfileを`spec.view_profile`へ指定する。
+
+## pluginを更新する
+
+Codexでは次を実行する。
 
 ```bash
 codex plugin marketplace upgrade agent-fleet
 codex plugin add agent-fleet-core@agent-fleet
 codex plugin add agent-fleet-herdr@agent-fleet
-codex plugin list
 ```
 
-更新後は新しい会話で確認してください。ローカルのパスからmarketplaceを登録した場合は、Git版の更新コマンドではなく、その登録先のソースを更新してから追加し直します。
-
-### Claude Code
+Claude Codeでは次を実行する。
 
 ```bash
-# インストール時に合わせてuser / project / localを選ぶ
-CLAUDE_PLUGIN_SCOPE=user
 claude plugin marketplace update agent-fleet
-claude plugin update agent-fleet-core@agent-fleet --scope "$CLAUDE_PLUGIN_SCOPE"
-claude plugin update agent-fleet-herdr@agent-fleet --scope "$CLAUDE_PLUGIN_SCOPE"
-claude plugin list
+claude plugin update agent-fleet-core@agent-fleet --scope user
+claude plugin update agent-fleet-herdr@agent-fleet --scope user
 ```
 
-更新後はClaude Codeを再起動してください。`agent-roles`も、そのREADMEの手順で更新してください。
-
-marketplaceの取得と、インストール済みパッケージの更新は分けて確認します。同じバージョンとして公開された変更は、更新コマンドだけでは反映されない場合があります。「最新」と表示された場合は公開バージョンを確認し、キャッシュ内のファイルを直接編集しないでください。
-
-コマンドは2026-09-06時点のCLIヘルプと、[Codexのmarketplace管理](https://developers.openai.com/plugins/build/plugins)、[Claude Codeの更新仕様](https://code.claude.com/docs/en/plugins-reference#plugin-update)を確認しています。
-
-## 検証
+## source変更を検証する
 
 ```bash
 bash scripts/validate.sh
 ```
 
-## 実行契約の検証と配布
+## 詳細資料
 
-`python3 scripts/doctor.py --repository . --repo <対象repository>` はCLI構文、公開skillと設定・依存の解決を読み取り専用で診断する。設定解決を含めない検査は `--distribution-only` を明示する。
-
-`bash scripts/validate.sh` は機能・不正入力・配布の検証を行い、GitHub Actionsの `validate (ubuntu-latest)` / `validate (macos-latest)` でも実行する。[意味的評価シナリオ](evals/scenarios.json)は `scripts/evaluate-skills.py` で実モデルと別のjudgeモデルへ渡し、モデルID・設定・入力・応答・判定根拠を記録する。モデル評価は構造検証と別に実施し、未実行を成功として扱わない。
-
-version更新は `python3 scripts/release.py --plugin <公開plugin名> --version <semver> --notes <変更内容> --breaking <互換性への影響> --migration <移行方法> --checks <codex/claudeの検証結果JSON>` で計画を確認し、`--apply` で両runtimeのmanifestとmarketplaceを更新する。検証結果には未検証も明示できる。配布・外部publishは別操作であり、このcommandでは行わない。
-
-Coreの[command delivery](plugins/agent-fleet-core/core/command_delivery.py)はSQLiteの配送leaseと結果遷移、[Core契約](plugins/agent-fleet-core/core/core_contract.py)は状態語彙を扱う。Herdrの[実行物identity](plugins/agent-fleet-herdr/adapter/execution_identity.py)は内容hash・凍結・preflight、[runtime値](plugins/agent-fleet-herdr/adapter/runtime_models.py)は解決済み設定と実行bundleを扱う。公開FleetStore/FleetRuntimeは従来のCLI境界を維持し、起動・停止順序を管理する。Core凍結closureには新moduleも含め、実行時の内容変更を検知する。
-
-### 破壊的変更と移行
-
-公開入口は同名SKILLの薄い別入口を廃止して一意にした。古い内部SKILL pathを直接参照している呼出元は公開manifestのskillsへ切り替える。設定の一時fileはshell終了では削除されず、返却された絶対pathを次の工程へ渡し、完了・停止時にrun-configのcleanupでそのrunだけを削除する。以前の一時fileや異なる実行identityを再利用せず、新しいrunを開始する。
+- [コンセプトと設計](docs/concepts.md)
+- [艦隊の連携と全体制御](docs/2026-08-31-エージェント艦隊-連携と全体制御.md)
+- [作業進行ルール](docs/2026-08-31-エージェント艦隊-作業進行ルール.md)
+- [非機能要件](docs/2026-08-31-エージェント艦隊-非機能要件.md)
+- [役割Hookの実行契機と責務](docs/2026-09-01-エージェント艦隊-役割Hookの実行契機と責務.md)

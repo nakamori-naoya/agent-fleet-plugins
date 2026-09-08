@@ -39,13 +39,13 @@ class LaunchArgumentTransportTest(unittest.TestCase):
     def test_agent_start_preserves_each_argument_byte(self):
         self.assert_transport(self.commands.agent_start("manager", "claude", "pane", self.values))
 
-    def test_command_profile_preserves_herdr_input_argument_bytes(self):
-        self.assert_transport(self.commands.agent_run("claude-personal", "pane", self.values))
+    def test_agent_run_preserves_herdr_input_argument_bytes(self):
+        self.assert_transport(self.commands.agent_run("claude-wrapper", "pane", self.values))
 
     def test_workspace_environment_preserves_value_bytes_at_herdr_input(self):
         self.assert_transport(self.commands.workspace_create(str(self.root), "fixture", {"AGENT_FLEET_CORE_DB": self.values[-1]}))
 
-    def test_profile_manager_receives_json_toml_and_literal_shell_characters(self):
+    def test_manager_receives_json_toml_and_literal_shell_characters(self):
         # Herdr 0.8 pane.rs pane_run joins arguments after pane_id with spaces,
         # then sends that text plus Enter to the pane's shell.
         for shell in ("/bin/bash", "/bin/zsh"):

@@ -34,6 +34,13 @@ def fleet_document(fleet_id: str, task_count: int) -> dict:
         {
             "agent_ref": agent_ref,
             "role_ref": f"{role_id}@1",
+            "runtime": {
+                "product": "codex",
+                "command": "codex",
+                "model": "benchmark-model",
+                "effort": "medium",
+                "fallback": "fail",
+            },
             "role_definition": {
                 "id": role_id,
                 "version": 1,
@@ -60,7 +67,7 @@ def fleet_document(fleet_id: str, task_count: int) -> dict:
             }
         )
     return {
-        "apiVersion": "fleet.harness/v2",
+        "apiVersion": "fleet.harness/v3",
         "kind": "Fleet",
         "metadata": {"id": fleet_id},
         "spec": {

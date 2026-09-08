@@ -1,4 +1,8 @@
 #!/bin/sh
 set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -z "${AGENT_FLEET_RUNTIME_COMMAND:-}" ]; then
+  AGENT_FLEET_RUNTIME_COMMAND="$SCRIPT_DIR/fleet-runtime"
+  export AGENT_FLEET_RUNTIME_COMMAND
+fi
 exec python3 "$SCRIPT_DIR/../fleet_runtime.py" "$@"

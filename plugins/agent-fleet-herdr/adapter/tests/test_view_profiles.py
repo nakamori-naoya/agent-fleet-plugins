@@ -15,7 +15,7 @@ SPEC.loader.exec_module(view_profiles)
 
 
 PROFILE = {
-    "apiVersion": "fleet.herdr.harness/v1",
+    "apiVersion": "fleet.herdr.harness/v2",
     "kind": "ViewProfile",
     "metadata": {"id": "local/team-grid", "version": 2},
     "spec": {
@@ -24,9 +24,10 @@ PROFILE = {
             "type": "split",
             "direction": "horizontal",
             "children": [
-                {"type": "slot", "selector": "manager", "weight": 40, "pane_slot": "lead"},
-                {"type": "stack", "selector": "non-manager", "weight": 60,
-                 "direction": "vertical", "distribution": "equal", "pane_slot_prefix": "team"},
+                {"type": "stack", "id": "lead", "selector": {"role_ids": ["manager"]},
+                 "weight": 40, "direction": "vertical", "distribution": "equal"},
+                {"type": "stack", "id": "team", "selector": {"remaining": True},
+                 "weight": 60, "direction": "vertical", "distribution": "equal"},
             ],
         },
     },

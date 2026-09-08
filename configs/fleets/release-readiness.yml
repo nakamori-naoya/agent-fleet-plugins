@@ -1,4 +1,4 @@
-apiVersion: fleet.harness/v2
+apiVersion: fleet.harness/v3
 kind: Fleet
 metadata:
   id: release-readiness
@@ -15,21 +15,24 @@ spec:
       role_ref: manager@1
       runtime:
         product: claude
-        model: claude-fable-5-1
+        command: claude
+        model: your-claude-model-id
         effort: high
         fallback: fail
     - agent_ref: worker-1
       role_ref: worker@1
       runtime:
         product: codex
-        model: gpt-5.6-sol
+        command: codex
+        model: your-codex-model-id
         effort: medium
         fallback: fail
     - agent_ref: worker-2
       role_ref: worker@1
       runtime:
         product: codex
-        model: gpt-5.6-sol
+        command: codex
+        model: your-codex-model-id
         effort: medium
         fallback: fail
   tasks:

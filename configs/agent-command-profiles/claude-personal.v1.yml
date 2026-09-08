@@ -1,8 +1,0 @@
-apiVersion: fleet.runtime.harness/v1
-kind: AgentCommandProfile
-metadata:
-  id: local/claude-personal
-  version: 1
-spec:
-  product: claude
-  command: claude-personal
