@@ -14,9 +14,9 @@ from typing import Any, Callable, Mapping, Sequence
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 DEFAULT_HOOK_SOURCE = Path(__file__).resolve().parents[1] / "hooks" / "role_context.py"
-MANIFEST_FORMAT_VERSION = 1
+MANIFEST_FORMAT_VERSION = 2
 RUNTIME_PHASES = frozenset(
-    {"planned", "core_provisioned", "herdr_provisioned", "active", "stopping", "stopped", "removing"}
+    {"planned", "core_provisioned", "herdr_provisioned", "active", "stopping", "stopped", "removing", "failed"}
 )
 
 
@@ -57,9 +57,6 @@ class ExecutionBundle:
 class ResolvedFleet:
     def __init__(
         self,
-        launch_id: str,
-        launch_path: Path | None,
-        launch_profile: Mapping[str, Any],
         fleet_id: str,
         fleet_path: Path,
         fleet_source: Mapping[str, Any],
@@ -71,15 +68,11 @@ class ResolvedFleet:
         fleet_source_hash: str,
         role_catalog: Mapping[str, Any] | None,
         role_catalog_hash: str | None,
-        agent_command_profiles: Mapping[str, Mapping[str, str]],
-        agent_command_profile_sources: Sequence[Mapping[str, str]],
         *,
-        legacy: bool = False,
+        definition_id: str | None = None,
     ):
-        self.launch_id = launch_id
-        self.launch_path = launch_path
-        self.launch_profile = launch_profile
         self.fleet_id = fleet_id
+        self.definition_id = definition_id or fleet_id
         self.fleet_path = fleet_path
         self.fleet_source = fleet_source
         self.fleet = fleet
@@ -89,25 +82,8 @@ class ResolvedFleet:
         self.codex_hook_trust = codex_hook_trust
         self.role_catalog = role_catalog
         self.role_catalog_hash = role_catalog_hash
-        self.agent_command_profiles = {
-            agent_ref: dict(profile)
-            for agent_ref, profile in agent_command_profiles.items()
-        }
-        self.agent_command_profile_sources = tuple(
-            dict(source) for source in agent_command_profile_sources
-        )
-        self.legacy = legacy
         self._fleet_source_hash = fleet_source_hash
-        self._launch_source_hash = (
-            _content_hash(launch_profile)
-            if launch_path is not None
-            else None
-        )
         self._profile_source_hash = _content_hash(profile)
-
-    @property
-    def launch_hash(self) -> str:
-        return _content_hash(self.launch_profile)
 
     @property
     def fleet_hash(self) -> str:
@@ -116,10 +92,6 @@ class ResolvedFleet:
     @property
     def fleet_source_hash(self) -> str:
         return self._fleet_source_hash
-
-    @property
-    def launch_source_hash(self) -> str | None:
-        return self._launch_source_hash
 
     @property
     def profile_source_hash(self) -> str:
@@ -133,10 +105,8 @@ class ResolvedFleet:
     def composition_hash(self) -> str:
         return _content_hash(
             {
-                "launch": self.launch_profile,
                 "fleet": self.fleet,
                 "profile": self.profile,
-                "agent_command_profiles": self.agent_command_profiles,
             }
         )
 
@@ -188,5 +158,3 @@ def _load_document(path: Path) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise FleetRuntimeError(f"config root must be an object: {path}")
     return value
-
-

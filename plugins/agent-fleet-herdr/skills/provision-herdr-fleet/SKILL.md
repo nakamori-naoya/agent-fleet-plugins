@@ -11,9 +11,9 @@ Herdrは実行環境と表示のAdapterであり、Fleetの正本ではない。
 
 詳しいCLIと復旧規則は`adapter/SKILL.md`を全文読む。入口は`adapter/scripts/fleet-herdr`で、dry-runが既定である。
 
-利用者が複数の起動設定から選ぶ入口は`adapter/scripts/fleet-runtime`である。最初に`init`と`doctor`を実行し、`list`、`plan <launch_id>`、`start <launch_id> --execute`、`status <launch_id>`を使う。停止は`stop <launch_id> --execute`、設定を作り直す場合だけ`remove <launch_id> --execute`を使う。Core CLIは`--core-command`、`AGENT_FLEET_CORE_COMMAND`、`PATH`の順で明示的に解決し、別pluginの配置を推測しない。Herdr LaunchProfileだけが`fleet_ref`、版固定`view_profile_ref`、必要なメンバー別`agent_command_profiles`を一方向参照する。
+利用者の統合入口は`adapter/scripts/fleet-runtime`である。Fleet YAMLの絶対パスを`plan /absolute/path/to/fleet.yml`、`start /absolute/path/to/fleet.yml --execute`へ渡す。停止・状態確認では起動結果または`runs`から得たrun IDを`stop <run-id> --execute`、`status <run-id>`へ渡す。Core CLIは`--core-command`、`AGENT_FLEET_CORE_COMMAND`、`PATH`の順で明示的に解決し、別pluginの配置を推測しない。Fleetはメンバー別の起動コマンドとモデルを同じファイルに持ち、`spec.view_profile`を省略した場合はplugin既定ViewProfileを使う。
 
-`provision`は別入力のPortable Fleet、Herdr LaunchProfile、ViewProfile、解決済みAgentCommandProfileを照合し、layout groupとweightを再現可能なsplit計画へ変換する。FleetとViewProfileを互いに参照させない。艦隊編成、起動コマンド、起動設定、pane比率の実体をplugin内へ同梱せず、利用者の設定directoryからだけ読む。生成argvと論理エージェントの配置を確認してから、利用者が明示した場合だけ`--execute`を使う。
+`provision`は解決済みFleet、ViewProfile、起動条件を照合し、layout groupとweightを再現可能なsplit計画へ変換する。生成argvと論理エージェントの配置を確認してから、利用者が明示した場合だけ`--execute`を使う。実行後はFleet人数とpane数、一対一binding、pane矩形の幅・高さ・位置・重なり・空白、split数・方向・比率をHerdrの観測値で検査する。不一致ならbindingとplacementを保存せず、作成したworkspaceを閉じる。
 
 ## Bindingと配送
 
@@ -21,4 +21,6 @@ Herdrは実行環境と表示のAdapterであり、Fleetの正本ではない。
 
 paneが消えたら`lost`として報告し、自動再作成・自動再bindを行わない。HookがCore照合した受領は`delivered`として確定し、受領を確認できないprompt timeoutだけを`unknown`として自動retryしない。task完了はCoreへの明示`task.report`だけで確定する。
 
-実行対象はlocal Herdr 0.8に限定する。`fleet-runtime start`はpaneを持たない配送制御をforegroundで実行する。同じFleetの制御処理は一つに限定し、一時障害時は上限付きbackoffで回復する。`Ctrl-C`は配送制御だけを終了し、`fleet-runtime stop`はworkspaceも閉じる。daemon、multi-host、fleet間gateway、独自Web UIは対象外である。
+`start --execute`は起動ごとに一意なrun IDを発行し、同じFleet定義の複数runを同時に許可する。runごとにworkspace、Core DB、Herdr DB、task、command、hook contextを隔離する。YAMLの`metadata.id`はdefinition IDとしてのみ保持し、実行中の配送identityにはrun IDを使う。状態確認、停止、削除はrun IDを対象にし、controllerだけが終了したactive runは`resume <run-id>`で再開する。
+
+実行対象はlocal Herdr 0.8に限定する。`fleet-runtime start`はpaneを持たない配送制御をforegroundで実行する。一つのrunの制御処理は一つに限定し、一時障害時は上限付きbackoffで回復する。`Ctrl-C`は配送制御だけを終了し、`fleet-runtime stop <run-id>`は対象runのworkspaceも閉じる。daemon、multi-host、fleet間gateway、独自Web UIは対象外である。

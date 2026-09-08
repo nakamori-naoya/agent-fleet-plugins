@@ -272,13 +272,6 @@ class FleetStore(CommandDelivery):
         created_at = utc_now()
         with self.connect() as db:
             db.executescript(SCHEMA)
-            fleet_columns = {
-                row["name"] for row in db.execute("PRAGMA table_info(fleets)")
-            }
-            if "config_hash" not in fleet_columns:
-                db.execute(
-                    "ALTER TABLE fleets ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''"
-                )
             context_columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(member_context_state)")
             }
@@ -316,18 +309,11 @@ class FleetStore(CommandDelivery):
                     "tasks": counts["tasks"],
                     "idempotent": True,
                 }
-            if "profile_ref" in fleet_columns:
-                db.execute(
-                    "INSERT INTO fleets(fleet_id,title,config_hash,profile_ref,created_at) "
-                    "VALUES(?,?,?,?,?)",
-                    (fleet_id, title, config_hash, "", created_at),
-                )
-            else:
-                db.execute(
-                    "INSERT INTO fleets(fleet_id,title,config_hash,created_at) "
-                    "VALUES(?,?,?,?)",
-                    (fleet_id, title, config_hash, created_at),
-                )
+            db.execute(
+                "INSERT INTO fleets(fleet_id,title,config_hash,created_at) "
+                "VALUES(?,?,?,?)",
+                (fleet_id, title, config_hash, created_at),
+            )
             db.execute(
                 "INSERT INTO fleet_contexts(fleet_id,objective,completion_criteria_json,"
                 "stop_conditions_json,manager_ref) VALUES(?,?,?,?,?)",

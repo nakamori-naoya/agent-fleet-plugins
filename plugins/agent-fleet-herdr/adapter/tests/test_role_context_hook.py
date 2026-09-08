@@ -23,7 +23,7 @@ class RoleContextHookTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.trusted_root = Path(self.temp.name).resolve()
         self.db = self.trusted_root / "session-context.sqlite3"
-        self.fleet_state = self.trusted_root / "state/fleets/demo-launch"
+        self.fleet_state = self.trusted_root / "state/runs/demo-launch"
         hook_root = self.fleet_state / "hook-runtimes" / ("a" * 64)
         hook_root.mkdir(parents=True)
         self.hook_runtime = hook_root / "role_context.py"
@@ -38,7 +38,7 @@ class RoleContextHookTest(unittest.TestCase):
         self.core_command = command_root / "fleet-control"
         self.core_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         self.core_command.chmod(0o500)
-        self.runtime_manifest = self.trusted_root / "state/runtimes/demo-launch.json"
+        self.runtime_manifest = self.fleet_state / "manifest.json"
         self.runtime_manifest_document = {
             "runtime_commands": {"core": [str(self.core_command)]}
         }
@@ -556,7 +556,7 @@ class RoleContextHookTest(unittest.TestCase):
             self.skipTest("system temp is not a root-owned sticky directory")
         with tempfile.TemporaryDirectory(dir=system_temp) as temporary:
             trusted_root = Path(temporary).resolve()
-            fleet_state = trusted_root / "state/fleets/demo-launch"
+            fleet_state = trusted_root / "state/runs/demo-launch"
             hook_root = fleet_state / "hook-runtimes" / ("c" * 64)
             hook_root.mkdir(parents=True)
             hook_runtime = hook_root / "role_context.py"
@@ -609,7 +609,7 @@ class RoleContextHookTest(unittest.TestCase):
                 role_context_hook._trusted_core_command()
 
     def test_trusted_core_command_rejects_non_private_runtime_manifest(self):
-        self.runtime_manifest.parent.mkdir(parents=True)
+        self.runtime_manifest.parent.mkdir(parents=True, exist_ok=True)
         self.runtime_manifest.write_text(
             '{"runtime_commands":{"core":["/fixed/core"]}}',
             encoding="utf-8",
@@ -620,7 +620,7 @@ class RoleContextHookTest(unittest.TestCase):
             ORIGINAL_RUNTIME_MANIFEST(self.fleet_state)
 
     def test_runtime_manifest_loads_private_document_from_hook_derived_path(self):
-        self.runtime_manifest.parent.mkdir(parents=True)
+        self.runtime_manifest.parent.mkdir(parents=True, exist_ok=True)
         self.runtime_manifest.write_text(
             '{"runtime_commands":{"core":["/fixed/core"]}}',
             encoding="utf-8",
