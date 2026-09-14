@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "plugin": "agent-fleet-core",
+  "version": "1.0.1",
+  "created_at": "2026-09-14T01:39:55.386598+00:00",
+  "notes": "共通実行基盤を2.5.1へ更新する。test-hardeningがwrite-docのテンプレート件数を決め打ちせず、manifestのimplements[].typesと突き合わせる。",
+  "breaking": "無し。契約ID、契約版、公開入口、入力schema、出力schemaは変えない。",
+  "migration": "無し。再インストールでpatch版に入れ替わる。",
+  "checks": {
+    "codex": {
+      "status": "manifest-and-contract-tests-passed",
+      "native-client-installation": "not-executed",
+      "evidence": "bash scripts/validate.sh: exit 0（Validation: passed (unit tests + dry-run integration)）"
+    },
+    "claude": {
+      "status": "manifest-and-contract-tests-passed",
+      "native-client-installation": "not-executed",
+      "evidence": "bash scripts/validate.sh: exit 0（Validation: passed (unit tests + dry-run integration)）"
+    },
+    "real-distribution": "兄弟checkoutの実配布物（grill / write-doc / product-planning runtime-source）に対して解決した",
+    "runtime-sync": "scripts/sync-runtime.py --check --source <正本>: version 2.5.1、changed 空",
+    "post-version-validation": "bash scripts/validate.sh（版更新後）: exit 0（Validation: passed (unit tests + dry-run integration)）"
+  },
+  "files": [
+    ".agents/plugins/marketplace.json",
+    "plugins/agent-fleet-core/.codex-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+    "plugins/agent-fleet-core/.claude-plugin/plugin.json"
+  ]
+}
