@@ -7,8 +7,10 @@ import os
 from pathlib import Path
 import sys
 
-VERSION = '2.0.0'
-NAMES = ['resolve-dependency.py', 'resolve.sh', 'validate-distribution.py', 'prepare.sh', 'run-config.py', 'doctor.py', 'release.py', 'evaluate-skills.py', 'claude-eval-adapter.py', 'sync-runtime.py', 'test-hardening.py', 'validate.yml']
+VERSION = '2.5.1'
+NAMES = ['resolve-dependency.py', 'resolve.sh', 'state.py', 'validate-distribution.py', 'prepare.sh', 'run-config.py', 'doctor.py', 'release.py', 'evaluate-skills.py', 'claude-eval-adapter.py', 'sync-runtime.py', 'test-hardening.py', 'lint-consumer-contract.py', 'validate.yml']
+REPO_SCRIPTS = ['doctor.py', 'release.py', 'evaluate-skills.py', 'claude-eval-adapter.py', 'sync-runtime.py', 'test-hardening.py', 'lint-consumer-contract.py']
+PLAYBOOK_SCRIPTS = ['resolve.sh', 'resolve-dependency.py', 'state.py']
 
 
 
@@ -43,15 +45,15 @@ def main():
         data = json.loads(lock.read_text())
         if data.get('schema') != 1 or data.get('source', {}).get('version') != VERSION or set(data.get('source', {}).get('files', {})) != set(NAMES):
             raise ValueError('runtime manifest schema/source contract mismatch')
-        expected = {'scripts/' + n for n in ['doctor.py', 'release.py', 'evaluate-skills.py', 'claude-eval-adapter.py', 'sync-runtime.py', 'test-hardening.py']}
+        expected = {'scripts/' + n for n in REPO_SCRIPTS}
         expected.add('.github/workflows/validate.yml')
         for f in repo.glob('plugins/**/playbook.yml'):
-            expected.update(str((f.parent / 'scripts' / n).relative_to(repo)) for n in ['resolve.sh', 'resolve-dependency.py'])
+            expected.update(str((f.parent / 'scripts' / n).relative_to(repo)) for n in PLAYBOOK_SCRIPTS)
         for f in repo.glob('plugins/**/scripts/prepare.sh'):
             if 'run-config.py' in f.read_text() or '共通入口' in f.read_text():
                 expected.update(str((f.parent / n).relative_to(repo)) for n in ['prepare.sh', 'run-config.py'])
         if (repo / 'shared/playbook').is_dir():
-            expected.update('shared/playbook/' + n for n in ['resolve.sh', 'resolve-dependency.py'])
+            expected.update('shared/playbook/' + n for n in PLAYBOOK_SCRIPTS)
         if (repo / 'shared/prepare.sh').exists():
             expected.update(['shared/prepare.sh', 'shared/run-config.py'])
         if (repo / 'plugins/.codex-plugin/plugin.json').exists():
@@ -74,17 +76,15 @@ def main():
             raise ValueError('source is not a regular file: ' + name)
     targets = {}
     for name in NAMES:
-        if name == 'resolve-dependency.py':
-            paths = list(repo.glob('plugins/**/scripts/resolve-dependency.py')) + ([repo / 'shared/playbook' / name] if (repo / 'shared/playbook').is_dir() else [])
-        elif name == 'resolve.sh':
-            paths = [f.parent / 'scripts/resolve.sh' for f in repo.glob('plugins/**/playbook.yml')] + ([repo / 'shared/playbook' / name] if (repo / 'shared/playbook').is_dir() else [])
+        if name in PLAYBOOK_SCRIPTS:
+            paths = [f.parent / 'scripts' / name for f in repo.glob('plugins/**/playbook.yml')] + ([repo / 'shared/playbook' / name] if (repo / 'shared/playbook').is_dir() else [])
         elif name == 'validate-distribution.py':
             paths = [repo / 'scripts' / name] if (repo / 'plugins/.codex-plugin/plugin.json').exists() else []
         elif name == 'prepare.sh':
             paths = [f for f in repo.glob('plugins/**/scripts/prepare.sh') if 'config resolution' in f.read_text() or '共通入口' in f.read_text()] + ([repo / 'shared/prepare.sh'] if (repo / 'shared/prepare.sh').exists() else [])
         elif name == 'validate.yml':
             paths = [repo / '.github/workflows/validate.yml']
-        elif name in {'doctor.py', 'release.py', 'evaluate-skills.py', 'claude-eval-adapter.py', 'sync-runtime.py', 'test-hardening.py'}:
+        elif name in REPO_SCRIPTS:
             paths = [repo / 'scripts' / name]
         else:
             paths = [f.parent / name for f in repo.glob('plugins/**/scripts/prepare.sh') if 'run-config.py' in f.read_text() or '共通入口' in f.read_text()]

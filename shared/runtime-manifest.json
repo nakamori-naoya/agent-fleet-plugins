@@ -3,29 +3,32 @@
   "source": {
     "repository": "product-planning-plugins",
     "path": "shared/runtime-source",
-    "version": "2.0.0",
+    "version": "2.5.1",
     "files": {
-      "resolve-dependency.py": "d37dc29bfcc763e377b70a2fda782e74193cb763c84d600baf8c17d5ab2d6d03",
-      "resolve.sh": "aa9f1658ce32486854285e56ae40ab096b25bb0319949c4530c92460c30c6604",
-      "validate-distribution.py": "65936d1d98bc2b879da39ad7c2a9296a1563b5efbb6bf4dec306a83ab27d68ae",
-      "prepare.sh": "bf512b18adaf4dd97a0190566a50f70b1680db386cba0eba415ab2289ce5bb11",
-      "run-config.py": "ec8204a8d459ed09577fb8a8643dbdc56d4c23a5f3e522e9053c8cf5b1588c00",
-      "doctor.py": "d06d199d6672c70723835396857cfbb8b0743f031315aee11937a64681e1a4f9",
+      "resolve-dependency.py": "9a9653740687313acc87afb59b13329d1f3f646cbfabbfa631064f6c8195dd62",
+      "resolve.sh": "7dee8c589d9f9e525ce41cc0ad4cbd519881ac8a932dee72c50b0a5d32aa9174",
+      "state.py": "5571cdec8eb4bd4524364e8f2764097068ffe485d5b51c531086e47127c09cfa",
+      "validate-distribution.py": "fdc48c31a9404bd494c5d8481054ab26eb964327050f12e30b05beebc08463cb",
+      "prepare.sh": "5035f21ddb9c8e19fa980d310c58387b5585576009c0eb997c7b2893499fb0fa",
+      "run-config.py": "88b649f0b530238ac36a7470896abea5ff3efd4f4538643746d0476681b0f2ae",
+      "doctor.py": "5d3e59818b4fbb0e8633c5ad74c409574ddae874aa0f09c211b8ec1c0d8e399d",
       "release.py": "281880055f52c48e5c2e64931150f369b8fc2f97c004ac05c82ecb4bcf275fb6",
       "evaluate-skills.py": "43272002c9183dfbb7a0f0d5658c06a47e9b8c1e97aa209d8889802a0a8eab9d",
       "claude-eval-adapter.py": "3189453325a50d6c28dd808f40acb44eb2e6c40a7e56b4a39e18579b8f37e8f9",
-      "sync-runtime.py": "d4d136e745ed5d49494f1ead1844fbcea42530663d3eca9d56525f2084618c02",
-      "test-hardening.py": "3840a0a341c269a1eb00dcaa256dc8d25cd96666b51368f3977bb2908c3afa22",
-      "validate.yml": "37d09b74ee886a0270452f40eb3e560f204fbc64ad92e768d84a950bfc734f2b"
+      "sync-runtime.py": "45dd0424fe1d52b3eb9c6f4d22d9e71db23766ff140a050d89775400f2a92542",
+      "test-hardening.py": "7c7639b21353b81d11d5aa2d39a9d344fc2e8b36bc5263dcde916447e18fae5e",
+      "lint-consumer-contract.py": "59b674d813e869369ff9c1ab7d4bf96209053968f53196c04cdd0eeb833f445d",
+      "validate.yml": "24a789b85a9b433e339fdb2a41fcb952820ba1d5e13c41142e6713dfc5372703"
     }
   },
   "targets": {
-    ".github/workflows/validate.yml": "37d09b74ee886a0270452f40eb3e560f204fbc64ad92e768d84a950bfc734f2b",
+    ".github/workflows/validate.yml": "24a789b85a9b433e339fdb2a41fcb952820ba1d5e13c41142e6713dfc5372703",
     "scripts/claude-eval-adapter.py": "3189453325a50d6c28dd808f40acb44eb2e6c40a7e56b4a39e18579b8f37e8f9",
-    "scripts/doctor.py": "d06d199d6672c70723835396857cfbb8b0743f031315aee11937a64681e1a4f9",
+    "scripts/doctor.py": "5d3e59818b4fbb0e8633c5ad74c409574ddae874aa0f09c211b8ec1c0d8e399d",
     "scripts/evaluate-skills.py": "43272002c9183dfbb7a0f0d5658c06a47e9b8c1e97aa209d8889802a0a8eab9d",
+    "scripts/lint-consumer-contract.py": "59b674d813e869369ff9c1ab7d4bf96209053968f53196c04cdd0eeb833f445d",
     "scripts/release.py": "281880055f52c48e5c2e64931150f369b8fc2f97c004ac05c82ecb4bcf275fb6",
-    "scripts/sync-runtime.py": "d4d136e745ed5d49494f1ead1844fbcea42530663d3eca9d56525f2084618c02",
-    "scripts/test-hardening.py": "3840a0a341c269a1eb00dcaa256dc8d25cd96666b51368f3977bb2908c3afa22"
+    "scripts/sync-runtime.py": "45dd0424fe1d52b3eb9c6f4d22d9e71db23766ff140a050d89775400f2a92542",
+    "scripts/test-hardening.py": "7c7639b21353b81d11d5aa2d39a9d344fc2e8b36bc5263dcde916447e18fae5e"
   }
 }

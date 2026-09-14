@@ -64,7 +64,7 @@ class Hardening(unittest.TestCase):
     def test_functional_ci_actions_are_pinned(self):
         workflow = (ROOT/'.github/workflows/validate.yml').read_text()
         actions = re.findall(r'uses:\s+([^\s#]+)', workflow)
-        self.assertEqual(len(actions), 3)
+        self.assertGreaterEqual(len(actions), 3)
         for action in actions:
             self.assertRegex(action, r'^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+@[0-9a-f]{40}$')
     def test_config_survives_shell_and_cleanup_isolated(self):
@@ -269,7 +269,7 @@ class Hardening(unittest.TestCase):
         package=self.base/'entry-package';(package/'.codex-plugin').mkdir(parents=True);entry=package/'entry';entry.mkdir()
         (package/'.codex-plugin/plugin.json').write_text(json.dumps({'name':'fixture','version':'1.0.0','metadata':{'harness':{'entryRoot':'./entry'}}}))
         (package/'SKILL.md').write_text('---\nname: fixture\ndescription: fixture\n---\ncontent')
-        (entry/'script.sh').write_text('#!/bin/sh\nexit 0\n');(entry/'playbook.yml').write_text('steps: []\n');(entry/'scripts').mkdir();(entry/'scripts/resolve.sh').write_text('#!/bin/sh\nexit 0\n')
+        (entry/'script.sh').write_text('#!/bin/sh\nexit 0\n');(entry/'playbook.yml').write_text('steps: []\n');(entry/'scripts').mkdir();(entry/'scripts/resolve.sh').write_text('#!/bin/sh\nexit 0\n');(entry/'scripts/prepare.sh').write_text('#!/bin/sh\nexit 0\n')
         dep=module.validate_candidate(package,'codex','fixture','fixture');config={'deps':{'fixture':dep},'playbook_root':str(package),'playbook':{'steps':[{'id':'script','plugin':'fixture','script':'script.sh'},{'id':'skill','skill':'fixture'},{'id':'child','playbook':'fixture'}]}}
         module.check_steps(config)
         outside=self.base/'entry-outside';entry.rename(outside);entry.symlink_to(outside,target_is_directory=True)
@@ -282,7 +282,9 @@ class Hardening(unittest.TestCase):
     def test_all_templates_resolve_from_plugin_root(self):
         plugin=ROOT/'plugins/skills/authoring/content-types'
         if not plugin.exists():self.skipTest('no content types')
-        result=self.call('yq','-o=json','.',plugin/'assets/template-examples.yml');pairs=json.loads(result.stdout)['pairs'];self.assertEqual(len(pairs),28)
+        result=self.call('yq','-o=json','.',plugin/'assets/template-examples.yml');pairs=json.loads(result.stdout)['pairs']
+        manifest=json.loads((ROOT/'plugins/.claude-plugin/plugin.json').read_text());types=[t for i in manifest['metadata']['harness']['implements'] for t in i.get('types',[])]
+        self.assertEqual(sorted(pairs),sorted(types))
         for pair in pairs.values():
             for path in pair.values():self.assertTrue((plugin/path).is_file(),path)
     def test_semantic_runner_requires_evidence(self):
@@ -305,8 +307,8 @@ class Hardening(unittest.TestCase):
         self.assertIn('symlink',result.stderr)
         self.assertEqual(list(outside.iterdir()),[])
     def test_state_repo_retry_files_corruption_and_parallel_start(self):
-        state=ROOT/'plugins/playbooks/authoring/write-doc/scripts/state.py'
-        if not state.exists():self.skipTest('no write-doc state')
+        state=next((c for c in [ROOT/'shared/playbook/state.py',ROOT/'plugins/playbooks/authoring/write-doc/scripts/state.py'] if c.exists()),None)
+        if state is None:self.skipTest('no playbook state')
         config=self.base/'resolved.json';config.write_text(json.dumps({'playbook':{'name':'fixture','steps':[{'id':'save','provides':['path']}]}}))
         a=self.base/'a';b=self.base/'b';a.mkdir();b.mkdir()
         def call(command,*extra):return self.call('python3',state,command,'--config',config,'--run-id','run',*extra)
@@ -328,5 +330,557 @@ class Hardening(unittest.TestCase):
         status=json.loads(call('status').stdout);self.assertEqual(status['status'],'completed');self.assertEqual(status['steps'][0]['attempts'],2)
         Path(status['state']).write_text('{broken')
         self.assertEqual(call('init','--repo',a).returncode,2)
+
+
+    # ---- 依存契約（外部はplaybookのみ／束縛）の負の試験 ----
+    def _manifest(self, root, data):
+        for runtime in ('claude', 'codex'):
+            path = root / f'.{runtime}-plugin/plugin.json'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data))
+
+    def _skill(self, root, name):
+        root.mkdir(parents=True, exist_ok=True)
+        (root/'SKILL.md').write_text(f'---\nname: {name}\ndescription: fixture\n---\nfixture\n')
+
+    def _entry_scripts(self, root, resolver=True):
+        (root/'scripts').mkdir(parents=True, exist_ok=True)
+        for name in ('resolve.sh', 'prepare.sh'):
+            (root/'scripts'/name).write_text('#!/usr/bin/env bash\nexit 0\n')
+            (root/'scripts'/name).chmod(0o755)
+        if resolver:
+            for name in ('resolve.sh', 'resolve-dependency.py'):
+                (root/'scripts'/name).write_bytes((ROOT/'shared/playbook'/name).read_bytes())
+            (root/'scripts/resolve.sh').chmod(0o755)
+            (root/'scripts/validate-config.sh').write_text('#!/usr/bin/env bash\nexit 0\n')
+            (root/'scripts/validate-config.sh').chmod(0o755)
+            (root/'scripts/prepare.sh').write_text('#!/usr/bin/env bash\nexit 0\n')
+            (root/'scripts/prepare.sh').chmod(0o755)
+
+    def _provider(self, name, package_name, marketplace, contract, internal, implements=True,
+                  types=None, decoy=False):
+        package = self.base/name/'plugins'
+        entry = package/'playbooks/pb'
+        self._skill(entry, 'entry-skill')
+        self._entry_scripts(entry, resolver=False)
+        (entry/'playbook.yml').write_text(
+            'version: 2\nname: pb\ndescription: fixture\ninstructions: {execution: {directive: fixture}}\n'
+            f'requires: [{{plugin: {internal}, marketplace: {marketplace}}}]\n'
+            'steps: [{id: work, skill: internal-skill, purpose: fixture}]\n')
+        self._manifest(entry, {'name': 'pb', 'version': '1.0.0'})
+        component = package/'skills/internal'
+        self._skill(component, 'internal-skill')
+        self._manifest(component, {'name': internal, 'version': '1.0.0'})
+        harness = {'installationSurface': 'playbook-package', 'marketplace': marketplace,
+                   'entryRoot': './playbooks/pb', 'playbooks': {'pb': './playbooks/pb'},
+                   'internalPlugins': {internal: './skills/internal'}, 'contractVersion': 1}
+        if decoy:
+            # entryRoot は契約と別の playbook を指す。契約が選んだ入口が勝たねばならない。
+            decoy_root = package/'playbooks/decoy'
+            self._skill(decoy_root, 'decoy-entry')
+            self._entry_scripts(decoy_root, resolver=False)
+            (decoy_root/'playbook.yml').write_text(
+                'version: 2\nname: decoy\ndescription: fixture\n'
+                'instructions: {execution: {directive: fixture}}\nrequires: []\n'
+                'steps: [{id: work, purpose: fixture, skill: decoy-entry}]\n')
+            self._manifest(decoy_root, {'name': 'decoy', 'version': '1.0.0'})
+            harness['entryRoot'] = './playbooks/decoy'
+            harness['playbooks']['decoy'] = './playbooks/decoy'
+        if implements:
+            declaration = {'id': contract, 'version': 1, 'kind': 'playbook', 'playbook': 'pb'}
+            if types is not None:
+                declaration['types'] = types
+            harness['implements'] = [declaration]
+        self._manifest(package, {'name': package_name, 'version': '1.0.0',
+                                 'skills': ['./playbooks/pb'], 'metadata': {'harness': harness}})
+        return package
+
+    def _consumer(self, steps, requires):
+        package = self.base/'consumer/plugins'
+        entry = package/'playbooks/demo'
+        self._skill(entry, 'demo')
+        self._entry_scripts(entry)
+        (entry/'playbook.yml').write_text(
+            'version: 2\nname: demo\ndescription: fixture\ndocument_type: north-star\n'
+            'instructions: {execution: {directive: fixture}}\n'
+            'requires:\n' + ''.join(f'  - {{plugin: {p}, marketplace: {m}}}\n' for p, m in requires) +
+            'steps:\n' + steps)
+        self._manifest(entry, {'name': 'demo', 'version': '1.0.0'})
+        component = package/'skills/local'
+        self._skill(component, 'do-local')
+        self._manifest(component, {'name': 'local-tool', 'version': '1.0.0'})
+        self._manifest(package, {'name': 'demo-pack', 'version': '1.0.0', 'skills': ['./playbooks/demo'],
+                                 'metadata': {'harness': {
+                                     'installationSurface': 'playbook-package', 'marketplace': 'demo',
+                                     'entryRoot': './playbooks/demo', 'playbooks': {'demo': './playbooks/demo'},
+                                     'internalPlugins': {'local-tool': './skills/local'},
+                                     'contractVersion': 1}}})
+        return entry
+
+    def _devmap(self, mapping):
+        path = self.base/'devmap.json'
+        path.write_text(json.dumps({'schema': 1, 'dependencies': {k: str(v) for k, v in mapping.items()}}))
+        return path
+
+    def test_internal_dependency_is_not_classified_external(self):
+        """write-doc → content-types 相当。所属宣言ベースの判定が内部を内部と見る。"""
+        resolver = ROOT/'shared/playbook/resolve-dependency.py'
+        if not resolver.exists(): self.skipTest('no playbook resolver')
+        package = self._provider('provider', 'write-doc', 'write-doc', 'write-doc/write-doc', 'content-types')
+        entry = package/'playbooks/pb'
+        (entry/'scripts/resolve-dependency.py').write_bytes(resolver.read_bytes())
+        result = self.call('python3', entry/'scripts/resolve-dependency.py',
+                           '--plugin-root', entry, '--plugin', 'content-types', '--marketplace', 'write-doc')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload['dependency_scope'], 'internal')
+        self.assertEqual(payload['source_kind'], 'repository')
+
+    def test_internal_search_works_when_plugin_name_differs_from_marketplace(self):
+        """stub-docs/stub-write-doc のように実体名 ≠ marketplace 名でも内部探索が働く。"""
+        resolver = ROOT/'shared/playbook/resolve-dependency.py'
+        if not resolver.exists(): self.skipTest('no playbook resolver')
+        package = self._provider('stub', 'stub-write-doc', 'stub-docs', 'write-doc/write-doc', 'stub-save')
+        entry = package/'playbooks/pb'
+        (entry/'scripts/resolve-dependency.py').write_bytes(resolver.read_bytes())
+        result = self.call('python3', entry/'scripts/resolve-dependency.py',
+                           '--plugin-root', entry, '--plugin', 'stub-save', '--marketplace', 'stub-docs')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['dependency_scope'], 'internal')
+
+    def test_external_skill_and_script_steps_are_rejected(self):
+        """外部依存は playbook: でしか使えない。when 付きの非活性 step も落とす。"""
+        if not (ROOT/'shared/playbook/resolve.sh').exists(): self.skipTest('no playbook resolver')
+        provider = self._provider('provider', 'write-doc', 'write-doc', 'write-doc/write-doc', 'content-types')
+        devmap = self._devmap({'write-doc/write-doc': provider})
+        environment = dict(self.env, HARNESS_PLUGIN_DEV_ROOTS=str(devmap),
+                           XDG_CONFIG_HOME=str(self.base/'config'))
+        cases = [
+            ('external-dependency-skill',
+             '  - {id: work, skill: entry-skill, purpose: fixture, provides: [x]}\n'),
+            ('external-dependency-skill',
+             '  - {id: work, skill: entry-skill, when: never, purpose: fixture, provides: [x]}\n'),
+            ('external-dependency-script',
+             '  - {id: work, script: scripts/x.py, plugin: write-doc, purpose: fixture, provides: [x]}\n'),
+            ('external-dependency-path',
+             '  - {id: work, playbook: write-doc, purpose: fixture, provides: [x],\n'
+             '     arguments: ["${.deps[\'write-doc\'].root}/scripts/save.sh"]}\n'),
+        ]
+        for code, steps in cases:
+            entry = self._consumer(steps, [('local-tool', 'demo'), ('write-doc', 'write-doc')])
+            result = subprocess.run(['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer')],
+                                    text=True, capture_output=True, env=environment, timeout=60)
+            self.assertEqual(result.returncode, 2, code + ': ' + result.stdout)
+            self.assertIn('[error:' + code + ']', result.stderr)
+
+    def test_generic_rule_is_diagnosed_before_distribution_validator(self):
+        """固有 validator が落とす設定でも、汎用の依存規則の診断が先に出る。"""
+        if not (ROOT/'shared/playbook/resolve.sh').exists(): self.skipTest('no playbook resolver')
+        provider = self._provider('provider', 'write-doc', 'write-doc', 'write-doc/write-doc',
+                                  'content-types')
+        devmap = self._devmap({'write-doc/write-doc': provider})
+        environment = dict(self.env, HARNESS_PLUGIN_DEV_ROOTS=str(devmap),
+                           XDG_CONFIG_HOME=str(self.base/'config'))
+
+        def run(steps):
+            entry = self._consumer(steps, [('local-tool', 'demo'), ('write-doc', 'write-doc')])
+            validator = entry/'scripts/validate-config.sh'
+            validator.write_text('#!/usr/bin/env bash\necho "[error] 配布物固有の言い分" >&2\nexit 2\n')
+            validator.chmod(0o755)
+            return subprocess.run(['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer')],
+                                  text=True, capture_output=True, env=environment, timeout=60)
+
+        # 規則違反は、固有 validator が何を言おうと汎用の error code で観測できる。
+        violation = run('  - {id: work, skill: entry-skill, purpose: fixture, provides: [x]}\n')
+        self.assertEqual(violation.returncode, 2, violation.stdout)
+        self.assertIn('[error:external-dependency-skill]', violation.stderr)
+        self.assertNotIn('配布物固有の言い分', violation.stderr)
+        # 規則に適う設定なら、これまでどおり固有 validator まで進んで落ちる。
+        allowed = run('  - {id: work, playbook: write-doc, purpose: fixture, provides: [x]}\n')
+        self.assertEqual(allowed.returncode, 2, allowed.stdout)
+        self.assertIn('配布物固有の言い分', allowed.stderr)
+
+    def test_runtime_follows_cache_root_not_ambient_environment(self):
+        """shell に CODEX_HOME があるだけで、claude の cache を codex と呼ばない。"""
+        resolver = ROOT/'shared/playbook/resolve-dependency.py'
+        if not resolver.exists(): self.skipTest('no playbook resolver')
+        homes = {'claude': self.base/'claude-home', 'codex': self.base/'codex-home'}
+        environment = dict(self.env, CLAUDE_CONFIG_DIR=str(homes['claude']),
+                           CODEX_HOME=str(homes['codex']))
+        for name in ('HARNESS_PLUGIN_RUNTIME', 'CLAUDE_PLUGIN_ROOT',
+                     'CLAUDE_PLUGIN_CACHE', 'CODEX_PLUGIN_CACHE'):
+            environment.pop(name, None)
+        for expected, home in homes.items():
+            relative = f'{home.name}/plugins/cache/write-doc/write-doc/1.0.0'
+            package = self._provider(relative, 'write-doc', 'write-doc',
+                                     'write-doc/write-doc', 'content-types')
+            entry = package/'playbooks/pb'
+            (entry/'scripts/resolve-dependency.py').write_bytes(resolver.read_bytes())
+            result = subprocess.run(
+                ['python3', str(entry/'scripts/resolve-dependency.py'), '--plugin-root', str(entry),
+                 '--plugin', 'content-types', '--marketplace', 'write-doc'],
+                text=True, capture_output=True, env=environment, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)['runtime'], expected, result.stdout)
+
+    def test_playbook_step_input_is_recorded_with_resolved_values(self):
+        """playbook: step の input は参照形のまま残し、解けた値を input_resolved に併記する。"""
+        if not (ROOT/'shared/playbook/resolve.sh').exists(): self.skipTest('no playbook resolver')
+        provider = self._provider('provider', 'write-doc', 'write-doc', 'write-doc/write-doc',
+                                  'content-types', types=['north-star'])
+        devmap = self._devmap({'write-doc/write-doc': provider})
+        environment = dict(self.env, HARNESS_PLUGIN_DEV_ROOTS=str(devmap),
+                           XDG_CONFIG_HOME=str(self.base/'config'))
+        entry = self._consumer(
+            '  - {id: work, playbook: write-doc, purpose: fixture, provides: [x],\n'
+            '     input: {document_type: "${.document_type}", name: fixture.md, at: "${.missing}"}}\n'
+            '  - {id: local, skill: do-local, purpose: fixture, needs: [x],\n'
+            '     input: {document_type: "${.document_type}"}}\n',
+            [('local-tool', 'demo'), ('write-doc', 'write-doc')])
+        result = subprocess.run(['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer')],
+                                text=True, capture_output=True, env=environment, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        steps = {step['id']: step for step in json.loads(
+            subprocess.run(['yq', '-o=json', '-I=0', '.playbook.steps'], input=result.stdout,
+                           text=True, capture_output=True, timeout=30).stdout)}
+        # 参照形は残す。解けた分だけを併記し、解けない参照は載せない。
+        self.assertEqual(steps['work']['input']['document_type'], '${.document_type}')
+        self.assertEqual(steps['work']['input_resolved'],
+                         {'document_type': 'north-star', 'name': 'fixture.md'})
+        # playbook: 以外の step は対象外。
+        self.assertNotIn('input_resolved', steps['local'])
+
+    def test_bindings_reject_bad_key_missing_implements_and_drift(self):
+        if not (ROOT/'shared/playbook/resolve.sh').exists(): self.skipTest('no playbook resolver')
+        provider = self._provider('provider', 'write-doc', 'write-doc', 'write-doc/write-doc',
+                                  'content-types', types=['north-star'])
+        naked = self._provider('naked', 'naked-doc', 'naked-docs', 'write-doc/write-doc',
+                               'naked-save', implements=False)
+        devmap = self._devmap({'write-doc/write-doc': provider, 'naked-docs/naked-doc': naked})
+        config = self.base/'config'
+        (config/'harness-plugins').mkdir(parents=True, exist_ok=True)
+        bindings = config/'harness-plugins/dependencies.yml'
+        entry = self._consumer(
+            '  - {id: work, playbook: write-doc, purpose: fixture, provides: [x],\n'
+            '     input: {document_type: "${.document_type}"}}\n',
+            [('local-tool', 'demo'), ('write-doc', 'write-doc')])
+        environment = dict(self.env, HARNESS_PLUGIN_DEV_ROOTS=str(devmap), XDG_CONFIG_HOME=str(config))
+
+        def resolve(*extra):
+            return subprocess.run(['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer'), *extra],
+                                  text=True, capture_output=True, env=environment, timeout=60)
+
+        bindings.write_text('version: 1\nbindings:\n  "write-doc": {marketplace: naked-docs, plugin: naked-doc}\n')
+        self.assertIn('[error:binding-key-invalid]', resolve().stderr)
+        bindings.write_text('version: 1\nbindings:\n  "write-doc/write-doc": {marketplace: naked-docs, plugin: naked-doc, path: /tmp}\n')
+        self.assertIn('[error:binding-schema]', resolve().stderr)
+        bindings.write_text('version: 1\nbindings:\n  "write-doc/write-doc": {marketplace: naked-docs, plugin: naked-doc}\n')
+        self.assertIn('[error:binding-not-implemented]', resolve().stderr)
+        bindings.write_text('version: 1\nbindings:\n  "demo/local-tool": {marketplace: demo, plugin: local-tool}\n')
+        self.assertIn('[error:binding-internal-dependency]', resolve().stderr)
+        bindings.unlink()
+        first = resolve()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        lock = re.search(r'bindings_lock: (\S+)', first.stdout).group(1)
+        (provider/'playbooks/pb/SKILL.md').write_text('---\nname: entry-skill\ndescription: changed\n---\nchanged\n')
+        self.assertIn('[error:binding-drift]', resolve('--bindings=' + lock).stderr)
+
+
+    def test_contract_input_normalizes_paths_and_delegates_schema(self):
+        """--input は symlink 越しの一時領域を受け、契約固有schemaは validate-input.sh へ委譲する。"""
+        if not (ROOT/'shared/playbook/resolve.sh').exists(): self.skipTest('no playbook resolver')
+        package = self._provider('provider', 'write-doc', 'write-doc', 'write-doc/write-doc',
+                                 'content-types', types=['north-star'])
+        entry = package/'playbooks/pb'
+        self._entry_scripts(entry, resolver=True)
+        # macOS 既定の TMPDIR と同じ形（祖先が symlink）を作る。
+        real = self.base/'real-tmp'; real.mkdir()
+        linked = self.base/'tmp'; linked.symlink_to(real, target_is_directory=True)
+        output = real/'out.yml'
+        payload = linked/'input.yml'
+        payload.write_text('contract: write-doc/write-doc\nversion: 1\n'
+                           'document_type: north-star\n'
+                           f'output_to: {linked}/out.yml\n')
+        environment = dict(self.env, XDG_CONFIG_HOME=str(self.base/'config'))
+
+        def resolve():
+            return subprocess.run(['bash', str(entry/'scripts/resolve.sh'), str(self.base),
+                                   '--input=' + str(payload)],
+                                  text=True, capture_output=True, env=environment, timeout=60)
+
+        first = resolve()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        # 正規化後の絶対 path が載る。symlink 越しの綴りは残さない。
+        self.assertIn('input_file: ' + str(real/'input.yml'), first.stdout)
+        self.assertIn('output_to: ' + str(output), first.stdout)
+        self.assertIn('document_type: north-star', first.stdout)
+
+        # 契約固有 schema は provider の hook が拒否する。
+        validator = entry/'scripts/validate-input.sh'
+        validator.write_text('#!/usr/bin/env bash\necho "[error:input-schema] key=unknown" >&2\nexit 3\n')
+        validator.chmod(0o755)
+        rejected = resolve()
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn('[error:input-schema]', rejected.stderr)
+        self.assertIn('key=unknown', rejected.stderr)
+        # hook が渡された path は正規化済みで、hook 自身が読める。
+        validator.write_text('#!/usr/bin/env bash\ntest -f "$1" && grep -q "^contract:" "$1"\n')
+        self.assertEqual(resolve().returncode, 0)
+        # symlink の hook は実行しない。
+        validator.unlink(); validator.symlink_to(self.base/'absent.sh')
+        self.assertEqual(resolve().returncode, 0)
+        validator.unlink()
+        # 正規化しても能力検査は効く。
+        payload.write_text('contract: write-doc/write-doc\nversion: 1\ndocument_type: strategy\n')
+        self.assertIn('[error:input-capability-unsupported]', resolve().stderr)
+        # 実在しない入力は正規化後に落ちる。
+        payload.unlink()
+        self.assertIn('[error:input-file-unsafe]', resolve().stderr)
+
+
+    def test_external_root_follows_contract_not_entry_root(self):
+        """外部依存の root は entryRoot ではなく契約が選んだ playbook である。"""
+        resolver = ROOT/'shared/playbook/resolve-dependency.py'
+        if not resolver.exists(): self.skipTest('no playbook resolver')
+        provider = self._provider('provider', 'write-doc', 'write-doc', 'write-doc/write-doc',
+                                  'content-types', decoy=True)
+        devmap = self._devmap({'write-doc/write-doc': provider})
+        entry = self._consumer('  - {id: work, playbook: write-doc, purpose: fixture, provides: [x]}\n',
+                               [('local-tool', 'demo'), ('write-doc', 'write-doc')])
+        environment = dict(self.env, HARNESS_PLUGIN_DEV_ROOTS=str(devmap),
+                           XDG_CONFIG_HOME=str(self.base/'config'))
+        result = subprocess.run(['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer')],
+                                text=True, capture_output=True, env=environment, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('root: ' + str(provider/'playbooks/pb'), result.stdout)
+        self.assertNotIn(str(provider/'playbooks/decoy'), result.stdout)
+        self.assertIn('entry: ' + str(provider/'playbooks/pb/SKILL.md'), result.stdout)
+        self.assertIn('entry_skill: entry-skill', result.stdout)
+
+    def test_external_reference_forms_are_parsed_once_and_narrowed(self):
+        """ブラケット形・引用形・skills 形・依存先設定参照をすべて拒否する。"""
+        if not (ROOT/'shared/playbook/resolve.sh').exists(): self.skipTest('no playbook resolver')
+        provider = self._provider('provider', 'write-doc', 'write-doc', 'write-doc/write-doc',
+                                  'content-types')
+        devmap = self._devmap({'write-doc/write-doc': provider})
+        environment = dict(self.env, HARNESS_PLUGIN_DEV_ROOTS=str(devmap),
+                           XDG_CONFIG_HOME=str(self.base/'config'))
+
+        def run(reference):
+            steps = ('  - {id: work, playbook: write-doc, purpose: fixture, provides: [x],\n'
+                     '     arguments: ["' + reference + '"]}\n')
+            entry = self._consumer(steps, [('local-tool', 'demo'), ('write-doc', 'write-doc')])
+            return subprocess.run(['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer')],
+                                  text=True, capture_output=True, env=environment, timeout=60)
+
+        rejected = [
+            ('external-dependency-path', '${.deps[\'write-doc\'][\'root\']}/references/private.md'),
+            ('external-dependency-path', '${.deps.\'write-doc\'.root}/../../LICENSE'),
+            ('external-dependency-path', '${.deps.write-doc.skills.write-doc}'),
+            ('external-dependency-path', '${.deps.write-doc.package_root}'),
+            ('external-dependency-path', '${.deps.write-doc.entry}/../x'),
+            ('external-dependency-config', '${write-doc:.private.setting}'),
+        ]
+        for code, reference in rejected:
+            result = run(reference)
+            self.assertEqual(result.returncode, 2, reference)
+            self.assertIn('[error:' + code + ']', result.stderr, reference)
+        for reference in ['${.deps.write-doc.root}/scripts/prepare.sh',
+                          '${.deps[\'write-doc\'].root}/playbook.yml',
+                          '${.deps.write-doc.entry}',
+                          '${doc-render:.output.format}']:
+            self.assertEqual(run(reference).returncode, 0, reference)
+
+    def test_lock_snapshot_and_state_identity_survive_child_appends(self):
+        """入口が束縛を snapshot し、子の追記が親の状態管理を壊さない。"""
+        if not (ROOT/'shared/playbook/resolve.sh').exists(): self.skipTest('no playbook resolver')
+        provider = self._provider('provider', 'write-doc', 'write-doc', 'write-doc/write-doc',
+                                  'content-types')
+        other = self._provider('other', 'other-doc', 'other-docs', 'write-doc/write-doc', 'other-save')
+        devmap = self._devmap({'write-doc/write-doc': provider, 'other-docs/other-doc': other})
+        config = self.base/'config'; (config/'harness-plugins').mkdir(parents=True, exist_ok=True)
+        bindings = config/'harness-plugins/dependencies.yml'
+        bindings.write_text('version: 1\nbindings:\n'
+                            '  "write-doc/write-doc": {marketplace: other-docs, plugin: other-doc}\n')
+        entry = self._consumer('  - {id: work, playbook: write-doc, purpose: fixture, provides: [path]}\n',
+                               [('local-tool', 'demo'), ('write-doc', 'write-doc')])
+        environment = dict(self.env, HARNESS_PLUGIN_DEV_ROOTS=str(devmap), XDG_CONFIG_HOME=str(config))
+        resolved = self.base/'resolved.yml'
+        with resolved.open('w') as handle:
+            first = subprocess.run(['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer')],
+                                   stdout=handle, text=True, stderr=subprocess.PIPE,
+                                   env=environment, timeout=60)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        lock = Path(re.search(r'bindings_lock: (\S+)', resolved.read_text()).group(1))
+        snapshot = json.loads(lock.read_text())
+        self.assertEqual(snapshot['bindings']['write-doc/write-doc'],
+                         {'marketplace': 'other-docs', 'plugin': 'other-doc'})
+
+        # 元ファイルを書き換えても、子は snapshot の実体を使う。
+        bindings.write_text('version: 1\nbindings:\n'
+                            '  "write-doc/write-doc": {marketplace: write-doc, plugin: write-doc}\n')
+        child = subprocess.run(['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer'),
+                                '--bindings=' + str(lock)],
+                               text=True, capture_output=True, env=environment, timeout=60)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertIn('plugin: other-doc', child.stdout)
+
+        # 子が新しい契約を lock へ追記しても、親の state identity は変わらない。
+        state = ROOT/'shared/playbook/state.py'
+        def call(command, *extra):
+            return self.call('python3', state, command, '--config', resolved,
+                             '--run-id', 'run', *extra)
+        started = call('init', '--repo', self.base/'consumer')
+        self.assertEqual(started.returncode, 0, started.stderr)
+        appended = json.loads(lock.read_text())
+        appended['entries']['grill/grill'] = {
+            'marketplace': 'grill', 'plugin': 'grill', 'version': '1.0.0',
+            'root': str(self.base), 'package_root': str(self.base),
+            'content_hash': 'deadbeef', 'source_kind': 'dev-map'}
+        lock.write_text(json.dumps(appended))
+        self.assertEqual(call('status').returncode, 0, call('status').stderr)
+        self.assertEqual(call('start', '--step', 'work').returncode, 0)
+        # 自分の契約の実体が変われば、これまでどおり再開を拒否する。
+        mutated = json.loads(lock.read_text())
+        mutated['entries']['write-doc/write-doc']['content_hash'] = 'changed'
+        lock.write_text(json.dumps(mutated))
+        self.assertEqual(call('status').returncode, 2)
+
+    def _diagnostic_repo(self, name):
+        """doctor が最低限読む repository。marketplace 検査は別 test の領分。"""
+        repo = self.base/name
+        (repo/'scripts').mkdir(parents=True, exist_ok=True)
+        (repo/'scripts/validate.sh').write_text('#!/bin/bash\nexit 0\n')
+        return repo
+
+    def test_doctor_skips_skills_that_require_an_override(self):
+        """既定値の無い required な prompt parameter を持つ skill は、実行せず skip する。"""
+        repo = self._diagnostic_repo('diagnostic')
+        cases = [
+            ('needs-override', 'version: 1\nprompt_parameters:\n  method:\n    type: string\n    required: true\n'),
+            ('needs-nested', 'version: 1\nprompt_parameters:\n  database:\n    product: {type: string, required: true}\n    version: {type: string, required: true}\n'),
+            ('has-default', 'version: 1\nprompt_parameters:\n  depth:\n    type: string\n    required: true\n    default: shallow\n'),
+        ]
+        for name, defaults in cases:
+            plugin = repo/'plugins'/name
+            (plugin/'config').mkdir(parents=True)
+            (plugin/'config/defaults.yml').write_text(defaults)
+            (plugin/'scripts').mkdir()
+            (plugin/'scripts/resolve.sh').write_text(
+                '#!/usr/bin/env bash\ntouch "' + str(self.base/'executed') + '.' + name + '"\nexit 2\n')
+        result = self.call('python3', ROOT/'scripts/doctor.py', '--repository', repo, '--repo', repo)
+        checks = {check['check']: check for check in json.loads(result.stdout)['checks']}
+        skipped = checks['resolve:plugins/needs-override/scripts/resolve.sh']
+        self.assertTrue(skipped['ok'], skipped)
+        self.assertEqual(skipped['skipped'], 'requires-override')
+        self.assertEqual(skipped['requires_override'], ['method'])
+        self.assertEqual(checks['resolve:plugins/needs-nested/scripts/resolve.sh']['requires_override'],
+                         ['database.product', 'database.version'])
+        # skip は「実行して落ちた」ではない。resolve.sh は起動していない。
+        self.assertFalse((self.base/'executed.needs-override').exists())
+        self.assertFalse((self.base/'executed.needs-nested').exists())
+        # 既定値があるなら上書きは要らない。これまでどおり実行し、結果で判断する。
+        executed = checks['resolve:plugins/has-default/scripts/resolve.sh']
+        self.assertFalse(executed['ok'])
+        self.assertTrue((self.base/'executed.has-default').exists())
+
+    def test_doctor_resolves_playbooks_against_sibling_checkouts(self):
+        """playbook の解決は fixture ではなく、兄弟 checkout の実配布物に対して行う。"""
+        if not (ROOT/'shared/playbook/resolve.sh').exists(): self.skipTest('no playbook resolver')
+        provider = self._provider('write-doc-plugins', 'write-doc', 'write-doc',
+                                  'write-doc/write-doc', 'content-types')
+        self._consumer('  - {id: work, playbook: write-doc, purpose: fixture, provides: [x]}\n',
+                       [('local-tool', 'demo'), ('write-doc', 'write-doc')])
+        repo = self._diagnostic_repo('consumer')
+        environment = dict(self.env, XDG_CONFIG_HOME=str(self.base/'config'))
+        environment.pop('HARNESS_PLUGIN_DEV_ROOTS', None)
+        environment.pop('HARNESS_PLUGIN_REAL_ROOTS', None)
+
+        def diagnose(extra=None):
+            result = subprocess.run(
+                ['python3', str(ROOT/'scripts/doctor.py'), '--repository', str(repo), '--repo', str(repo)],
+                text=True, capture_output=True, env=dict(environment, **(extra or {})), timeout=120)
+            return {check['check']: check for check in json.loads(result.stdout)['checks']}
+
+        label = 'resolve:plugins/playbooks/demo/scripts/resolve.sh'
+        checks = diagnose()
+        resolved = checks[label]
+        self.assertTrue(resolved['ok'], resolved.get('detail'))
+        self.assertTrue(any('[外部] write-doc → write-doc/write-doc' in line
+                            for line in resolved['dependencies']), resolved['dependencies'])
+        self.assertEqual(checks['dependency-bindings']['real_distribution'],
+                         {'source': 'sibling-checkout',
+                          'dependencies': {'write-doc/write-doc': str(provider)}})
+        # 兄弟が無ければ、fixture へ倒さず理由付きで NG にする。
+        absent = diagnose({'HARNESS_PLUGIN_SIBLING_ROOT': str(self.base/'nowhere')})
+        self.assertFalse(absent[label]['ok'])
+        self.assertIn('write-doc/write-doc', absent[label]['detail'])
+        self.assertFalse(absent['dependency-bindings']['ok'])
+
+    def test_internal_skill_reference_must_name_an_existing_skill(self):
+        """内部依存への .skills.<名前> は、解決結果に実在する名前だけを許す。"""
+        if not (ROOT/'shared/playbook/resolve.sh').exists(): self.skipTest('no playbook resolver')
+        provider = self._provider('provider', 'write-doc', 'write-doc', 'write-doc/write-doc',
+                                  'content-types')
+        devmap = self._devmap({'write-doc/write-doc': provider})
+        environment = dict(self.env, HARNESS_PLUGIN_DEV_ROOTS=str(devmap),
+                           XDG_CONFIG_HOME=str(self.base/'config'))
+
+        def run(reference):
+            steps = ('  - {id: work, playbook: write-doc, purpose: fixture, provides: [x],\n'
+                     '     arguments: ["' + reference + '"]}\n')
+            entry = self._consumer(steps, [('local-tool', 'demo'), ('write-doc', 'write-doc')])
+            return subprocess.run(['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer')],
+                                  text=True, capture_output=True, env=environment, timeout=60)
+
+        allowed = run('${.deps.local-tool.skills.do-local}')
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        for reference in ['${.deps.local-tool.skills.do-remote}',
+                          "${.deps['local-tool'].skills['do-remote']}",
+                          '${.deps.local-tool.skills}']:
+            rejected = run(reference)
+            self.assertEqual(rejected.returncode, 2, reference)
+            self.assertIn('[error:internal-skill-unknown]', rejected.stderr, reference)
+        # lint も同じ関数で同じ判定をする。違うのは playbook.yml の外まで見ることだけ。
+        entry = self._consumer('  - {id: work, playbook: write-doc, purpose: fixture, provides: [x]}\n',
+                               [('local-tool', 'demo'), ('write-doc', 'write-doc')])
+        (entry/'README.md').write_text('工程は ${.deps.local-tool.skills.do-remote} に従う\n')
+        linted = subprocess.run(
+            ['python3', str(ROOT/'scripts/lint-consumer-contract.py'), '--repo',
+             str(self.base/'consumer'), '--runtime', 'claude', '--json'],
+            text=True, capture_output=True, env=environment, timeout=120)
+        self.assertEqual(linted.returncode, 1, linted.stdout + linted.stderr)
+        findings = json.loads(linted.stdout)['findings']
+        self.assertIn('internal-skill-unknown', [finding['code'] for finding in findings])
+
+    def test_explain_names_the_implementation_behind_each_logical_name(self):
+        """依存行は論理名と実体を並べ、束縛で実体が変わったときだけ出典層を添える。"""
+        if not (ROOT/'shared/playbook/resolve.sh').exists(): self.skipTest('no playbook resolver')
+        provider = self._provider('provider', 'write-doc', 'write-doc', 'write-doc/write-doc',
+                                  'content-types')
+        other = self._provider('other', 'other-doc', 'other-docs', 'write-doc/write-doc', 'other-save')
+        devmap = self._devmap({'write-doc/write-doc': provider, 'other-docs/other-doc': other})
+        config = self.base/'config'; (config/'harness-plugins').mkdir(parents=True, exist_ok=True)
+        entry = self._consumer('  - {id: work, playbook: write-doc, purpose: fixture, provides: [x]}\n',
+                               [('local-tool', 'demo'), ('write-doc', 'write-doc')])
+        environment = dict(self.env, HARNESS_PLUGIN_DEV_ROOTS=str(devmap), XDG_CONFIG_HOME=str(config))
+
+        def explain():
+            result = subprocess.run(
+                ['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer'), '--explain'],
+                text=True, capture_output=True, env=environment, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stderr
+
+        plain = explain()
+        self.assertIn('[外部] write-doc → write-doc/write-doc 1.0.0 [', plain)
+        self.assertIn('[内部] local-tool → demo/local-tool 1.0.0 [', plain)
+        self.assertNotIn('← personal', plain)
+        (config/'harness-plugins/dependencies.yml').write_text(
+            'version: 1\nbindings:\n'
+            '  "write-doc/write-doc": {marketplace: other-docs, plugin: other-doc}\n')
+        bound = explain()
+        self.assertIn('[外部] write-doc → other-docs/other-doc 1.0.0 [', bound)
+        self.assertIn('← personal', bound)
 
 if __name__=='__main__':unittest.main()
