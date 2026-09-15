@@ -151,11 +151,39 @@ class FleetStoreTest(unittest.TestCase):
         self.store.assign("demo", "task-1", "worker-1", "manager")
         self.store.transition_task("demo", "task-1", "running", "worker-1")
         with self.assertRaisesRegex(fleet_control.FleetError, "payload is required"):
-            self.store.transition_task("demo", "task-1", "completed", "worker-1")
+            self.store.transition_task("demo", "task-1", "reported", "worker-1")
         result = self.store.transition_task(
-            "demo", "task-1", "completed", "worker-1", {"summary": "done"}
+            "demo", "task-1", "reported", "worker-1", {"summary": "done"}
         )
         self.assertEqual("reported", result["status"])
+
+    def test_task_report_cli_accepts_reported_and_rejects_completed(self):
+        self.store.assign("demo", "task-1", "worker-1", "manager")
+        self.store.transition_task("demo", "task-1", "running", "worker-1")
+        stdout = __import__("io").StringIO()
+        with mock.patch("sys.stdout", stdout):
+            exit_code = fleet_control.main(
+                [
+                    "--db", str(self.db), "task.report", "--fleet", "demo",
+                    "--task", "task-1", "--status", "reported",
+                    "--agent-ref", "worker-1", "--report", '{"summary":"done"}',
+                ]
+            )
+        self.assertEqual(0, exit_code)
+        self.assertEqual("reported", __import__("json").loads(stdout.getvalue())["result"]["status"])
+
+        stderr = __import__("io").StringIO()
+        with mock.patch("sys.stderr", stderr), self.assertRaises(SystemExit) as raised:
+            fleet_control.main(
+                [
+                    "--db", str(self.db), "task.report", "--fleet", "demo",
+                    "--task", "task-1", "--status", "completed",
+                    "--agent-ref", "worker-1", "--report", '{"summary":"done"}',
+                ]
+            )
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("invalid choice", stderr.getvalue())
+        self.assertEqual("reported", self.store.status("demo")["tasks"][0]["status"])
 
     def test_task_transition_operation_id_makes_lost_response_retry_idempotent(self):
         self.store.assign("demo", "task-1", "worker-1", "manager")
@@ -172,7 +200,7 @@ class FleetStoreTest(unittest.TestCase):
         self.store.assign("demo", "task-1", "worker-1", "manager")
         with self.assertRaisesRegex(fleet_control.FleetError, "assigned -> reported"):
             self.store.transition_task(
-                "demo", "task-1", "completed", "worker-1", {"summary": "too early"}
+                "demo", "task-1", "reported", "worker-1", {"summary": "too early"}
             )
 
     def test_task_cannot_be_assigned_against_declared_assignee(self):
@@ -366,7 +394,7 @@ class FleetStoreTest(unittest.TestCase):
         self.assertEqual("running", current["context"]["assignments"][0]["status"])
 
         self.store.transition_task(
-            "demo", "task-1", "completed", "worker-1", {"summary": "first"}
+            "demo", "task-1", "reported", "worker-1", {"summary": "first"}
         )
         with self.store.connect() as db:
             reported_revision = db.execute(
@@ -1449,7 +1477,7 @@ class FleetStoreTest(unittest.TestCase):
         self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")
         self.store.transition_task("demo", "task-1", "running", "worker-1")
         self.store.transition_task(
-            "demo", "task-1", "completed", "worker-1", {"summary": "done"}
+            "demo", "task-1", "reported", "worker-1", {"summary": "done"}
         )
         self.store.accept_task("demo", "task-1", "manager")
 
@@ -1468,7 +1496,7 @@ class FleetStoreTest(unittest.TestCase):
             "2026-09-01T12:30:00+00:00",
         )
         self.store.transition_task(
-            "demo", "task-1", "completed", "worker-1", {"summary": "done"}
+            "demo", "task-1", "reported", "worker-1", {"summary": "done"}
         )
         stdout = __import__("io").StringIO()
         with mock.patch("sys.stdout", stdout):
@@ -1497,7 +1525,7 @@ class FleetStoreTest(unittest.TestCase):
         self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")
         self.store.transition_task("demo", "task-1", "running", "worker-1")
         self.store.transition_task(
-            "demo", "task-1", "completed", "worker-1", {"summary": "first result"}
+            "demo", "task-1", "reported", "worker-1", {"summary": "first result"}
         )
         resumed = self.store.transition_task("demo", "task-1", "running", "worker-1")
         self.assertEqual("running", resumed["status"])
@@ -1509,12 +1537,12 @@ class FleetStoreTest(unittest.TestCase):
             self.store.transition_task("demo", "task-1", "running", "worker-1")
         self.assertEqual("failed", self.store.status("demo")["tasks"][0]["status"])
 
-    def test_completion_report_requires_manager_acceptance(self):
+    def test_reported_result_requires_manager_acceptance(self):
         self.store.assign("demo", "task-1", "worker-1", "manager", "assign-1")
         self.store.transition_task("demo", "task-1", "running", "worker-1")
 
         reported = self.store.transition_task(
-            "demo", "task-1", "completed", "worker-1", {"summary": "done"}
+            "demo", "task-1", "reported", "worker-1", {"summary": "done"}
         )
         self.assertEqual("reported", reported["status"])
         self.assertEqual("reported", self.store.status("demo")["tasks"][0]["status"])

@@ -3,32 +3,32 @@
   "source": {
     "repository": "product-planning-plugins",
     "path": "shared/runtime-source",
-    "version": "2.5.1",
+    "version": "2.5.5",
     "files": {
-      "resolve-dependency.py": "9a9653740687313acc87afb59b13329d1f3f646cbfabbfa631064f6c8195dd62",
-      "resolve.sh": "7dee8c589d9f9e525ce41cc0ad4cbd519881ac8a932dee72c50b0a5d32aa9174",
+      "resolve-dependency.py": "a27b213fde2a1ec80b3d62d25d7b7b1528286247e23fc98bcfc745ebc5776e17",
+      "resolve.sh": "1eea35d2178de832798d36c96a025f4672924fa3078af43e3a3b4f1ed140c7e9",
       "state.py": "5571cdec8eb4bd4524364e8f2764097068ffe485d5b51c531086e47127c09cfa",
       "validate-distribution.py": "fdc48c31a9404bd494c5d8481054ab26eb964327050f12e30b05beebc08463cb",
       "prepare.sh": "5035f21ddb9c8e19fa980d310c58387b5585576009c0eb997c7b2893499fb0fa",
       "run-config.py": "88b649f0b530238ac36a7470896abea5ff3efd4f4538643746d0476681b0f2ae",
       "doctor.py": "5d3e59818b4fbb0e8633c5ad74c409574ddae874aa0f09c211b8ec1c0d8e399d",
       "release.py": "281880055f52c48e5c2e64931150f369b8fc2f97c004ac05c82ecb4bcf275fb6",
-      "evaluate-skills.py": "43272002c9183dfbb7a0f0d5658c06a47e9b8c1e97aa209d8889802a0a8eab9d",
+      "evaluate-skills.py": "3158cbf98e022d3a8b598ec4e7b618bfcfc6eb9f19c6a81db2147db078771c45",
       "claude-eval-adapter.py": "3189453325a50d6c28dd808f40acb44eb2e6c40a7e56b4a39e18579b8f37e8f9",
-      "sync-runtime.py": "45dd0424fe1d52b3eb9c6f4d22d9e71db23766ff140a050d89775400f2a92542",
-      "test-hardening.py": "7c7639b21353b81d11d5aa2d39a9d344fc2e8b36bc5263dcde916447e18fae5e",
-      "lint-consumer-contract.py": "59b674d813e869369ff9c1ab7d4bf96209053968f53196c04cdd0eeb833f445d",
-      "validate.yml": "24a789b85a9b433e339fdb2a41fcb952820ba1d5e13c41142e6713dfc5372703"
+      "sync-runtime.py": "d14bb2b83c8ebec7e4c8d845da36a44d63f66e7ba5c076850c3f6debb73d941c",
+      "test-hardening.py": "d3e946ca724d0e4edddc647f888fec7d4506b4cb3b5f6feeb897b956db023270",
+      "lint-consumer-contract.py": "bd54eea5941659bde06463fa983c1591304d5795fd57f1b75c2b0cf57edebfe6",
+      "validate.yml": "c39c03baa2076e47737388c0c65b1856d73a44cd5b2bb24eab4c2d23030c5187"
     }
   },
   "targets": {
-    ".github/workflows/validate.yml": "24a789b85a9b433e339fdb2a41fcb952820ba1d5e13c41142e6713dfc5372703",
+    ".github/workflows/validate.yml": "c39c03baa2076e47737388c0c65b1856d73a44cd5b2bb24eab4c2d23030c5187",
     "scripts/claude-eval-adapter.py": "3189453325a50d6c28dd808f40acb44eb2e6c40a7e56b4a39e18579b8f37e8f9",
     "scripts/doctor.py": "5d3e59818b4fbb0e8633c5ad74c409574ddae874aa0f09c211b8ec1c0d8e399d",
-    "scripts/evaluate-skills.py": "43272002c9183dfbb7a0f0d5658c06a47e9b8c1e97aa209d8889802a0a8eab9d",
-    "scripts/lint-consumer-contract.py": "59b674d813e869369ff9c1ab7d4bf96209053968f53196c04cdd0eeb833f445d",
+    "scripts/evaluate-skills.py": "3158cbf98e022d3a8b598ec4e7b618bfcfc6eb9f19c6a81db2147db078771c45",
+    "scripts/lint-consumer-contract.py": "bd54eea5941659bde06463fa983c1591304d5795fd57f1b75c2b0cf57edebfe6",
     "scripts/release.py": "281880055f52c48e5c2e64931150f369b8fc2f97c004ac05c82ecb4bcf275fb6",
-    "scripts/sync-runtime.py": "45dd0424fe1d52b3eb9c6f4d22d9e71db23766ff140a050d89775400f2a92542",
-    "scripts/test-hardening.py": "7c7639b21353b81d11d5aa2d39a9d344fc2e8b36bc5263dcde916447e18fae5e"
+    "scripts/sync-runtime.py": "d14bb2b83c8ebec7e4c8d845da36a44d63f66e7ba5c076850c3f6debb73d941c",
+    "scripts/test-hardening.py": "d3e946ca724d0e4edddc647f888fec7d4506b4cb3b5f6feeb897b956db023270"
   }
 }
