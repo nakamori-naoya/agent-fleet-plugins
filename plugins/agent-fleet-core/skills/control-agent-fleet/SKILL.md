@@ -24,7 +24,7 @@ python3 "${PLUGIN_ROOT}/spec/scripts/validate_fleet.py" fleet.yml \
 - `fleet.provision`: 検査済みSpecからlogical fleetを初期化する
 - `task.assign`: managerがtaskをlogical agentへ割り当てる。全`depends_on`が受理済みでなければ、未受理IDと状態を示して拒否する
 - `message.send`: マネージャーが論理エージェント宛ての型付き指示を配送待ちへ積む
-- `task.report`: 割当済みagentが`--agent-ref`を示し、running、blocked、completed、failedを明示報告する
+- `task.report`: 割当済みagentが`--agent-ref`を示し、running、blocked、reported、failedを明示報告する。成果物をmanagerの受理待ちへ渡すstatusは`reported`であり、managerが根拠を確認した後だけ`task.accept`で`accepted`にする
 - `task.list`: マネージャーの監視に必要なタスク状態、宣言順の`depends_on`配列、最新報告を読み取り専用で返す
 - `fleet.reconcile`: current state、event、pending outboxを返す
 

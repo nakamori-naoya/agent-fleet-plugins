@@ -140,6 +140,16 @@ scripts/fleet-runtime status mixed-review-0123456789abcdef0123456789abcdef
 scripts/fleet-runtime stop mixed-review-0123456789abcdef0123456789abcdef --execute
 ```
 
+## task報告statusの構造検査宣言
+
+- 正本: Coreの`TASK_TRANSITIONS`と公開`control-agent-fleet` Skill
+- 入力: `fleet-control task.report --status`と、割当済みtaskを持つ一時SQLite DB
+- 正規化: statusはaliasへ変換せず、CLIへ渡された文字列をそのまま遷移集合と照合する
+- 合格述語: workerの成果報告は`reported`で受理され、managerの`task.accept`後だけ`accepted`になる。`completed`は公開statusではなく操作前に拒否される
+- 診断: 未知statusはargparseが不正な選択肢としてexit 2を返し、task状態を変えない
+- 正例: `running -> reported -> accepted`。反例: `--status completed`。境界例: `running`は継続報告でありmanager受理待ちへ移さない
+- 意味評価として残す範囲: 報告根拠が完了条件を満たすか、managerが受理すべきか
+
 `Ctrl-C`はforegroundの配送制御だけを止める。Herdr workspaceも閉じる場合は`stop --execute`を実行する。
 
 Herdr側でworkspaceを直接閉じてもrunの論理状態は自動停止しない。既存runの配送制御だけが終了した場合は`resume <run-id>`で再開する。`start`は既存runを再利用せず、常に別runを作る。
@@ -210,6 +220,8 @@ claude plugin update agent-fleet-herdr@agent-fleet --scope user
 ```bash
 bash scripts/validate.sh
 ```
+
+[意味評価fixture](evals/scenarios.json)は`scripts/evaluate-skills.py`で生成modelと独立judgeへ渡し、入力、応答、criterionごとの逐語quoteとreasonを記録する。runnerのexit 0は全caseの記録完了だけを示し、品質承認を示さない。criterionの真偽は人またはagentが記録を再読して採否を判断するための意味証拠である。adapter非zero、不正な応答、根拠不整合など記録を完了できない操作失敗は非zeroで終了する。
 
 ## 詳細資料
 

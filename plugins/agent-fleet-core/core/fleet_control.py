@@ -1219,8 +1219,6 @@ class FleetStore(CommandDelivery):
         report: Mapping[str, Any] | None = None,
         operation_id: str | None = None,
     ) -> dict[str, Any]:
-        if target == "completed":
-            target = "reported"
         if target not in TASK_TRANSITIONS:
             raise FleetError(f"unknown task status: {target}")
         if target in {"reported", "failed", "blocked"} and report is None:

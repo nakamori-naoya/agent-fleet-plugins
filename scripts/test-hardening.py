@@ -287,14 +287,22 @@ class Hardening(unittest.TestCase):
         self.assertEqual(sorted(pairs),sorted(types))
         for pair in pairs.values():
             for path in pair.values():self.assertTrue((plugin/path).is_file(),path)
-    def test_semantic_runner_requires_evidence(self):
+    def test_semantic_runner_records_assessment_but_only_operational_errors_fail(self):
         repo=self.base/'eval';(repo/'evals').mkdir(parents=True)
         (repo/'SKILL.md').write_text('---\nname: fixture\ndescription: fixture\n---\nDo the specified job.')
         fixtures=repo/'evals/cases.json';fixtures.write_text(json.dumps({'cases':[{'id':'case','skill':'../SKILL.md','messages':[{'role':'user','content':'request'}],'criteria':[{'id':'meaning','meaning':'a meaningful explanation'}]}]}))
-        adapter=repo/'adapter.py';adapter.write_text("import json,sys\nr=json.load(sys.stdin)\nprint(json.dumps({'model':r['model'],'output':{'criteria':[{'id':'meaning','pass':True,'quote':'absent','reason':'unsupported'}]} if 'candidate_output' in r else 'actual answer'}))\n")
+        adapter=repo/'adapter.py';adapter.write_text("import json,sys\nr=json.load(sys.stdin)\nmode=r.get('settings',{}).get('mode')\nif mode=='adapter-error': raise SystemExit(7)\nif 'candidate_output' in r:\n print(json.dumps({'model':r['model'],'output':[] if mode=='invalid-response' else {'criteria':[{'id':'meaning','pass':mode!='semantic-fail','quote':7 if mode=='invalid-type' else ('absent' if mode=='invalid-evidence' else 'actual answer'),'reason':'independent assessment'}]}}))\nelse: print(json.dumps({'model':r['model'],'output':'actual answer'}))\n")
         command=json.dumps(['python3',str(adapter)]);out=repo/'result.json'
-        result=self.call('python3',ROOT/'scripts/evaluate-skills.py','--fixtures',fixtures,'--model-command',command,'--judge-command',command,'--model','generator','--judge-model','judge','--output',out)
-        self.assertEqual(result.returncode,1);record=json.loads(out.read_text())['records'][0];self.assertEqual(record['status'],'error');self.assertIn('evidence',record['error']);self.assertIn('judge_input',record);self.assertIn('judgment',record);self.assertEqual(record['judgment']['output']['criteria'][0]['quote'],'absent')
+        common=['python3',ROOT/'scripts/evaluate-skills.py','--fixtures',fixtures,'--model-command',command,'--judge-command',command,'--model','generator','--judge-model','judge','--output',out]
+        result=self.call(*common,'--settings',json.dumps({'mode':'semantic-fail'}))
+        self.assertEqual(result.returncode,0);report=json.loads(out.read_text());record=report['records'][0];self.assertEqual(report['schema'],2);self.assertEqual(record['status'],'recorded');self.assertFalse(record['judgment']['output']['criteria'][0]['pass'])
+        result=self.call(*common,'--settings',json.dumps({'mode':'invalid-evidence'}))
+        self.assertEqual(result.returncode,1);record=json.loads(out.read_text())['records'][0];self.assertEqual(record['status'],'error');self.assertIn('evidence',record['error'])
+        for mode in ('invalid-type','invalid-response'):
+            result=self.call(*common,'--settings',json.dumps({'mode':mode}))
+            self.assertEqual(result.returncode,1);record=json.loads(out.read_text())['records'][0];self.assertEqual(record['status'],'error')
+        result=self.call(*common,'--settings',json.dumps({'mode':'adapter-error'}))
+        self.assertEqual(result.returncode,1);record=json.loads(out.read_text())['records'][0];self.assertEqual(record['status'],'error');self.assertIn('adapter failed',record['error'])
     def test_state_rejects_symlink_ancestor_before_creating_files(self):
         state = ROOT/'plugins/playbooks/authoring/write-doc/scripts/state.py'
         if not state.exists():self.skipTest('no write-doc state')
@@ -358,7 +366,9 @@ class Hardening(unittest.TestCase):
             (root/'scripts/prepare.sh').chmod(0o755)
 
     def _provider(self, name, package_name, marketplace, contract, internal, implements=True,
-                  types=None, decoy=False):
+                  types=None, decoy=False, contract_version=None):
+        if contract_version is None:
+            contract_version = 2 if contract == 'write-doc/write-doc' else 1
         package = self.base/name/'plugins'
         entry = package/'playbooks/pb'
         self._skill(entry, 'entry-skill')
@@ -373,7 +383,8 @@ class Hardening(unittest.TestCase):
         self._manifest(component, {'name': internal, 'version': '1.0.0'})
         harness = {'installationSurface': 'playbook-package', 'marketplace': marketplace,
                    'entryRoot': './playbooks/pb', 'playbooks': {'pb': './playbooks/pb'},
-                   'internalPlugins': {internal: './skills/internal'}, 'contractVersion': 1}
+                   'internalPlugins': {internal: './skills/internal'},
+                   'contractVersion': contract_version}
         if decoy:
             # entryRoot は契約と別の playbook を指す。契約が選んだ入口が勝たねばならない。
             decoy_root = package/'playbooks/decoy'
@@ -387,7 +398,8 @@ class Hardening(unittest.TestCase):
             harness['entryRoot'] = './playbooks/decoy'
             harness['playbooks']['decoy'] = './playbooks/decoy'
         if implements:
-            declaration = {'id': contract, 'version': 1, 'kind': 'playbook', 'playbook': 'pb'}
+            declaration = {'id': contract, 'version': contract_version,
+                           'kind': 'playbook', 'playbook': 'pb'}
             if types is not None:
                 declaration['types'] = types
             harness['implements'] = [declaration]
@@ -395,8 +407,38 @@ class Hardening(unittest.TestCase):
                                  'skills': ['./playbooks/pb'], 'metadata': {'harness': harness}})
         return package
 
-    def _consumer(self, steps, requires):
-        package = self.base/'consumer/plugins'
+    def _direct_provider(self, name='direct-provider', contract='write-doc/write-doc',
+                         contract_version=2, plugin='write-doc', marketplace='write-doc'):
+        """直接呼び出す公開入口。旧runtime scriptを持たない。"""
+        package = self.base/name/'plugins'
+        entry = package/f'playbooks/{plugin}'
+        self._skill(entry, plugin)
+        (entry/'playbook.yml').write_text(
+            f'version: 2\nname: {plugin}\ndescription: fixture\n'
+            'instructions: {execution: {directive: fixture}}\nrequires: []\n'
+            'steps: [{id: author, skill: author-document, purpose: fixture}]\n')
+        harness = {
+            'installationSurface': 'playbook-package',
+            'marketplace': marketplace,
+            'entryRoot': f'./playbooks/{plugin}',
+            'playbooks': {plugin: f'./playbooks/{plugin}'},
+            'internalPlugins': {},
+            'contractVersion': contract_version,
+            'implements': [{
+                'id': contract, 'version': contract_version,
+                'kind': 'playbook', 'playbook': plugin,
+            }],
+        }
+        if contract == 'write-doc/write-doc':
+            harness['implements'][0]['types'] = ['north-star']
+        self._manifest(package, {
+            'name': plugin, 'version': '7.0.0',
+            'skills': [f'./playbooks/{plugin}'], 'metadata': {'harness': harness},
+        })
+        return package
+
+    def _consumer(self, steps, requires, name='consumer'):
+        package = self.base/name/'plugins'
         entry = package/'playbooks/demo'
         self._skill(entry, 'demo')
         self._entry_scripts(entry)
@@ -435,6 +477,88 @@ class Hardening(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload['dependency_scope'], 'internal')
         self.assertEqual(payload['source_kind'], 'repository')
+
+    def test_contract_v2_direct_provider_needs_no_legacy_runtime_scripts(self):
+        """v2はSKILL.mdとplaybook.ymlだけで解決し、v1の必須script境界は維持する。"""
+        if not (ROOT/'shared/playbook/resolve.sh').exists(): self.skipTest('no playbook resolver')
+        provider = self._direct_provider()
+        devmap = self._devmap({'write-doc/write-doc': provider})
+        entry = self._consumer(
+            '  - {id: document, playbook: write-doc, purpose: fixture,\n'
+            '     input: {document_type: north-star}, provides: [status, path, reason]}\n',
+            [('local-tool', 'demo'), ('write-doc', 'write-doc')], name='consumer-write')
+        environment = dict(self.env, HARNESS_PLUGIN_DEV_ROOTS=str(devmap),
+                           XDG_CONFIG_HOME=str(self.base/'config'))
+        accepted = subprocess.run(
+            ['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer-write')],
+            text=True, capture_output=True, env=environment, timeout=60)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertIn('contract_version: 2', accepted.stdout)
+        self.assertIn('entry: ' + str(provider/'playbooks/write-doc/SKILL.md'), accepted.stdout)
+
+        # 契約v1でも直接呼び出しを宣言したgrillは旧runtime scriptを要求しない。
+        grill = self._direct_provider(
+            name='direct-grill', contract='grill/grill', contract_version=1,
+            plugin='grill', marketplace='grill')
+        self._devmap({'grill/grill': grill})
+        grill_entry = self._consumer(
+            '  - {id: settle, playbook: grill, purpose: fixture, '
+            'provides: [decisions, open_questions]}\n',
+            [('local-tool', 'demo'), ('grill', 'grill')], name='consumer-grill')
+        grill_accepted = subprocess.run(
+            ['bash', str(grill_entry/'scripts/resolve.sh'), str(self.base/'consumer-grill')],
+            text=True, capture_output=True, env=environment, timeout=60)
+        self.assertEqual(grill_accepted.returncode, 0, grill_accepted.stderr)
+        self.assertIn('entry: ' + str(grill/'playbooks/grill/SKILL.md'), grill_accepted.stdout)
+        # 旧版のwrite-doc実装へは後方互換で倒さない。
+        old_write_doc = self._provider(
+            'old-write-doc', 'write-doc', 'write-doc', 'write-doc/write-doc',
+            'content-types', contract_version=1)
+        self._devmap({'write-doc/write-doc': old_write_doc})
+        old_rejected = subprocess.run(
+            ['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer-write')],
+            text=True, capture_output=True, env=environment, timeout=60)
+        self.assertEqual(old_rejected.returncode, 2)
+        self.assertIn('external-dependency-no-playbook', old_rejected.stderr)
+        self._devmap({'write-doc/write-doc': provider})
+
+        # 反例: v2でも公開入口そのものは必須。
+        skill = provider/'playbooks/write-doc/SKILL.md'
+        original = skill.read_text()
+        skill.unlink()
+        rejected = subprocess.run(
+            ['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer-write')],
+            text=True, capture_output=True, env=environment, timeout=60)
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn('implements-entry-missing', rejected.stderr)
+        skill.write_text(original)
+
+        # 境界例: v1 providerから旧runtime scriptを省くことはできない。
+        legacy = self._provider('legacy-provider', 'legacy-doc', 'legacy-docs',
+                                'legacy-docs/legacy-doc', 'legacy-worker', contract_version=1)
+        (legacy/'playbooks/pb/scripts/prepare.sh').unlink()
+        resolver = entry/'scripts/resolve-dependency.py'
+        legacy_check = subprocess.run(
+            ['python3', str(resolver), '--plugin-root', str(entry),
+             '--plugin', 'legacy-doc', '--marketplace', 'legacy-docs'],
+            text=True, capture_output=True,
+            env=dict(environment, HARNESS_PLUGIN_DEV_ROOTS=str(
+                self._devmap({'legacy-docs/legacy-doc': legacy}))), timeout=60)
+        self.assertEqual(legacy_check.returncode, 2)
+        self.assertIn('implements-entry-missing', legacy_check.stderr)
+
+        # 契約版とimplements版が食い違う宣言は受け付けない。
+        manifest = provider/'.codex-plugin/plugin.json'
+        data = json.loads(manifest.read_text())
+        data['metadata']['harness']['implements'][0]['version'] = 1
+        manifest.write_text(json.dumps(data))
+        self._devmap({'write-doc/write-doc': provider})
+        mismatch = subprocess.run(
+            ['python3', str(resolver), '--plugin-root', str(entry),
+             '--plugin', 'write-doc', '--marketplace', 'write-doc'],
+            text=True, capture_output=True, env=environment, timeout=60)
+        self.assertEqual(mismatch.returncode, 2)
+        self.assertIn('implements-version-invalid', mismatch.stderr)
 
     def test_internal_search_works_when_plugin_name_differs_from_marketplace(self):
         """stub-docs/stub-write-doc のように実体名 ≠ marketplace 名でも内部探索が働く。"""
@@ -524,7 +648,17 @@ class Hardening(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout)['runtime'], expected, result.stdout)
 
     def test_playbook_step_input_is_recorded_with_resolved_values(self):
-        """playbook: step の input は参照形のまま残し、解けた値を input_resolved に併記する。"""
+        """静的scalarだけを補助表示し、完全なprovider入力と誤認させない。
+
+        正本: playbook.ymlの静的propertyとsteps[].needs/provides。
+        入力: 文字列literal/scalar property、実行時placeholder、非scalar値/property。
+        正規化: ${.property}の静的scalarだけをlookupし、object/listを再帰解決しない。
+        合格述語: 静的scalarだけがinput_resolvedに現れ、元inputは全型を保持する。
+        診断: explainで未解決と解決対象外を区別し、完全inputではないと明示する。
+        正例: nameとdocument_type。反例: ${output_directory}を解決済みとして掲載。
+        境界例: 空配列、typed objectとそのproperty参照、false/0、${.missing}。
+        意味評価: 実行時にneedsからどの値を組み立てるかは同じagentが判断する。
+        """
         if not (ROOT/'shared/playbook/resolve.sh').exists(): self.skipTest('no playbook resolver')
         provider = self._provider('provider', 'write-doc', 'write-doc', 'write-doc/write-doc',
                                   'content-types', types=['north-star'])
@@ -533,10 +667,18 @@ class Hardening(unittest.TestCase):
                            XDG_CONFIG_HOME=str(self.base/'config'))
         entry = self._consumer(
             '  - {id: work, playbook: write-doc, purpose: fixture, provides: [x],\n'
-            '     input: {document_type: "${.document_type}", name: fixture.md, at: "${.missing}"}}\n'
+            '     input: {document_type: "${.document_type}", name: fixture.md, at: "${.missing}",\n'
+            '             output_directory: "${output_directory}", material: "prefix-${final_markdown}",\n'
+            '             questions: [], typed_material: {kind: text, content: fixture}, enabled: false, count: 0,\n'
+            '             questions_property: "${.questions}", typed_material_property: "${.typed_material}"}}\n'
             '  - {id: local, skill: do-local, purpose: fixture, needs: [x],\n'
             '     input: {document_type: "${.document_type}"}}\n',
             [('local-tool', 'demo'), ('write-doc', 'write-doc')])
+        playbook = entry/'playbook.yml'
+        playbook.write_text(playbook.read_text().replace(
+            'document_type: north-star\n',
+            'document_type: north-star\nquestions: []\ntyped_material: {kind: text, content: fixture}\n',
+            1))
         result = subprocess.run(['bash', str(entry/'scripts/resolve.sh'), str(self.base/'consumer')],
                                 text=True, capture_output=True, env=environment, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -545,8 +687,30 @@ class Hardening(unittest.TestCase):
                            text=True, capture_output=True, timeout=30).stdout)}
         # 参照形は残す。解けた分だけを併記し、解けない参照は載せない。
         self.assertEqual(steps['work']['input']['document_type'], '${.document_type}')
+        self.assertEqual(steps['work']['input']['questions'], [])
+        self.assertEqual(steps['work']['input']['typed_material'],
+                         {'kind': 'text', 'content': 'fixture'})
+        self.assertIs(steps['work']['input']['enabled'], False)
+        self.assertEqual(steps['work']['input']['count'], 0)
         self.assertEqual(steps['work']['input_resolved'],
                          {'document_type': 'north-star', 'name': 'fixture.md'})
+        for key in ('output_directory', 'material', 'questions', 'typed_material',
+                    'enabled', 'count', 'questions_property', 'typed_material_property'):
+            self.assertNotIn(key, steps['work']['input_resolved'])
+        resolved_json = subprocess.run(
+            ['yq', '-o=json', '-I=0', '.'], input=result.stdout,
+            text=True, capture_output=True, timeout=30, check=True).stdout
+        explanation = subprocess.run(
+            ['python3', str(entry/'scripts/resolve-dependency.py'), '--explain-config'],
+            input=resolved_json, text=True, capture_output=True, env=environment, timeout=30)
+        self.assertEqual(explanation.returncode, 0, explanation.stderr)
+        self.assertIn('providerへ渡す完全inputではない', explanation.stdout)
+        self.assertIn('input.output_directory = (未解決・実行時)', explanation.stdout)
+        self.assertIn('input.material = (未解決・実行時)', explanation.stdout)
+        self.assertIn('input.questions = (解決対象外・inputに保持)', explanation.stdout)
+        self.assertIn('input.typed_material = (解決対象外・inputに保持)', explanation.stdout)
+        self.assertIn('input.questions_property = (解決対象外・inputに保持)', explanation.stdout)
+        self.assertIn('input.typed_material_property = (解決対象外・inputに保持)', explanation.stdout)
         # playbook: 以外の step は対象外。
         self.assertNotIn('input_resolved', steps['local'])
 
@@ -589,8 +753,9 @@ class Hardening(unittest.TestCase):
     def test_contract_input_normalizes_paths_and_delegates_schema(self):
         """--input は symlink 越しの一時領域を受け、契約固有schemaは validate-input.sh へ委譲する。"""
         if not (ROOT/'shared/playbook/resolve.sh').exists(): self.skipTest('no playbook resolver')
-        package = self._provider('provider', 'write-doc', 'write-doc', 'write-doc/write-doc',
-                                 'content-types', types=['north-star'])
+        package = self._provider('provider', 'legacy-doc', 'legacy-docs',
+                                 'legacy-docs/legacy-doc', 'content-types',
+                                 types=['north-star'], contract_version=1)
         entry = package/'playbooks/pb'
         self._entry_scripts(entry, resolver=True)
         # macOS 既定の TMPDIR と同じ形（祖先が symlink）を作る。
@@ -598,7 +763,7 @@ class Hardening(unittest.TestCase):
         linked = self.base/'tmp'; linked.symlink_to(real, target_is_directory=True)
         output = real/'out.yml'
         payload = linked/'input.yml'
-        payload.write_text('contract: write-doc/write-doc\nversion: 1\n'
+        payload.write_text('contract: legacy-docs/legacy-doc\nversion: 1\n'
                            'document_type: north-star\n'
                            f'output_to: {linked}/out.yml\n')
         environment = dict(self.env, XDG_CONFIG_HOME=str(self.base/'config'))
@@ -631,7 +796,7 @@ class Hardening(unittest.TestCase):
         self.assertEqual(resolve().returncode, 0)
         validator.unlink()
         # 正規化しても能力検査は効く。
-        payload.write_text('contract: write-doc/write-doc\nversion: 1\ndocument_type: strategy\n')
+        payload.write_text('contract: legacy-docs/legacy-doc\nversion: 1\ndocument_type: strategy\n')
         self.assertIn('[error:input-capability-unsupported]', resolve().stderr)
         # 実在しない入力は正規化後に落ちる。
         payload.unlink()
@@ -882,5 +1047,21 @@ class Hardening(unittest.TestCase):
         bound = explain()
         self.assertIn('[外部] write-doc → other-docs/other-doc 1.0.0 [', bound)
         self.assertIn('← personal', bound)
+
+    def test_consumer_lint_parses_skill_frontmatter_as_yaml(self):
+        """quoted/commented nameを受理し、本文の偽nameをidentityにしない。"""
+        lint_path = ROOT/'runtime-source/lint-consumer-contract.py'
+        if not lint_path.is_file():
+            lint_path = ROOT/'scripts/lint-consumer-contract.py'
+        spec = importlib.util.spec_from_file_location('consumer_lint_frontmatter', lint_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        skill = self.base/'SKILL.md'
+        skill.write_text(
+            '---\nname: "quoted-name" # YAML comment\ndescription: fixture\n---\n'
+            'name: body-decoy\n', encoding='utf-8')
+        self.assertEqual(module.skill_name(skill), 'quoted-name')
+        skill.write_text('---\nname: [not, a, string]\n---\nname: body-decoy\n', encoding='utf-8')
+        self.assertIsNone(module.skill_name(skill))
 
 if __name__=='__main__':unittest.main()
