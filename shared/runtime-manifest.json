@@ -5,7 +5,7 @@
     "path": "shared/runtime-source",
     "version": "2.5.5",
     "files": {
-      "resolve-dependency.py": "a27b213fde2a1ec80b3d62d25d7b7b1528286247e23fc98bcfc745ebc5776e17",
+      "resolve-dependency.py": "bf5253ccf6711a3c869b10f156ef1348b33ca6c27e77580304c7db5f6456ed44",
       "resolve.sh": "1eea35d2178de832798d36c96a025f4672924fa3078af43e3a3b4f1ed140c7e9",
       "state.py": "5571cdec8eb4bd4524364e8f2764097068ffe485d5b51c531086e47127c09cfa",
       "validate-distribution.py": "fdc48c31a9404bd494c5d8481054ab26eb964327050f12e30b05beebc08463cb",
