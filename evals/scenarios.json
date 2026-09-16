@@ -3,7 +3,7 @@
   "cases": [
     {
       "id": "agent-fleet-plugins-contract",
-      "skill": "../plugins/agent-fleet-herdr/SKILL.md",
+      "skill": "../plugins/agent-fleet-herdr/skills/provision-herdr-fleet/SKILL.md",
       "messages": [
         {
           "role": "user",

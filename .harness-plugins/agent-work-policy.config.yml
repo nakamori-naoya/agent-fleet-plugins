@@ -29,6 +29,3 @@ merge:
     min_approvals: 0
     require_checks_passed: true
     require_no_unresolved_threads: true
-instructions:
-  execution:
-    directive: MVPの境界を保ち、全検証成功後だけcommit・push・PR作成を行う

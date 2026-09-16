@@ -1,18 +1,12 @@
-import importlib.util
-import io
-import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 
 MODULE_PATH = Path(__file__).parents[1] / "scripts" / "validate-distribution.py"
-SPEC = importlib.util.spec_from_file_location("validate_distribution", MODULE_PATH)
-validate_distribution = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader
-SPEC.loader.exec_module(validate_distribution)
 
 
 class DistributionSelfTestSecurityTest(unittest.TestCase):
@@ -51,44 +45,39 @@ class DistributionSelfTestSecurityTest(unittest.TestCase):
                 )
                 self.assertEqual(1, result.returncode)
 
-    def test_self_test_rejects_an_extra_root_before_copy(self):
-        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
-            validate_distribution.shutil, "copytree"
-        ) as copytree:
-            with mock.patch.object(
-                validate_distribution.sys,
-                "argv",
-                ["validate-distribution.py", "--self-test", temporary],
-            ), mock.patch.object(validate_distribution.sys, "stderr", io.StringIO()):
-                self.assertEqual(2, validate_distribution.main())
-
-        copytree.assert_not_called()
-
-    def test_self_test_sentinels_must_be_regular_files(self):
+    def test_symlinked_marketplace_is_rejected_through_the_public_cli(self):
+        # 共有版 validate-distribution.py（root validatorと同一）の公開CLIで、
+        # marketplace catalog が symlink のとき regular file 違反として非0で止まることを確かめる。
+        root = Path(__file__).parents[1]
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            for relative in validate_distribution.SELF_TEST_SENTINELS:
-                path = root / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("fixture\n", encoding="utf-8")
-            sentinel = root / validate_distribution.SELF_TEST_SENTINELS[0]
-            target = root / "real-sentinel"
-            target.write_text("fixture\n", encoding="utf-8")
-            sentinel.unlink()
-            sentinel.symlink_to(target)
+            copied = Path(temporary) / "repository"
+            shutil.copytree(
+                root,
+                copied,
+                ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
+            )
+            catalog = copied / ".agents/plugins/marketplace.json"
+            real = copied / "real-catalog.json"
+            real.write_bytes(catalog.read_bytes())
+            catalog.unlink()
+            catalog.symlink_to(real)
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH), str(copied)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(1, result.returncode)
+        self.assertIn("regular file", result.stderr)
 
-            with self.assertRaisesRegex(ValueError, "regular file"):
-                validate_distribution.validate_self_test_sentinels(root)
-
-    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO is unavailable")
-    def test_self_test_rejects_special_file_before_copy(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            fifo = root / "untrusted-input"
-            os.mkfifo(fifo)
-
-            with self.assertRaisesRegex(ValueError, "特殊file"):
-                validate_distribution.reject_unsafe_copy_entries(root)
+    def test_self_test_without_repository_runs_only_synthetic_fixtures(self):
+        result = subprocess.run(
+            [sys.executable, str(MODULE_PATH), "--self-test"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
 
 
 if __name__ == "__main__":

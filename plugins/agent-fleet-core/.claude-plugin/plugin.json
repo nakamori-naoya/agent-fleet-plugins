@@ -5,9 +5,12 @@
   "author": {
     "name": "NaoyaNakamori"
   },
-  "skills": "./skills/",
+  "skills": [
+    "./skills/control-agent-fleet"
+  ],
   "metadata": {
     "harness": {
+      "marketplace": "agent-fleet",
       "contractVersion": 1
     }
   }

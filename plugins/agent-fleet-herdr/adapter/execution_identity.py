@@ -109,7 +109,7 @@ class ExecutionIdentity:
             ]
         elif root.name == "adapter":
             plugin_root = root.parent
-            hook_plugin = plugin_root / "session-hooks-plugin"
+            hook_plugin = plugin_root / "internal/agent-fleet-session-hooks"
             candidates = [
                 root / "fleet_controller.py",
                 root / "herdr_adapter.py",
@@ -154,7 +154,7 @@ class ExecutionIdentity:
 
     @staticmethod
     def _validate_claude_hook_registration(adapter_root: Path) -> None:
-        plugin_root = adapter_root.parent / "session-hooks-plugin"
+        plugin_root = adapter_root.parent / "internal/agent-fleet-session-hooks"
         plugin_path = plugin_root / ".claude-plugin" / "plugin.json"
         hooks_path = plugin_root / "hooks" / "claude-hooks.json"
         try:
