@@ -56,6 +56,8 @@ Fleetはpaneを作る前に、設定された起動コマンド、認証状態�
 
 Fleet YAMLは`fleet.harness/v3`を使う。置き場所は自由だが、`plan`と`start`には絶対パスを渡す。
 
+Fleet YAMLのファイルパス型fieldへ値を書く場合も絶対パスを使う。相対パス、`~`、環境変数による省略は使わない。
+
 各memberの`runtime`には次の5項目を指定する。
 
 | 項目 | 例 | 意味 |
@@ -170,11 +172,11 @@ scripts/fleet-runtime remove mixed-review-0123456789abcdef0123456789abcdef --exe
 
 ## pane配置を変更する
 
-`spec.view_profile`を省略すると、[既定ViewProfile](plugins/agent-fleet-herdr/adapter/config/default-view-profile.yml)を使う。独自ViewProfileはFleet YAMLからの相対パスまたは絶対パスで指定する。
+`spec.view_profile`を省略すると、[既定ViewProfile](plugins/agent-fleet-herdr/adapter/config/default-view-profile.yml)を使う。独自ViewProfileは絶対パスで指定する。
 
 ```yaml
 spec:
-  view_profile: ./view-profiles/my-layout.yml
+  view_profile: /absolute/path/to/view-profiles/my-layout.yml
 ```
 
 ViewProfileを変更したら、起動前にもう一度`plan`を実行する。既存runの配置は変わらず、新しい設定は次に作るrunへ適用される。

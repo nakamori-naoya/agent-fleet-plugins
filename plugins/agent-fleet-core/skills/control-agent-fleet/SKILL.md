@@ -9,7 +9,7 @@ description: YAML Fleet Specを検査し、論理エージェント、タスク�
 
 ## 入力
 
-- Fleet YAMLの絶対path。`fleet.harness/v3`で、各memberに役割と分離した`runtime.product`、`runtime.command`、`runtime.model`、`runtime.effort`、`runtime.fallback`を持つ。`spec.view_profile`は任意のViewProfile pathで、省略時はHerdr pluginの既定値を使う。
+- Fleet YAMLの絶対path。`fleet.harness/v3`で、各memberに役割と分離した`runtime.product`、`runtime.command`、`runtime.model`、`runtime.effort`、`runtime.fallback`を持つ。`spec.view_profile`は任意のViewProfile絶対pathで、省略時はHerdr pluginの既定値を使う。相対path、`~`、環境変数による省略は受理しない。
 - `agent-roles`が書き出した検査済みRole Catalog JSONの絶対path。役割の本文はFleet内に定義せず、このCatalogから解決する。
 - Core DBの絶対path（`--db`）。
 
