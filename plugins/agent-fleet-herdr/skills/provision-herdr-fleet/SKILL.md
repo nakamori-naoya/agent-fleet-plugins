@@ -9,7 +9,7 @@ description: 検査済みFleet JSONからHerdr 0.8のworkspace、tab、pane、ag
 
 ## 入力
 
-- Fleet YAMLの絶対path。各memberの起動コマンドとモデルを同じfileに持つ。`spec.view_profile`を省略した場合はplugin既定ViewProfileを使う。
+- Fleet YAMLの絶対path。各memberの起動コマンドとモデルを同じfileに持つ。`spec.view_profile`を記載する場合はViewProfileの絶対pathを使い、相対path、`~`、環境変数による省略は使わない。省略した場合はplugin既定ViewProfileを使う。
 - Role Catalog JSON。`--role-catalog`または`AGENT_ROLES_CATALOG`で明示する。
 - Core CLI。`--core-command`、`AGENT_FLEET_CORE_COMMAND`、`PATH`の順で明示的に解決する。別pluginの配置は推測しない。
 - 操作対象のrun ID（状態確認・停止・再開・削除のとき）。起動結果または`runs`から得る。

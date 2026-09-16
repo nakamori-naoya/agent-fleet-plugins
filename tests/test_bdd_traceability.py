@@ -20,8 +20,9 @@ class DocumentedBehaviorTraceabilityTest(unittest.TestCase):
         document = ARCHITECTURE.read_text(encoding="utf-8")
         tests = RUNTIME_TESTS.read_text(encoding="utf-8")
         self.assertIn("省略時はplugin内の既定ViewProfile", document)
+        self.assertIn("絶対パスだけを受理", document)
         self.assertIn("def test_absolute_fleet_uses_the_default_view_profile(", tests)
-        self.assertIn("def test_relative_view_profile_is_resolved_from_the_fleet_directory(", tests)
+        self.assertIn("def test_relative_view_profile_is_rejected(", tests)
 
     def test_member_runtime_configuration_has_executable_evidence(self):
         document = ARCHITECTURE.read_text(encoding="utf-8")

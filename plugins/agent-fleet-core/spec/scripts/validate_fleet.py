@@ -103,6 +103,12 @@ def _string(value: Any, path: str, errors: list[str]) -> None:
         errors.append(f"{path}: must be a non-empty string")
 
 
+def _absolute_path(value: Any, path: str, errors: list[str]) -> None:
+    _string(value, path, errors)
+    if _non_empty_string(value) and not Path(value).is_absolute():
+        errors.append(f"{path}: must be an absolute path")
+
+
 def _identifier(value: Any, path: str, errors: list[str]) -> None:
     _string(value, path, errors)
     if _non_empty_string(value) and IDENTIFIER_PATTERN.fullmatch(value) is None:
@@ -434,7 +440,7 @@ def validate_document(document: Any) -> list[str]:
     _tasks(fleet_spec.get("tasks"), members_by_ref, errors)
     _collaboration(fleet_spec.get("collaboration"), members_by_ref, errors)
     if "view_profile" in fleet_spec:
-        _string(fleet_spec["view_profile"], "spec.view_profile", errors)
+        _absolute_path(fleet_spec["view_profile"], "spec.view_profile", errors)
     if fleet_spec.get("codex_hook_trust", "review") not in {
         "preapproved",
         "review",
