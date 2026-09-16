@@ -311,9 +311,11 @@ class FleetRuntime(ExecutionIdentity):
             profile_path = DEFAULT_VIEW_PROFILE
         else:
             candidate = Path(str(configured_profile))
-            profile_path = (
-                candidate if candidate.is_absolute() else path.parent / candidate
-            )
+            if not candidate.is_absolute():
+                raise FleetRuntimeError(
+                    "spec.view_profile must be an absolute path"
+                )
+            profile_path = candidate
         if profile_path.is_symlink() or not profile_path.is_file():
             raise FleetRuntimeError(
                 f"ViewProfile file is unavailable or unsafe: {profile_path}"

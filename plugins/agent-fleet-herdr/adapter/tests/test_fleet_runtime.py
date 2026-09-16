@@ -118,20 +118,24 @@ class FleetRuntimeTest(unittest.TestCase):
         self.assertEqual(fleet_runtime.DEFAULT_VIEW_PROFILE.resolve(), resolved.profile_path)
         self.assertEqual("claude", resolved.fleet["spec"]["members"][0]["runtime"]["command"])
 
-    def test_relative_view_profile_is_resolved_from_the_fleet_directory(self):
+    def test_relative_view_profile_is_rejected(self):
         local_profile = self.fleets / "view.yml"
         local_profile.write_text(json.dumps(PROFILE), encoding="utf-8")
         fleet = json.loads(json.dumps(FLEET))
         fleet["spec"]["view_profile"] = "view.yml"
         self.fleet_path.write_text(json.dumps(fleet), encoding="utf-8")
-        resolved = self.runtime.resolve(
-            str(self.fleet_path.resolve()), [self.fleets], [self.profiles], self.state
-        )
-        self.assertEqual(local_profile.resolve(), resolved.profile_path)
+        with self.assertRaisesRegex(
+            fleet_runtime.FleetRuntimeError,
+            "spec.view_profile must be an absolute path",
+        ):
+            self.runtime.resolve(
+                str(self.fleet_path.resolve()), [self.fleets], [self.profiles], self.state
+            )
+        self.assertFalse(self.state.exists())
 
     def test_missing_view_profile_fails_before_runtime_state_is_created(self):
         fleet = json.loads(json.dumps(FLEET))
-        fleet["spec"]["view_profile"] = "missing.yml"
+        fleet["spec"]["view_profile"] = str((self.fleets / "missing.yml").resolve())
         self.fleet_path.write_text(json.dumps(fleet), encoding="utf-8")
         with self.assertRaisesRegex(fleet_runtime.FleetRuntimeError, "unavailable or unsafe"):
             self.runtime.resolve(

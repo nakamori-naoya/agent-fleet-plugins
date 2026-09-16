@@ -39,8 +39,10 @@ properties:
       collaboration:
         $ref: "#/$defs/collaboration"
       view_profile:
-        description: Optional path to a ViewProfile, resolved relative to this Fleet file.
-        $ref: "#/$defs/nonEmptyString"
+        description: Optional absolute path to a ViewProfile.
+        allOf:
+          - $ref: "#/$defs/nonEmptyString"
+          - pattern: ^/
       codex_hook_trust:
         description: Optional Codex hook trust policy.
         type: string

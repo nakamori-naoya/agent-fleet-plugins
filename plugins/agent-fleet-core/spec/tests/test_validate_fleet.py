@@ -113,7 +113,7 @@ class FleetValidatorTest(unittest.TestCase):
 
     def test_runtime_requires_a_safe_command(self) -> None:
         def use_custom_command(doc):
-            doc["spec"]["view_profile"] = "./custom-view.yml"
+            doc["spec"]["view_profile"] = "/absolute/path/to/custom-view.yml"
             doc["spec"]["codex_hook_trust"] = "preapproved"
             for member in doc["spec"]["members"]:
                 member["runtime"]["command"] = "codex-wrapper"
@@ -137,6 +137,24 @@ class FleetValidatorTest(unittest.TestCase):
             "spec.members[0].runtime.command: must be one shell command name or an absolute executable path",
             self.errors_for(unsafe_command),
         )
+
+    def test_view_profile_path_must_be_absolute(self) -> None:
+        for configured_path in (
+            "./custom-view.yml",
+            "view-profiles/custom-view.yml",
+            "~/view-profiles/custom-view.yml",
+            "$HOME/view-profiles/custom-view.yml",
+        ):
+            with self.subTest(configured_path=configured_path):
+                errors = self.errors_for(
+                    lambda doc, path=configured_path: doc["spec"].__setitem__(
+                        "view_profile", path
+                    )
+                )
+                self.assertIn(
+                    "spec.view_profile: must be an absolute path",
+                    errors,
+                )
 
     def test_fleet_rejects_herdr_runtime_and_view_configuration(self) -> None:
         def add_adapter_configuration(doc):
