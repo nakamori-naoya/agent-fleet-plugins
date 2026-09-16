@@ -5,7 +5,9 @@
   "author": {
     "name": "NaoyaNakamori"
   },
-  "skills": "./skills/",
+  "skills": [
+    "./skills/control-agent-fleet"
+  ],
   "interface": {
     "displayName": "Agent Fleet Core",
     "shortDescription": "Agent fleetのdesired stateと制御状態を管理する",
@@ -19,6 +21,7 @@
   },
   "metadata": {
     "harness": {
+      "marketplace": "agent-fleet",
       "contractVersion": 1
     }
   }

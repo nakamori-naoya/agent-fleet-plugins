@@ -17,199 +17,58 @@ jobs:
       # 自 repo は <workspace>/<自分の名前>、依存は <workspace>/<repo名> なので、
       # validate.sh から見た兄弟の相対 path は ../<repo名> になる。
       #
-      # 兄弟を必ず main で取ると、相互に相手の main の新版を要求して最初の PR が
-      # どの順でも落ちる。だから同名 branch を採る道を1本だけ残すが、その条件を明示する。
-      #
-      #   同名 branch を採るのは、次の3つがすべて成り立つときだけである。
-      #     (1) この実行が pull_request である
-      #     (2) PR head が同一 repository（fork ではない）
-      #     (3) 同 owner の兄弟 repo に、その名前の branch が実在する
-      #   push / schedule / fork からの PR では BRANCH が空になり、必ず main を取る。
-      #
-      # fork の PR 作者は owner の兄弟 repo に branch を作れないので、
-      # 兄弟の内容を PR から差し替える経路は無い。選んだ ref と理由はログへ出す。
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # 兄弟 repository は常に検証済みの main を取得する。
+      # PR 由来の ref を依存 checkout へ渡さず、未信頼のコードを実行する経路を作らない。
+      # 複数 repository を同時に更新するときは、提供側から依存順に merge する。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: ${{ github.event.repository.name }}
-      - id: ref-grill-plugins
-        if: github.event.repository.name != 'grill-plugins'
-        shell: bash
-        env:
-          OWNER: ${{ github.repository_owner }}
-          BRANCH: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && github.head_ref || '' }}
-        run: |
-          ref=main
-          reason='pull_request ではない、または fork からの PR'
-          if [ -n "$BRANCH" ] && [ "$BRANCH" != main ]; then
-            if git ls-remote --heads "https://github.com/$OWNER/grill-plugins" "$BRANCH" | grep -q .; then
-              ref="$BRANCH"
-              reason="同 owner・非 fork の PR head と同名の branch が兄弟に実在する"
-            else
-              reason="同名の branch が兄弟に無い"
-            fi
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "grill-plugins: ref=$ref（$reason）"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event.repository.name != 'grill-plugins'
         with:
           repository: ${{ github.repository_owner }}/grill-plugins
-          ref: ${{ steps.ref-grill-plugins.outputs.ref }}
+          ref: main
           path: grill-plugins
-      - id: ref-write-doc-plugins
-        if: github.event.repository.name != 'write-doc-plugins'
-        shell: bash
-        env:
-          OWNER: ${{ github.repository_owner }}
-          BRANCH: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && github.head_ref || '' }}
-        run: |
-          ref=main
-          reason='pull_request ではない、または fork からの PR'
-          if [ -n "$BRANCH" ] && [ "$BRANCH" != main ]; then
-            if git ls-remote --heads "https://github.com/$OWNER/write-doc-plugins" "$BRANCH" | grep -q .; then
-              ref="$BRANCH"
-              reason="同 owner・非 fork の PR head と同名の branch が兄弟に実在する"
-            else
-              reason="同名の branch が兄弟に無い"
-            fi
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "write-doc-plugins: ref=$ref（$reason）"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event.repository.name != 'write-doc-plugins'
         with:
           repository: ${{ github.repository_owner }}/write-doc-plugins
-          ref: ${{ steps.ref-write-doc-plugins.outputs.ref }}
+          ref: main
           path: write-doc-plugins
-      - id: ref-agent-work-policy-plugins
-        if: github.event.repository.name != 'agent-work-policy-plugins'
-        shell: bash
-        env:
-          OWNER: ${{ github.repository_owner }}
-          BRANCH: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && github.head_ref || '' }}
-        run: |
-          ref=main
-          reason='pull_request ではない、または fork からの PR'
-          if [ -n "$BRANCH" ] && [ "$BRANCH" != main ]; then
-            if git ls-remote --heads "https://github.com/$OWNER/agent-work-policy-plugins" "$BRANCH" | grep -q .; then
-              ref="$BRANCH"
-              reason="同 owner・非 fork の PR head と同名の branch が兄弟に実在する"
-            else
-              reason="同名の branch が兄弟に無い"
-            fi
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "agent-work-policy-plugins: ref=$ref（$reason）"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event.repository.name != 'agent-work-policy-plugins'
         with:
           repository: ${{ github.repository_owner }}/agent-work-policy-plugins
-          ref: ${{ steps.ref-agent-work-policy-plugins.outputs.ref }}
+          ref: main
           path: agent-work-policy-plugins
-      - id: ref-product-planning-plugins
-        if: github.event.repository.name != 'product-planning-plugins'
-        shell: bash
-        env:
-          OWNER: ${{ github.repository_owner }}
-          BRANCH: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && github.head_ref || '' }}
-        run: |
-          ref=main
-          reason='pull_request ではない、または fork からの PR'
-          if [ -n "$BRANCH" ] && [ "$BRANCH" != main ]; then
-            if git ls-remote --heads "https://github.com/$OWNER/product-planning-plugins" "$BRANCH" | grep -q .; then
-              ref="$BRANCH"
-              reason="同 owner・非 fork の PR head と同名の branch が兄弟に実在する"
-            else
-              reason="同名の branch が兄弟に無い"
-            fi
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "product-planning-plugins: ref=$ref（$reason）"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event.repository.name != 'product-planning-plugins'
         with:
           repository: ${{ github.repository_owner }}/product-planning-plugins
-          ref: ${{ steps.ref-product-planning-plugins.outputs.ref }}
+          ref: main
           path: product-planning-plugins
-      - id: ref-bdd-discovery-and-formulation-plugins
-        if: github.event.repository.name != 'bdd-discovery-and-formulation-plugins'
-        shell: bash
-        env:
-          OWNER: ${{ github.repository_owner }}
-          BRANCH: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && github.head_ref || '' }}
-        run: |
-          ref=main
-          reason='pull_request ではない、または fork からの PR'
-          if [ -n "$BRANCH" ] && [ "$BRANCH" != main ]; then
-            if git ls-remote --heads "https://github.com/$OWNER/bdd-discovery-and-formulation-plugins" "$BRANCH" | grep -q .; then
-              ref="$BRANCH"
-              reason="同 owner・非 fork の PR head と同名の branch が兄弟に実在する"
-            else
-              reason="同名の branch が兄弟に無い"
-            fi
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "bdd-discovery-and-formulation-plugins: ref=$ref（$reason）"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event.repository.name != 'bdd-discovery-and-formulation-plugins'
         with:
           repository: ${{ github.repository_owner }}/bdd-discovery-and-formulation-plugins
-          ref: ${{ steps.ref-bdd-discovery-and-formulation-plugins.outputs.ref }}
+          ref: main
           path: bdd-discovery-and-formulation-plugins
-      - id: ref-collect-and-digest-plugins
-        if: github.event.repository.name != 'collect-and-digest-plugins'
-        shell: bash
-        env:
-          OWNER: ${{ github.repository_owner }}
-          BRANCH: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && github.head_ref || '' }}
-        run: |
-          ref=main
-          reason='pull_request ではない、または fork からの PR'
-          if [ -n "$BRANCH" ] && [ "$BRANCH" != main ]; then
-            if git ls-remote --heads "https://github.com/$OWNER/collect-and-digest-plugins" "$BRANCH" | grep -q .; then
-              ref="$BRANCH"
-              reason="同 owner・非 fork の PR head と同名の branch が兄弟に実在する"
-            else
-              reason="同名の branch が兄弟に無い"
-            fi
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "collect-and-digest-plugins: ref=$ref（$reason）"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event.repository.name != 'collect-and-digest-plugins'
         with:
           repository: ${{ github.repository_owner }}/collect-and-digest-plugins
-          ref: ${{ steps.ref-collect-and-digest-plugins.outputs.ref }}
+          ref: main
           path: collect-and-digest-plugins
-      - id: ref-pull-request-plugins
-        if: github.event.repository.name != 'pull-request-plugins'
-        shell: bash
-        env:
-          OWNER: ${{ github.repository_owner }}
-          BRANCH: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && github.head_ref || '' }}
-        run: |
-          ref=main
-          reason='pull_request ではない、または fork からの PR'
-          if [ -n "$BRANCH" ] && [ "$BRANCH" != main ]; then
-            if git ls-remote --heads "https://github.com/$OWNER/pull-request-plugins" "$BRANCH" | grep -q .; then
-              ref="$BRANCH"
-              reason="同 owner・非 fork の PR head と同名の branch が兄弟に実在する"
-            else
-              reason="同名の branch が兄弟に無い"
-            fi
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "pull-request-plugins: ref=$ref（$reason）"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event.repository.name != 'pull-request-plugins'
         with:
           repository: ${{ github.repository_owner }}/pull-request-plugins
-          ref: ${{ steps.ref-pull-request-plugins.outputs.ref }}
+          ref: main
           path: pull-request-plugins
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.24.x'
       - name: Install CLI requirements

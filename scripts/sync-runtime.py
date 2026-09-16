@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Development-only generation; runtime copies remain self-contained."""
+"""Development-only generation; maintenance-tool copies remain self-contained.
+
+複製先は repository の保守領域だけである（`scripts/`、`shared/playbook/`、`.github/workflows/`）。
+配布物 `plugins/<package>/` には何も複製しない。
+
+  scripts/<REPO_SCRIPTS>                  全 repository
+  scripts/validate-distribution.py        既存の runtime-manifest.json が targets に持つ repository、
+                                          または scripts/ にその名の file が無い repository
+  shared/playbook/resolve-dependency.py   shared/playbook/ を持つ repository（doctor / lint が読む）
+  .github/workflows/validate.yml          全 repository
+"""
 import argparse
 import hashlib
 import json
@@ -7,11 +17,9 @@ import os
 from pathlib import Path
 import sys
 
-VERSION = '2.5.1'
-NAMES = ['resolve-dependency.py', 'resolve.sh', 'state.py', 'validate-distribution.py', 'prepare.sh', 'run-config.py', 'doctor.py', 'release.py', 'evaluate-skills.py', 'claude-eval-adapter.py', 'sync-runtime.py', 'test-hardening.py', 'lint-consumer-contract.py', 'validate.yml']
+VERSION = '3.0.0'
+NAMES = ['resolve-dependency.py', 'validate-distribution.py', 'doctor.py', 'release.py', 'evaluate-skills.py', 'claude-eval-adapter.py', 'sync-runtime.py', 'test-hardening.py', 'lint-consumer-contract.py', 'validate.yml']
 REPO_SCRIPTS = ['doctor.py', 'release.py', 'evaluate-skills.py', 'claude-eval-adapter.py', 'sync-runtime.py', 'test-hardening.py', 'lint-consumer-contract.py']
-PLAYBOOK_SCRIPTS = ['resolve.sh', 'resolve-dependency.py', 'state.py']
-
 
 
 def reject_tree_symlinks(root, relatives):
@@ -27,6 +35,34 @@ def reject_tree_symlinks(root, relatives):
                 path = Path(directory) / name
                 if path.is_symlink():
                     raise ValueError('tree symlink refused: ' + str(path))
+
+
+def previous_targets(lock):
+    if not lock.exists():
+        return set()
+    try:
+        data = json.loads(lock.read_text())
+    except ValueError:
+        return set()
+    return set(data.get('targets', {})) if isinstance(data, dict) else set()
+
+
+def distributes_validator(repo, lock):
+    """validate-distribution.py を配る repository の判定。既に自前の file を持つ repository へは配らない。"""
+    if 'scripts/validate-distribution.py' in previous_targets(lock):
+        return True
+    return not (repo / 'scripts/validate-distribution.py').exists()
+
+
+def expected_targets(repo, lock):
+    expected = {'scripts/' + n for n in REPO_SCRIPTS}
+    expected.add('.github/workflows/validate.yml')
+    if distributes_validator(repo, lock):
+        expected.add('scripts/validate-distribution.py')
+    if (repo / 'shared/playbook').is_dir():
+        expected.add('shared/playbook/resolve-dependency.py')
+    return expected
+
 
 def main():
     p = argparse.ArgumentParser()
@@ -45,20 +81,7 @@ def main():
         data = json.loads(lock.read_text())
         if data.get('schema') != 1 or data.get('source', {}).get('version') != VERSION or set(data.get('source', {}).get('files', {})) != set(NAMES):
             raise ValueError('runtime manifest schema/source contract mismatch')
-        expected = {'scripts/' + n for n in REPO_SCRIPTS}
-        expected.add('.github/workflows/validate.yml')
-        for f in repo.glob('plugins/**/playbook.yml'):
-            expected.update(str((f.parent / 'scripts' / n).relative_to(repo)) for n in PLAYBOOK_SCRIPTS)
-        for f in repo.glob('plugins/**/scripts/prepare.sh'):
-            if 'run-config.py' in f.read_text() or '共通入口' in f.read_text():
-                expected.update(str((f.parent / n).relative_to(repo)) for n in ['prepare.sh', 'run-config.py'])
-        if (repo / 'shared/playbook').is_dir():
-            expected.update('shared/playbook/' + n for n in PLAYBOOK_SCRIPTS)
-        if (repo / 'shared/prepare.sh').exists():
-            expected.update(['shared/prepare.sh', 'shared/run-config.py'])
-        if (repo / 'plugins/.codex-plugin/plugin.json').exists():
-            expected.add('scripts/validate-distribution.py')
-        if set(data.get('targets', {})) != expected:
+        if set(data.get('targets', {})) != expected_targets(repo, lock):
             raise ValueError('runtime manifest target inventory mismatch')
         errors = []
         for name, digest in data['targets'].items():
@@ -75,23 +98,8 @@ def main():
         if not (source / name).is_file():
             raise ValueError('source is not a regular file: ' + name)
     targets = {}
-    for name in NAMES:
-        if name in PLAYBOOK_SCRIPTS:
-            paths = [f.parent / 'scripts' / name for f in repo.glob('plugins/**/playbook.yml')] + ([repo / 'shared/playbook' / name] if (repo / 'shared/playbook').is_dir() else [])
-        elif name == 'validate-distribution.py':
-            paths = [repo / 'scripts' / name] if (repo / 'plugins/.codex-plugin/plugin.json').exists() else []
-        elif name == 'prepare.sh':
-            paths = [f for f in repo.glob('plugins/**/scripts/prepare.sh') if 'config resolution' in f.read_text() or '共通入口' in f.read_text()] + ([repo / 'shared/prepare.sh'] if (repo / 'shared/prepare.sh').exists() else [])
-        elif name == 'validate.yml':
-            paths = [repo / '.github/workflows/validate.yml']
-        elif name in REPO_SCRIPTS:
-            paths = [repo / 'scripts' / name]
-        else:
-            paths = [f.parent / name for f in repo.glob('plugins/**/scripts/prepare.sh') if 'run-config.py' in f.read_text() or '共通入口' in f.read_text()]
-            if (repo / 'shared/prepare.sh').exists():
-                paths.append(repo / 'shared' / name)
-        for path in paths:
-            targets[str(path.relative_to(repo))] = (source / name).read_bytes()
+    for relative in sorted(expected_targets(repo, lock)):
+        targets[relative] = (source / Path(relative).name).read_bytes()
     changed = [path for path, content in targets.items() if not (repo / path).exists() or (repo / path).read_bytes() != content]
     manifest = {'schema': 1, 'source': {'repository': 'product-planning-plugins', 'path': 'shared/runtime-source', 'version': VERSION, 'files': {n: hashlib.sha256((source / n).read_bytes()).hexdigest() for n in NAMES}}, 'targets': {n: hashlib.sha256(c).hexdigest() for n, c in sorted(targets.items())}}
     if not lock.exists() or json.loads(lock.read_text()) != manifest:

@@ -1020,7 +1020,7 @@ class RoleContextHookTest(unittest.TestCase):
 
     def test_product_manifests_use_product_specific_hook_configs(self):
         plugin_root = MODULE_PATH.parents[1]
-        hook_plugin_root = plugin_root / "session-hooks-plugin"
+        hook_plugin_root = plugin_root / "internal/agent-fleet-session-hooks"
         claude_manifest = json.loads(
             (plugin_root / ".claude-plugin" / "plugin.json").read_text()
         )
@@ -1042,7 +1042,7 @@ class RoleContextHookTest(unittest.TestCase):
 
         self.assertNotIn("hooks", claude_manifest)
         self.assertEqual(
-            "./session-hooks-plugin/hooks/codex-hooks.json",
+            "./internal/agent-fleet-session-hooks/hooks/codex-hooks.json",
             codex_manifest["hooks"],
         )
         self.assertEqual(

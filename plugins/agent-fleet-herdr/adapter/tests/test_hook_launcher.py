@@ -8,7 +8,7 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).parents[2]
 ROLE_CONTEXT = PLUGIN_ROOT / "hooks" / "role_context.py"
-HOOK_PLUGIN_ROOT = PLUGIN_ROOT / "session-hooks-plugin"
+HOOK_PLUGIN_ROOT = PLUGIN_ROOT / "internal/agent-fleet-session-hooks"
 CODEX_HOOKS = HOOK_PLUGIN_ROOT / "hooks" / "codex-hooks.json"
 CLAUDE_HOOKS = HOOK_PLUGIN_ROOT / "hooks" / "claude-hooks.json"
 
