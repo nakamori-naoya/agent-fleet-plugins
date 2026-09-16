@@ -47,10 +47,17 @@ CLIは`../../adapter/scripts/fleet-runtime`（利用者向け統合入口）と`
 
 ## 停止条件
 
+止まるのは、安全な状態を保てないか、契約外の対象に触れるときである。
+
 - 起動前検査で不一致があった（state作成前に止まる）。
 - provision後の観測値がFleetと一致しない（bindingを保存せずworkspaceを閉じて報告する）。
 - paneが`lost`になった（`bind`または`rebind`で明示的に修復するまで進めない）。
+- 実行を明示されていないのに`--execute`が要る操作に到達した。dry-runの結果を示し、実行の指示を待つ。
 - 対象がlocal Herdr 0.8以外である。daemon、multi-host、fleet間gateway、独自Web UIは対象外。
+
+止まるときは、実行した操作、CLIの`error`、閉じたworkspace、保存しなかった状態、修復または再実行に必要な操作を返す。
+
+判断の揺れでは止まらない。ViewProfileの配置やpane計画の良し悪しに疑問があっても、`plan`が返す計画を仮説として示して利用者に判断を委ね、計画を勝手に変えない。配送状態が`unknown`のときは失敗とも成功とも決めず、`unknown`のまま報告する。
 
 ## 出力
 
