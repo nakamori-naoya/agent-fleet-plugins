@@ -1,0 +1,3 @@
+version: 1
+verification:
+  commands: ["git diff --check", "bash scripts/validate.sh"]

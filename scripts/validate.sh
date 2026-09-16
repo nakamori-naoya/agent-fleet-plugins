@@ -2,6 +2,9 @@
 # Scenario: 利用者のYAML設定からCore stateとHerdr pane配置計画を再現できる。
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# 保守toolの正本は兄弟checkoutの harness-tools。無ければ止まる（fixtureで代用しない）。
+TOOLS="$ROOT/../harness-tools/tools"
+[ -d "$TOOLS" ] || { echo "[error] 兄弟 checkout harness-tools が無い: $TOOLS" >&2; exit 2; }
 CORE="$ROOT/plugins/agent-fleet-core"
 HERDR="$ROOT/plugins/agent-fleet-herdr"
 ROLE_CATALOG="$ROOT/tests/fixtures/role-catalog.yml"
@@ -18,11 +21,9 @@ printf '%s\n' '---' "name: 'fixture-skill' # comment" '---' 'name: body-only' > 
 printf '%s\n' '---' 'description: no name' '---' 'name: body-only' > "$TMP_ROOT/frontmatter-invalid.md"
 [ "$(skill_frontmatter_name "$TMP_ROOT/frontmatter-valid.md")" = "fixture-skill" ] \
   && ! skill_frontmatter_name "$TMP_ROOT/frontmatter-invalid.md" >/dev/null 2>&1 || failed=1
-python3 "$ROOT/scripts/test-hardening.py" || failed=1
-python3 "$ROOT/scripts/sync-runtime.py" --check || failed=1
-
-python3 "$ROOT/scripts/validate-distribution.py" "$ROOT" || failed=1
-python3 "$ROOT/scripts/validate-distribution.py" --self-test || failed=1
+python3 "$TOOLS/test-hardening.py" --repository "$ROOT" || failed=1
+python3 "$TOOLS/validate-plugin-repository.py" "$ROOT" || failed=1
+python3 "$TOOLS/validate-plugin-repository.py" --self-test || failed=1
 
 for manifest in "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json"; do
   jq -e '(.version|test("^[0-9]+[.][0-9]+[.][0-9]+")) and .name=="agent-fleet-core"' "$manifest" >/dev/null || failed=1

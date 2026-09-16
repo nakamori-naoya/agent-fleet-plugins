@@ -36,4 +36,3 @@ __pycache__/
 **/id_ed25519
 !/evals/
 !/releases/
-!/shared/
