@@ -40,42 +40,23 @@ def typed_yaml(path, expression):
     except ValueError:
         return None
 
-def required_overrides(plugin_root):
-    """既定値を持たないrequiredなprompt parameterを、dotted名で返す。
-
-    依頼のたびに変わる値は同梱既定に実値を置かない規約なので、上書きが無ければ
-    resolve.shは必ず落ちる。これは配布物の不具合ではなく「利用者の指定が要る」状態である。"""
-    tree = typed_yaml(plugin_root / 'config/defaults.yml', '.prompt_parameters // {}')
-    names = []
-    def walk(node, path):
-        if not isinstance(node, dict):
-            return
-        if any(key in node for key in ('type', 'enum', 'required', 'default')):
-            if node.get('required') is True and 'default' not in node:
-                names.append('.'.join(path))
-            return
-        for key in sorted(node):
-            walk(node[key], path + [key])
-    walk(tree if isinstance(tree, dict) else {}, [])
-    return names
-
 def own_marketplace(root):
-    """自分のpackageが名乗るmarketplace。requiresの内外を分けるのに使う。"""
-    for runtime in ('claude', 'codex'):
-        manifest = root / ('plugins/.' + runtime + '-plugin/plugin.json')
-        if not manifest.is_file() or manifest.is_symlink():
+    """自分の repository が名乗る marketplace。requires の内外を分けるのに使う。両 catalog の name が正本。"""
+    for relative in ('.claude-plugin/marketplace.json', '.agents/plugins/marketplace.json'):
+        catalog = root / relative
+        if not catalog.is_file() or catalog.is_symlink():
             continue
         try:
-            data = json.loads(manifest.read_text())
+            data = json.loads(catalog.read_text())
         except (OSError, ValueError):
             continue
-        name = ((data.get('metadata') or {}).get('harness') or {}).get('marketplace')
+        name = data.get('name') if isinstance(data, dict) else None
         if isinstance(name, str) and name:
             return name
     return None
 
 def external_contracts(plugin_root, marketplace):
-    """同梱playbook.ymlが宣言する外部依存の契約IDを、書かれた順で返す。"""
+    """隣接 playbook.yml が宣言する外部依存を、書かれた順で (契約ID, marketplace, plugin) として返す。"""
     declared = typed_yaml(plugin_root / 'playbook.yml', '[.requires[]? | [.marketplace, .plugin]]')
     contracts = []
     for item in declared or []:
@@ -84,30 +65,50 @@ def external_contracts(plugin_root, marketplace):
         market, plugin = item
         if not isinstance(market, str) or not isinstance(plugin, str) or market == marketplace:
             continue
-        if market + '/' + plugin not in contracts:
-            contracts.append(market + '/' + plugin)
+        contract = market + '/' + plugin
+        if contract not in [c[0] for c in contracts]:
+            contracts.append((contract, market, plugin))
     return contracts
 
 def sibling_package(root, marketplace):
-    """validate.shと同じ探索。実配布物は兄弟checkout ../<marketplace>-plugins/plugins にある。"""
+    """validate.shと同じ探索。実配布物は兄弟checkout ../<marketplace>-plugins/plugins/<package> にある。"""
     base = os.environ.get('HARNESS_PLUGIN_SIBLING_ROOT') or str(root.parent)
     return Path(base) / (marketplace + '-plugins') / 'plugins'
 
+def sibling_package_root(root, marketplace, plugin):
+    """兄弟 checkout の marketplace catalog から package root を引く。catalog が無ければ plugins/<plugin> を仮定する。"""
+    plugins = sibling_package(root, marketplace)
+    catalog = plugins.parent / '.claude-plugin/marketplace.json'
+    if catalog.is_file() and not catalog.is_symlink():
+        try:
+            for entry in json.loads(catalog.read_text()).get('plugins', []):
+                if isinstance(entry, dict) and entry.get('name') == plugin and isinstance(entry.get('source'), str):
+                    return (plugins.parent / entry['source']).resolve()
+        except (OSError, ValueError):
+            pass
+    return plugins / plugin
+
+def entry_playbooks(root):
+    """公開入口と内部 skill の隣接 playbook.yml（plugin-package-contract.md の配置）。"""
+    return sorted(root.glob('plugins/*/skills/*/playbook.yml')) + sorted(root.glob('plugins/*/internal/*/playbook.yml'))
+
 def diagnose_dependencies(root, repo, checks, run, workspace):
-    """全playbook / skillの解決を、実配布物に対して確かめる。
+    """全公開入口 / 内部 skill の外部依存を、実配布物に対して resolver で解決する。
 
     fixtureでは代用しない。依存先は次の順で探し、どちらでも見つからなければNGにする。
       1. HARNESS_PLUGIN_REAL_ROOTS（契約ID→package rootのJSON）
-      2. 兄弟checkout <repo>/../<marketplace>-plugins/plugins
-         （親directoryは HARNESS_PLUGIN_SIBLING_ROOT で差し替えられる）"""
+      2. 兄弟checkout <repo>/../<marketplace>-plugins（親directoryは HARNESS_PLUGIN_SIBLING_ROOT で差し替えられる）
+    束縛は resolver の --create-lock で dependencies.yml（personal / project / scope）から1層を選び、
+    同じ run の各契約へ --bindings で渡す。"""
     marketplace = own_marketplace(root)
+    resolver = root / 'shared/playbook/resolve-dependency.py'
     provided = os.environ.get('HARNESS_PLUGIN_REAL_ROOTS', '')
     runtime = os.environ.get('HARNESS_PLUGIN_RUNTIME') or 'claude'
-    resolvers = sorted(root.glob('plugins/**/scripts/resolve.sh'))
+    playbooks = entry_playbooks(root)
     wanted = {}
-    for resolver in resolvers:
-        for contract in external_contracts(resolver.parent.parent, marketplace):
-            wanted.setdefault(contract, sibling_package(root, contract.split('/', 1)[0]))
+    for playbook in playbooks:
+        for contract, market, plugin in external_contracts(playbook.parent, marketplace):
+            wanted.setdefault(contract, sibling_package_root(root, market, plugin))
     missing = {contract: path for contract, path in wanted.items() if not path.is_dir()}
     dev_map = provided
     if not provided and wanted and not missing:
@@ -118,54 +119,52 @@ def diagnose_dependencies(root, repo, checks, run, workspace):
     bindings = {'check': 'dependency-bindings', 'ok': True, 'runtime': runtime, 'entries': [], 'unused_bindings': [], 'remedy': ''}
     if wanted:
         bindings['real_distribution'] = {'source': 'HARNESS_PLUGIN_REAL_ROOTS', 'path': provided} if provided else {'source': 'sibling-checkout', 'dependencies': {contract: str(package) for contract, package in sorted(wanted.items())}}
+        if not resolver.is_file() or resolver.is_symlink():
+            checks.append({'check': 'dependency-resolver', 'ok': False, 'detail': 'shared/playbook/resolve-dependency.py が無い', 'remedy': 'sync-runtime.py で保守用 tool を配る'})
+            bindings['ok'] = False
     used = set()
     declared = set()
-    for resolver in resolvers:
-        label = 'resolve:' + str(resolver.relative_to(root))
-        plugin_root = resolver.parent.parent
-        overrides = required_overrides(plugin_root)
-        if overrides:
-            # 実行しない。落ちるのが正しい配布物を、落ちたからNGとは呼ばない。
-            checks.append({'check': label, 'ok': True, 'skipped': 'requires-override', 'requires_override': overrides, 'remedy': '単体で解決するときは ' + ' '.join('--override=' + name + '=<値>' for name in overrides) + ' を渡す'})
+    for index, playbook in enumerate(playbooks):
+        entry = playbook.parent
+        label = 'resolve:' + str(entry.relative_to(root))
+        contracts = external_contracts(entry, marketplace)
+        if not contracts:
             continue
-        contracts = external_contracts(plugin_root, marketplace)
-        absent = [contract for contract in contracts if contract in missing]
+        absent = [contract for contract, _, _ in contracts if contract in missing]
         if absent:
             checks.append({'check': label, 'ok': False, 'detail': '実配布物が見つからない: ' + ', '.join(contract + '(' + str(missing[contract]) + ')' for contract in absent), 'remedy': '兄弟checkoutを置くか、契約ID→package rootのJSONをHARNESS_PLUGIN_REAL_ROOTSで渡す'})
             bindings['ok'] = False
             continue
+        if not resolver.is_file():
+            continue
         environment = dict(os.environ, HARNESS_PLUGIN_RUNTIME=runtime)
-        if contracts and dev_map:
+        if dev_map:
             environment['HARNESS_PLUGIN_DEV_ROOTS'] = dev_map
-        result = run(label, ['bash', str(resolver), repo, '--explain'], env=environment)
-        if not result:
+        lock = workspace / ('bindings-%d.lock' % index)
+        scope = str(Path(repo) / '.harness-plugins/scopes' / entry.name)
+        created = run(label + ':bindings', ['python3', str(resolver), '--create-lock', '--entry', entry.name, '--repo-root', repo, '--scope-root', scope, '--lock', str(lock)], env=environment)
+        if not created:
             bindings['ok'] = False
             continue
-        lines = result.stderr.splitlines()
-        # 「依存:」節と「束縛:」節を捨てない。分類と束縛は診断の主目的である。
-        checks[-1]['resolution_sources'] = [line for line in lines if '設定:' in line or 'scope:' in line]
-        checks[-1]['dependencies'] = [line.strip() for line in lines if line.startswith('  [外部]') or line.startswith('  [内部]')]
-        checks[-1]['bindings'] = [line.strip() for line in lines if line.startswith('# 束縛:') or line.strip().startswith('lock:') or ' → 採用 ' in line]
-        entry = {'playbook': str(resolver.relative_to(root)), 'layer': None, 'file': None, 'lock': None, 'resolved': []}
-        for line in lines:
-            if line.startswith('# 束縛: '):
-                layer, _, origin = line[len('# 束縛: '):].partition(' (')
-                entry['layer'] = layer.strip()
-                entry['file'] = origin.rstrip(')').strip() or None
-            elif line.strip().startswith('lock: '):
-                entry['lock'] = line.strip()[len('lock: '):]
-            elif ' → 採用 ' in line:
-                contract = line.strip().split(' : ', 1)[0].strip()
-                entry['resolved'].append(line.strip())
-                used.add(contract)
-        if entry['file'] and entry['file'] != '無し':
-            try:
-                catalog = subprocess.run(['yq', '-o=json', '-I=0', '.bindings // {}', entry['file']], text=True, capture_output=True, timeout=30)
-                if not catalog.returncode:
-                    declared |= set(json.loads(catalog.stdout))
-            except (OSError, ValueError, subprocess.SubprocessError):
-                pass
-        bindings['entries'].append(entry)
+        snapshot = json.loads(lock.read_text())
+        record = {'playbook': str(playbook.relative_to(root)), 'layer': snapshot.get('bindings_layer'), 'file': snapshot.get('bindings_file'), 'lock': str(lock), 'resolved': []}
+        declared |= set(snapshot.get('bindings') or {})
+        deps = {}
+        for contract, market, plugin in contracts:
+            result = run(label + ':' + contract, ['python3', str(resolver), '--plugin-root', str(entry), '--plugin', plugin, '--marketplace', market, '--contract', contract, '--bindings', str(lock)], env=environment)
+            if not result:
+                bindings['ok'] = False
+                continue
+            candidate = json.loads(result.stdout)
+            deps[plugin] = candidate
+            record['resolved'].append(contract + ' → ' + candidate['marketplace'] + '/' + candidate['plugin'] + ' ' + candidate['version'] + ' [' + candidate['source_kind'] + ']: ' + candidate['root'])
+            used.add(contract)
+        steps = typed_yaml(playbook, '.')
+        if deps and isinstance(steps, dict):
+            config = json.dumps({'deps': deps, 'playbook_root': str(entry), 'playbook': steps}, ensure_ascii=False)
+            if not run(label + ':steps', ['python3', str(resolver), '--check-steps'], stdin=config, env=environment):
+                bindings['ok'] = False
+        bindings['entries'].append(record)
     # 未使用束縛は resolve では警告しない。全依存を辿れる doctor だけが報告する。
     bindings['unused_bindings'] = sorted(declared - used)
     if bindings['unused_bindings']:
@@ -215,14 +214,14 @@ def main():
                     raise ValueError('package escapes repository')
                 manifest = json.loads((package / f'.{runtime}-plugin/plugin.json').read_text())
                 declared = manifest['skills']
-                if isinstance(declared, str):
-                    declared = [declared]
+                if not isinstance(declared, list):
+                    raise ValueError('skills must be a list of ./skills/<entry>')
                 for relative in declared:
                     path = package / relative
                     if path.is_symlink() or not path.resolve().is_relative_to(package):
                         raise ValueError('skill path boundary')
-                    files = [path / 'SKILL.md'] if (path / 'SKILL.md').exists() else list(path.glob('*/SKILL.md'))
-                    if not files:
+                    files = [path / 'SKILL.md']
+                    if not files[0].is_file():
                         raise ValueError('public skill missing')
                     for skill in files:
                         text = skill.read_text()
@@ -236,7 +235,7 @@ def main():
             checks.append({'check': runtime + '-public-skills', 'ok': False, 'detail': str(exc), 'remedy': '公開manifestのskillsとSKILL.mdを修復する'})
     if not a.distribution_only:
         with tempfile.TemporaryDirectory(prefix='harness-doctor-') as workspace:
-            diagnose_dependencies(root, a.repo, checks, run, Path(workspace))
+            diagnose_dependencies(root, a.repo, checks, run, Path(workspace).resolve())
     print(json.dumps({'schema': 1, 'mode': 'distribution-only' if a.distribution_only else 'full', 'read_only': True, 'checks': checks}, ensure_ascii=False, indent=2))
     return 0 if checks and all(c['ok'] for c in checks) else 1
 

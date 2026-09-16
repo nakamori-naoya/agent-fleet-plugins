@@ -5,11 +5,19 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CORE="$ROOT/plugins/agent-fleet-core"
 HERDR="$ROOT/plugins/agent-fleet-herdr"
 ROLE_CATALOG="$ROOT/tests/fixtures/role-catalog.yml"
-HOOK_PLUGIN="$HERDR/session-hooks-plugin"
+HOOK_PLUGIN="$HERDR/internal/agent-fleet-session-hooks"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agent-fleet-validation.XXXXXX") || exit 2
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P) || exit 2
 trap 'rm -rf "$TMP_ROOT"' EXIT
 failed=0
+skill_frontmatter_name() {
+  awk 'NR==1 { if ($0 != "---") exit 2; next } $0=="---" { found=1; exit } { print } END { if (!found) exit 2 }' "$1" \
+    | yq -er '.name | select(tag == "!!str" and length > 0)' -
+}
+printf '%s\n' '---' "name: 'fixture-skill' # comment" '---' 'name: body-only' > "$TMP_ROOT/frontmatter-valid.md"
+printf '%s\n' '---' 'description: no name' '---' 'name: body-only' > "$TMP_ROOT/frontmatter-invalid.md"
+[ "$(skill_frontmatter_name "$TMP_ROOT/frontmatter-valid.md")" = "fixture-skill" ] \
+  && ! skill_frontmatter_name "$TMP_ROOT/frontmatter-invalid.md" >/dev/null 2>&1 || failed=1
 python3 "$ROOT/scripts/test-hardening.py" || failed=1
 python3 "$ROOT/scripts/sync-runtime.py" --check || failed=1
 
@@ -36,10 +44,51 @@ jq -e '.hooks.UserPromptSubmit[0].hooks[0].command | contains("AGENT_FLEET_HOOK_
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].command==.hooks.SessionStart[0].hooks[0].command' \
   "$HOOK_PLUGIN/hooks/codex-hooks.json" >/dev/null || failed=1
 jq -e 'has("hooks")|not' "$HERDR/.claude-plugin/plugin.json" >/dev/null || failed=1
-jq -e '.hooks=="./session-hooks-plugin/hooks/codex-hooks.json" and (.interface.capabilities|index("Hooks"))!=null' "$HERDR/.codex-plugin/plugin.json" >/dev/null || failed=1
+jq -e '.hooks=="./internal/agent-fleet-session-hooks/hooks/codex-hooks.json" and (.interface.capabilities|index("Hooks"))!=null' "$HERDR/.codex-plugin/plugin.json" >/dev/null || failed=1
 jq -e '.hooks=="./hooks/claude-hooks.json"' "$HOOK_PLUGIN/.claude-plugin/plugin.json" >/dev/null || failed=1
 jq -e '.hooks=="./hooks/codex-hooks.json"' "$HOOK_PLUGIN/.codex-plugin/plugin.json" >/dev/null || failed=1
 test ! -e "$HERDR/view-profiles" || failed=1
+# Codex capabilityと配布物の対応（S-1で共有版へ寄せた際に失った述語を戻す）
+#   正本: 各packageのCodex manifest（interface.capabilities、hooks）と package root直下の scripts/
+#   入力: agent-fleet-core、agent-fleet-herdr、内部sidecar agent-fleet-session-hooks の3 package root
+#   正規化: jqでJSONを読む。capabilitiesは文字列配列、hooksはkeyの有無
+#   合格述語: (1) hooks宣言の有無 = capabilitiesに"Hooks"がある。sidecarは"Hooks"必須
+#             (2) capabilitiesに"Scripts"があれば非空regular fileを持つ scripts/ がある。
+#                 "Scripts"が無く"Skills"も無いpackageに scripts/ が無い
+#   診断: 違反したpackage rootと述語番号
+#   正例: 現状の3 package。反例: sidecarのcapabilitiesを[]にする / herdrのhooksを消す /
+#         "Scripts"を足してscripts/を置かない。境界例: "Skills"を持つpackageのscripts/はtoolとして許す
+#   意味評価: hook commandが艦隊sessionに適切か、capabilityの選択が利用者価値に合うか
+codex_capability_contract() {
+  local root=$1 sidecar=$2 manifest="$1/.codex-plugin/plugin.json"
+  jq -e --argjson sidecar "$sidecar" '
+    ((.interface.capabilities // []) | index("Hooks") != null) as $hooks_cap
+    | (has("hooks")) as $hooks_declared
+    | ($hooks_declared == $hooks_cap) and (($sidecar | not) or $hooks_cap)' "$manifest" >/dev/null \
+    || { echo "capability契約(1) hooks宣言とHooks capabilityが一致しない: $root" >&2; return 1; }
+  if jq -e '(.interface.capabilities // []) | index("Scripts") != null' "$manifest" >/dev/null; then
+    [ -d "$root/scripts" ] && [ ! -L "$root/scripts" ] \
+      && [ -n "$(find "$root/scripts" -type f -size +0 -print -quit)" ] \
+      || { echo "capability契約(2) Scripts capabilityに対応するscripts/が無い: $root" >&2; return 1; }
+  elif [ -d "$root/scripts" ] \
+    && ! jq -e '(.interface.capabilities // []) | index("Skills") != null' "$manifest" >/dev/null; then
+    echo "capability契約(2) scripts/に対応するScripts capabilityが無い: $root" >&2; return 1
+  fi
+}
+codex_capability_contract "$CORE" false || failed=1
+codex_capability_contract "$HERDR" false || failed=1
+codex_capability_contract "$HOOK_PLUGIN" true || failed=1
+CAP_NEG="$TMP_ROOT/capability-negatives"
+mkdir -p "$CAP_NEG"
+mkdir -p "$CAP_NEG/sidecar-no-hooks-cap" && cp -R "$HOOK_PLUGIN/." "$CAP_NEG/sidecar-no-hooks-cap/"
+jq '.interface.capabilities=[]' "$HOOK_PLUGIN/.codex-plugin/plugin.json" > "$CAP_NEG/sidecar-no-hooks-cap/.codex-plugin/plugin.json"
+codex_capability_contract "$CAP_NEG/sidecar-no-hooks-cap" true 2>/dev/null && failed=1
+mkdir -p "$CAP_NEG/herdr-no-hooks/.codex-plugin"
+jq 'del(.hooks)' "$HERDR/.codex-plugin/plugin.json" > "$CAP_NEG/herdr-no-hooks/.codex-plugin/plugin.json"
+codex_capability_contract "$CAP_NEG/herdr-no-hooks" false 2>/dev/null && failed=1
+mkdir -p "$CAP_NEG/core-scripts-cap/.codex-plugin"
+jq '.interface.capabilities+=["Scripts"]' "$CORE/.codex-plugin/plugin.json" > "$CAP_NEG/core-scripts-cap/.codex-plugin/plugin.json"
+codex_capability_contract "$CAP_NEG/core-scripts-cap" false 2>/dev/null && failed=1
 if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
   failed=1
 fi
@@ -235,8 +284,8 @@ bash -n "$HERDR/adapter/scripts/fleet-controller" || failed=1
 bash -n "$HERDR/adapter/scripts/fleet-runtime" || failed=1
 test -x "$HERDR/adapter/scripts/fleet-controller" || failed=1
 test -x "$HERDR/adapter/scripts/fleet-runtime" || failed=1
-rg -n '^name: control-agent-fleet$' "$CORE/skills/control-agent-fleet/SKILL.md" >/dev/null || failed=1
-rg -n '^name: provision-herdr-fleet$' "$HERDR/skills/provision-herdr-fleet/SKILL.md" >/dev/null || failed=1
+[ "$(skill_frontmatter_name "$CORE/skills/control-agent-fleet/SKILL.md")" = "control-agent-fleet" ] || failed=1
+[ "$(skill_frontmatter_name "$HERDR/skills/provision-herdr-fleet/SKILL.md")" = "provision-herdr-fleet" ] || failed=1
 
 if [ "$failed" -eq 0 ]; then
   echo 'Validation: passed (unit tests + dry-run integration)'

@@ -5,14 +5,16 @@
   "author": {
     "name": "NaoyaNakamori"
   },
-  "skills": "./skills/",
+  "skills": [
+    "./skills/provision-herdr-fleet"
+  ],
   "metadata": {
     "harness": {
-      "installationSurface": "runtime-adapter",
+      "marketplace": "agent-fleet",
+      "contractVersion": 1,
       "internalPlugins": {
-        "agent-fleet-session-hooks": "./session-hooks-plugin"
-      },
-      "contractVersion": 1
+        "agent-fleet-session-hooks": "./internal/agent-fleet-session-hooks"
+      }
     }
   }
 }

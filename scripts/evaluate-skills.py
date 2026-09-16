@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run a skill against conversational fixtures and require evidence from a separate judge."""
+"""Record model responses and evidence-backed independent assessments.
+
+Exit zero means every requested record was written.  Criterion assessments are
+semantic evidence for a human or agent to review and never determine CLI success.
+"""
 import argparse
 import datetime
 import hashlib
@@ -14,13 +18,17 @@ def invoke(command, request):
     if result.returncode:
         raise ValueError('adapter failed: ' + result.stderr[-2000:])
     response = json.loads(result.stdout)
+    if not isinstance(response, dict):
+        raise ValueError('adapter response must be a JSON object')
     if response.get('model') != request['model']:
         raise ValueError('adapter model identity mismatch')
     return response
 
 
 def main():
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(
+        description='Record generation and independent assessment evidence; semantic verdicts do not determine exit status.'
+    )
     p.add_argument('--fixtures', required=True)
     p.add_argument('--model-command', required=True, help='JSON argv; reads request JSON on stdin')
     p.add_argument('--judge-command', required=True, help='independent judge JSON argv')
@@ -67,19 +75,42 @@ def main():
                 elif normalized.startswith("```\n") and normalized.endswith("```"):
                     normalized = normalized[4:-3].strip()
                 verdict = json.loads(normalized)
-            criteria = verdict['criteria']
-            if sorted(x['id'] for x in criteria) != sorted(x['id'] for x in case['criteria']):
+            if not isinstance(verdict, dict):
+                raise ValueError('judge output must be a JSON object')
+            criteria = verdict.get('criteria')
+            if not isinstance(criteria, list) or not all(isinstance(x, dict) for x in criteria):
+                raise ValueError('judge criteria must be an array of objects')
+            expected_ids = [x['id'] for x in case['criteria']]
+            actual_ids = [x.get('id') for x in criteria]
+            if (
+                not all(isinstance(value, str) and value for value in actual_ids)
+                or len(actual_ids) != len(set(actual_ids))
+                or sorted(actual_ids) != sorted(expected_ids)
+            ):
                 raise ValueError('judge omitted or duplicated criteria')
             for item in criteria:
-                if type(item['pass']) is not bool or not item.get('reason') or not item.get('quote') or item['quote'] not in output:
+                reason = item.get('reason')
+                quote = item.get('quote')
+                if (
+                    type(item.get('pass')) is not bool
+                    or not isinstance(reason, str)
+                    or not reason.strip()
+                    or not isinstance(quote, str)
+                    or not quote
+                    or quote not in output
+                ):
                     raise ValueError('judge evidence invalid or not present in candidate output')
-            record.update(judge_input=judge_request, judgment=judgment, status='passed' if all(x['pass'] for x in criteria) else 'failed')
-        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            record.update(
+                judge_input=judge_request,
+                judgment=judgment,
+                status='recorded',
+            )
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
             record['error'] = str(exc)
         records.append(record)
-        report = {'schema': 1, 'evaluation': 'model-and-independent-judge', 'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'fixture': suite, 'model_command': json.loads(a.model_command), 'judge_command': json.loads(a.judge_command), 'records': records}
+        report = {'schema': 2, 'evaluation': 'model-and-independent-review-record', 'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'fixture': suite, 'model_command': json.loads(a.model_command), 'judge_command': json.loads(a.judge_command), 'records': records}
         Path(a.output).write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
-    return 0 if records and all(r['status'] == 'passed' for r in records) else 1
+    return 0 if records and all(r['status'] == 'recorded' for r in records) else 1
 
 if __name__ == '__main__':
     sys.exit(main())
