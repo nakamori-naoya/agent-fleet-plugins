@@ -2,7 +2,7 @@
 # Scenario: 利用者のYAML設定からCore stateとHerdr pane配置計画を再現できる。
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# 保守toolの正本は兄弟checkoutの harness-tools。無ければ止まる（fixtureで代用しない）。
+# 保守toolの実装元は兄弟checkoutの harness-tools。無ければ止まる（fixtureで代用しない）。
 TOOLS="$ROOT/../harness-tools/tools"
 [ -d "$TOOLS" ] || { echo "[error] 兄弟 checkout harness-tools が無い: $TOOLS" >&2; exit 2; }
 CORE="$ROOT/plugins/agent-fleet-core"
@@ -50,7 +50,7 @@ jq -e '.hooks=="./hooks/claude-hooks.json"' "$HOOK_PLUGIN/.claude-plugin/plugin.
 jq -e '.hooks=="./hooks/codex-hooks.json"' "$HOOK_PLUGIN/.codex-plugin/plugin.json" >/dev/null || failed=1
 test ! -e "$HERDR/view-profiles" || failed=1
 # Codex capabilityと配布物の対応（S-1で共有版へ寄せた際に失った述語を戻す）
-#   正本: 各packageのCodex manifest（interface.capabilities、hooks）と package root直下の scripts/
+#   基準資料: 各packageのCodex manifest（interface.capabilities、hooks）と package root直下の scripts/
 #   入力: agent-fleet-core、agent-fleet-herdr、内部sidecar agent-fleet-session-hooks の3 package root
 #   正規化: jqでJSONを読む。capabilitiesは文字列配列、hooksはkeyの有無
 #   合格述語: (1) hooks宣言の有無 = capabilitiesに"Hooks"がある。sidecarは"Hooks"必須

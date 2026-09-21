@@ -26,7 +26,7 @@ AI製品、アカウントを選ぶcommand、モデル、思考量はRoleでは�
 
 `start --execute`はworkspaceを作る前に、Core、Herdr、Hook、起動command、モデル設定、Claude認証、Codex plugin登録を検査する。検査済みの実行物は内容hash付きでstateへ固定し、起動中にinstall元が変わっても自動で切り替えない。
 
-Fleet YAMLの`metadata.id`は再利用可能なdefinition IDである。起動ごとに別のrun IDを発行し、`state/runs/<run-id>/`へmanifest、Core DB、Herdr DB、設定snapshot、実行物snapshotを閉じ込める。`state/registry.sqlite3`はrunを検索するための再構築可能な索引であり、実行状態の正本ではない。この境界により同じ定義を同時に複数起動しても、task、command、hook context、workspaceは交差しない。
+Fleet YAMLの`metadata.id`は再利用可能なdefinition IDである。起動ごとに別のrun IDを発行し、`state/runs/<run-id>/`へmanifest、Core DB、Herdr DB、設定snapshot、実行物snapshotを閉じ込める。`state/registry.sqlite3`はrunを検索するための再構築可能な索引であり、実行状態の一次データではない。この境界により同じ定義を同時に複数起動しても、task、command、hook context、workspaceは交差しない。
 
 workspace作成後はHerdrからlayoutを読み直し、次を検査する。
 

@@ -13,7 +13,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      # 自 repository を <workspace>/<自分の名前> に、保守toolの正本 harness-tools と依存 provider を <workspace>/<repo名> に兄弟 checkout する。
+      # 自 repository を <workspace>/<自分の名前> に、保守toolの実装元 harness-tools と依存 provider を <workspace>/<repo名> に兄弟 checkout する。
       # 兄弟 repository は常に検証済みの main を取得する。PR 由来の ref を依存 checkout へ渡さない。
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

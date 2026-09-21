@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 
-# root 契約の validator は兄弟 checkout の harness-tools が正本（複製を持たない）
+# root 契約の validator は兄弟 checkout の harness-tools が基準資料（複製を持たない）
 MODULE_PATH = Path(__file__).parents[2] / "harness-tools" / "tools" / "validate-plugin-repository.py"
 
 

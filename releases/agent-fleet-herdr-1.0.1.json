@@ -18,7 +18,7 @@
       "evidence": "bash scripts/validate.sh: exit 0（Validation: passed (unit tests + dry-run integration)）"
     },
     "real-distribution": "兄弟checkoutの実配布物（grill / write-doc / product-planning runtime-source）に対して解決した",
-    "runtime-sync": "scripts/sync-runtime.py --check --source <正本>: version 2.5.1、changed 空",
+    "runtime-sync": "scripts/sync-runtime.py --check --source <基準資料>: version 2.5.1、changed 空",
     "post-version-validation": "bash scripts/validate.sh（版更新後）: exit 0（Validation: passed (unit tests + dry-run integration)）"
   },
   "files": [

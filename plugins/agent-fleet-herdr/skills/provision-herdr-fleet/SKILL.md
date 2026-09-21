@@ -5,7 +5,7 @@ description: 検査済みFleet JSONからHerdr 0.8のworkspace、tab、pane、ag
 
 # provision-herdr-fleet
 
-このskillを読み終えたagentは、Fleet YAMLからHerdr上の艦隊をdry-runで計画し、利用者が明示したときだけ起動し、runごとに状態確認・停止・再開・削除ができる。Herdrは実行環境と表示のAdapterであり、Fleetの正本ではない。入力は`agent-fleet-core`が出した検査済みPortable Fleet JSONまたは版付きの指示JSONだけで、Core pluginのfileは探索・相対参照しない。
+このskillを読み終えたagentは、Fleet YAMLからHerdr上の艦隊をdry-runで計画し、利用者が明示したときだけ起動し、runごとに状態確認・停止・再開・削除ができる。Herdrは実行環境と表示のAdapterであり、Fleet状態の一次データではない。入力は`agent-fleet-core`が出した検査済みPortable Fleet JSONまたは版付きの指示JSONだけで、Core pluginのfileは探索・相対参照しない。
 
 ## 入力
 

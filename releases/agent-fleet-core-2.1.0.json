@@ -3,9 +3,9 @@
   "plugin": "agent-fleet-core",
   "version": "2.1.0",
   "created_at": "2026-09-16T05:02:17.967982+00:00",
-  "notes": "対話作法はgrillだけが持ち、呼ぶ側は問いの選定と結果の扱いだけを書く。domain-modelingは正本に無い概念を「正本へ提案する概念」として返す。go-conventionに層ごとのTDD入口 develop-<layer> を追加。pull-requestに resolve-pr-conflicts を分離。system-designはMarkdown単一正本。references 入力を標準化。evalの記録と手動eval手順。",
-  "breaking": "grill の入力 grounding は references へ改名。system-design の JSON 正本は廃止（Markdown が唯一の正本、既存 JSON は legacy fixture として保全）。pull-request の設定 file は 1 入口 1 つ（conflict_report.timing は resolve-pr-conflicts.config.yml へ）。bdd 等の referenced_artifacts は references へ改名。",
-  "migration": "marketplace を update し plugin を再 install する。grill を呼ぶ側は grounding を references へ。system-design の既存 JSON 正本は Markdown 資料として作り直す。pull-request の設定 file を 2 つに分ける。",
+  "notes": "対話作法はgrillだけが持ち、呼ぶ側は問いの選定と結果の扱いだけを書く。domain-modelingは基準資料に無い概念を「基準資料へ提案する概念」として返す。go-conventionに層ごとのTDD入口 develop-<layer> を追加。pull-requestに resolve-pr-conflicts を分離。system-designはMarkdown単一基準資料。references 入力を標準化。evalの記録と手動eval手順。",
+  "breaking": "grill の入力 grounding は references へ改名。system-design の JSON 基準資料は廃止（Markdown が唯一の基準資料、既存 JSON は legacy fixture として保全）。pull-request の設定 file は 1 入口 1 つ（conflict_report.timing は resolve-pr-conflicts.config.yml へ）。bdd 等の referenced_artifacts は references へ改名。",
+  "migration": "marketplace を update し plugin を再 install する。grill を呼ぶ側は grounding を references へ。system-design の既存 JSON 基準資料は Markdown 資料として作り直す。pull-request の設定 file を 2 つに分ける。",
   "checks": {
     "codex": {
       "status": "manifest-and-contract-tests-passed",
