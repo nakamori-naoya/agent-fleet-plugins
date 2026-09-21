@@ -3,7 +3,7 @@
   "plugin": "agent-fleet-core",
   "version": "2.0.0",
   "created_at": "2026-09-16T03:09:03.361639+00:00",
-  "notes": "配置を plugins/<package>/skills/<entry>/ の一形へ統一し、公開 playbook の wrapper・nested manifest・installationSurface を廃止。SKILL.md から設定解決の配管を撤去し tool を入口相対 path の契約で示す。検査 tool への本文は stdin、正解は正本 path から導く。停止条件を「止まる／仮説を明示して進む」の二群へ。grill は 1 回最大 6 問。実案件インサイト（User Journey / 要件発見 / ドメイン発見）と資料規律を反映。",
+  "notes": "配置を plugins/<package>/skills/<entry>/ の一形へ統一し、公開 playbook の wrapper・nested manifest・installationSurface を廃止。SKILL.md から設定解決の配管を撤去し tool を入口相対 path の契約で示す。検査 tool への本文は stdin、正解は基準資料 path から導く。停止条件を「止まる／仮説を明示して進む」の二群へ。grill は 1 回最大 6 問。実案件インサイト（User Journey / 要件発見 / ドメイン発見）と資料規律を反映。",
   "breaking": "install identity（package source path・manifest skills・playbooks/internalPlugins）が変わる。prepare.sh / resolve.sh / ${.} マクロ / 多層設定解決は無い。設定 file は <repo>/.harness-plugins/<entry>.config.yml の一層（agent-work-policy は旧 file 名から改名、personal 設定は読まれない）。旧 playbook 名（domain-bdd-discovery 等）と SKILL 名 work-with-policy は廃止。",
   "migration": "marketplace を update し plugin を再 install する。<repo>/.harness-plugins/ の設定 file 名と schema（instructions block 撤去）を各 SKILL.md の入力契約に合わせる。消費側の playbook 論理名（write-doc / grill / agent-work-policy）は不変。",
   "checks": {

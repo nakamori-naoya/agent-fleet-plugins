@@ -312,7 +312,7 @@ def _consume_activation(
     session_id: str,
     runtime_product: str,
 ) -> Mapping[str, Any]:
-    """信頼済みのCore CLIから正本の役割文脈を一度だけ取得する。"""
+    """信頼済みのCore CLIから一次データである役割文脈を一度だけ取得する。"""
 
     argv = [
         *_trusted_core_command(),
@@ -921,7 +921,7 @@ def handle(
                     db_path, runtime_product, session_id, command_id
                 )
             except (ActivationError, OSError, sqlite3.Error):
-                # Coreの受領確定が正本である。補助的なローカル印の失敗を理由に、
+                # Coreの受領確定が一次データである。補助的なローカル印の失敗を理由に、
                 # すでに受領済みの指示をモデルへ渡さない状態にはしない。
                 pass
         result = rendered
