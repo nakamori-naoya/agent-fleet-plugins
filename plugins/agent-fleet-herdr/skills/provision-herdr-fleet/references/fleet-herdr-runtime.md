@@ -18,6 +18,6 @@ Fleetを起動する場合は`../../adapter/scripts/fleet-runtime plan /absolute
 
 `../../adapter/scripts/fleet-herdr ... dispatch --request-json '<Core outbox JSON>'` は公開CLI/JSON境界でCore requestを受ける。Core pluginのfileをimport・相対参照しない。dry-runが既定で、生成したargvだけをJSON表示する。`--execute` がある場合だけ `shell=False` 相当のargvでHerdr 0.8 CLIを実行する。HookのCore照合が成功すれば、その受領を配送済みとして確定する。受領を確認できないprompt timeoutは`unknown`として自動retryしない。task完了はagentの明示的な `task.report` をCoreへ反映して確定する。
 
-`context.sync`は通常promptとは別扱いである。Hookはprompt中のargvや役割文脈を信頼せず、Coreが発行した一回限りtokenを、環境から解決した信頼済みCore CLIで消費して正本を取得する。通常指示もCoreに保存された指示ID、内容、送信元、宛先、受信sessionを照合し、成功した場合だけ現在の役割文脈とともに処理する。
+`context.sync`は通常promptとは別扱いである。Hookはprompt中のargvや役割文脈を信頼せず、Coreが発行した一回限りtokenを、環境から解決した信頼済みCore CLIで消費して役割文脈の一次データを取得する。通常指示もCoreに保存された指示ID、内容、送信元、宛先、受信sessionを照合し、成功した場合だけ現在の役割文脈とともに処理する。
 
 daemon、multi-host、fleet gateway、独自TUIは対象外である。
