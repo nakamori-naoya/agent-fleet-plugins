@@ -12,7 +12,7 @@ spec:
     - 破壊的操作または外部公開が必要になる。
   members:
     - agent_ref: manager
-      role_ref: manager@1
+      role_ref: manager@2
       runtime:
         product: claude
         command: claude
@@ -20,7 +20,7 @@ spec:
         effort: high
         fallback: fail
     - agent_ref: worker
-      role_ref: worker@1
+      role_ref: worker@2
       runtime:
         product: codex
         command: codex

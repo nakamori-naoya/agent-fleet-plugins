@@ -12,7 +12,7 @@ YAMLでmanager、worker、advisor、reviewerと使用モデルを定義し、Her
 - `agent-roles@agent-roles`
 - `agent-fleet-core@agent-fleet`
 - `agent-fleet-herdr@agent-fleet`
-- `~/.config/agent-roles/catalogs/builtin@1.json`に書き出したRole Catalog
+- `~/.config/agent-roles/catalogs/builtin@2.json`に書き出したRole Catalog
 
 このsource checkoutから操作する場合は、リポジトリ直下の`scripts/fleet-runtime`を使う。以下の例もリポジトリ直下で実行する。
 
@@ -41,7 +41,7 @@ claude plugin install agent-fleet-herdr@agent-fleet
 Role Catalogを既定以外へ置く場合は、絶対パスを環境変数へ指定する。
 
 ```bash
-export AGENT_ROLES_CATALOG="/absolute/path/to/builtin@1.json"
+export AGENT_ROLES_CATALOG="/absolute/path/to/builtin@2.json"
 ```
 
 ## 使用するCLIを準備する
@@ -84,10 +84,10 @@ spec:
     - 追加承認が必要な破壊的変更がある。
   members:
     - agent_ref: manager
-      role_ref: manager@1
+      role_ref: manager@2
       runtime: {product: claude, command: claude, model: "your-claude-model-id", effort: high, fallback: fail}
     - agent_ref: worker
-      role_ref: worker@1
+      role_ref: worker@2
       runtime: {product: codex, command: codex, model: "your-codex-model-id", effort: medium, fallback: fail}
     - agent_ref: advisor
       role_ref: advisor@1
@@ -106,7 +106,7 @@ spec:
     reporting: {strategy: manager, include_task_updates: true}
 ```
 
-Roleの内容はFleetへ複製しない。`role_ref`は共通Role Catalogの`manager@1`、`worker@1`、`advisor@1`、`reviewer@1`を参照する。
+Roleの内容はFleetへ複製しない。`role_ref`は共通Role Catalogの`manager@2`、`worker@2`、`advisor@1`、`reviewer@1`を参照する。
 
 `your-claude-model-id`と`your-codex-model-id`は例示用のプレースホルダーである。利用するCLIで有効なモデルIDへ置き換える。
 
@@ -189,7 +189,7 @@ ViewProfileを変更したら、起動前にもう一度`plan`を実行する。
 
 ### Role Catalogが見つからない
 
-`agent-roles`から`builtin@1.json`を書き出すか、`AGENT_ROLES_CATALOG`へ絶対パスを指定する。
+`agent-roles`から`builtin@2.json`を書き出すか、`AGENT_ROLES_CATALOG`へ絶対パスを指定する。
 
 ### Fleet file path must be absoluteと表示される
 

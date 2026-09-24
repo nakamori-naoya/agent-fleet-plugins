@@ -4,7 +4,7 @@
 
 ## 利用者向けの統合入口
 
-Fleetを起動する場合は`../../adapter/scripts/fleet-runtime plan /absolute/path/to/fleet.yml`と`../../adapter/scripts/fleet-runtime start /absolute/path/to/fleet.yml --execute`を使う。Fleetファイルは任意のdirectoryに置ける。各memberの起動コマンドとモデルはFleetに置く。`spec.view_profile`を記載する場合はViewProfileの絶対pathを使い、相対path、`~`、環境変数による省略は使わない。省略するとplugin既定ViewProfileを使う。役割定義は`agent-roles`が書き出した検査済みCatalogを`--role-catalog`または`AGENT_ROLES_CATALOG`で明示し、既定の`~/.config/agent-roles/catalogs/builtin@1.json`が存在すればそれを使う。
+Fleetを起動する場合は`../../adapter/scripts/fleet-runtime plan /absolute/path/to/fleet.yml`と`../../adapter/scripts/fleet-runtime start /absolute/path/to/fleet.yml --execute`を使う。Fleetファイルは任意のdirectoryに置ける。各memberの起動コマンドとモデルはFleetに置く。`spec.view_profile`を記載する場合はViewProfileの絶対pathを使い、相対path、`~`、環境変数による省略は使わない。省略するとplugin既定ViewProfileを使う。役割定義は`agent-roles`が書き出した検査済みCatalogを`--role-catalog`または`AGENT_ROLES_CATALOG`で明示し、既定の`~/.config/agent-roles/catalogs/builtin@2.json`が存在すればそれを使う。
 
 `plan <absolute-fleet-path>`は艦隊、表示、起動コマンド、内容要約値、pane計画を返し、DBもdirectoryも作らない。`start <absolute-fleet-path> --execute`は新しいrunとしてCore、Herdr、役割文脈、初期タスクを準備し、paneを持たない配送制御をforegroundで続ける。`status <run-id>`はCoreとHerdrの公開CLIを通して対象runの状態を結合する。
 

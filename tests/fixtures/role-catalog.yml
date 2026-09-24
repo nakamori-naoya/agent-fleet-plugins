@@ -34,7 +34,7 @@ spec:
       receives: [assignment]
       sends: [advice]
     - id: manager
-      version: 1
+      version: 2
       produces: decision
       mission: 目的と完了条件を保持して最終判断を行う
       responsibilities: [担当を決める, 成果を受容する]
@@ -43,7 +43,7 @@ spec:
       receives: [work_result, advice]
       sends: [assignment]
     - id: worker
-      version: 1
+      version: 2
       produces: artifact
       mission: 割り当てられた成果物を作る
       responsibilities: [成果と検証結果を報告する]
