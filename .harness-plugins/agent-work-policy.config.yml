@@ -27,5 +27,9 @@ merge:
   delete_worktree: false
   readiness:
     min_approvals: 0
-    require_checks_passed: true
     require_no_unresolved_threads: true
+    required_checks:
+      - {name: validate (ubuntu-latest), app: github-actions}
+      - {name: validate (macos-latest), app: github-actions}
+      - {name: gitleaks, app: github-actions}
+      - {name: trufflehog, app: github-actions}
