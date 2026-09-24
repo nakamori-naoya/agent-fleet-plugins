@@ -1845,7 +1845,7 @@ def _default_role_catalog() -> Path | None:
     configured = os.environ.get("AGENT_ROLES_CATALOG")
     if configured:
         return Path(configured)
-    default = Path.home() / ".config/agent-roles/catalogs/builtin@1.json"
+    default = Path.home() / ".config/agent-roles/catalogs/builtin@2.json"
     return default if default.is_file() else None
 
 
@@ -1931,7 +1931,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.action in {"list", "plan", "start"} and args.role_catalog is None:
             raise FleetRuntimeError(
-                "Role Catalog is required: install/export agent-roles builtin@1, "
+                "Role Catalog is required: install/export agent-roles builtin@2, "
                 "pass --role-catalog, or set AGENT_ROLES_CATALOG"
             )
         runtime = FleetRuntime(
