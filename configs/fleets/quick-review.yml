@@ -46,9 +46,8 @@ spec:
         - 実際の操作経路が確認されている。
     - id: review
       assignee: reviewer
-      depends_on:
-        - implement-and-verify
-      instructions: 実装と検証証拠を独立に確認し、回帰や未達を指摘する。
+      depends_on: []
+      instructions: implement-and-verify の報告の後、マネージャーが受け入れる前に割り当てる。実装と検証証拠を独立に確認し、回帰や未達を指摘する。
       expected_output: 受入可否と重要度付き指摘。
       completion_criteria:
         - 要求との対応関係が確認されている。

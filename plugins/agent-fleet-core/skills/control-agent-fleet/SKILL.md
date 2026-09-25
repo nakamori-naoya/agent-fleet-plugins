@@ -19,6 +19,7 @@ description: YAML Fleet Specを検査し、論理エージェント、タスク�
 |---|---|
 | provisionできるか | `validate_fleet.py`が終了code 0でnormalized JSONを返したときだけ。未知field、重複member／task、参照切れ、task依存cycle、Catalogに無い`role_ref`、managerの権限不足はどれも修正が先 |
 | task.assignできるか | 全`depends_on`が`accepted`のときだけ。未受理があればCoreがIDと状態を示して拒否する |
+| reviewや検証のtaskの依存 | 対象のtaskを`depends_on`に入れない。`depends_on`は対象の受理を求めるが、受理はreviewの後に来るからである。managerが対象の`reported`を見てから割り当てる |
 | 完了の判定 | 成果物をmanagerの受理待ちへ渡すstatusは`reported`。managerが根拠を確認した後だけ`task.accept`で`accepted`。paneの出力、待機表示、完了表示は完了の証拠にならない |
 | 状態の読み取り口 | managerは`task.list`の結果を一次データとする。SQLiteの直接参照や外部JSON加工commandは使わない |
 | 配送の確定 | Hookが指示内容・宛先・受信sessionをCoreと照合した時点で配送済み。入力送信の時間切れで配送状態が不明な指示は自動再送しない |
