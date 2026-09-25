@@ -71,19 +71,16 @@ spec:
         - 無関係な変更を含まない。
     - id: verification
       assignee: worker-verification
-      depends_on:
-        - implementation
-      instructions: 利用者の操作経路で結合検証し、失敗条件と待ち時間を確認する。
+      depends_on: []
+      instructions: implementation の報告の後、マネージャーが受け入れる前に割り当てる。利用者の操作経路で結合検証し、失敗条件と待ち時間を確認する。
       expected_output: 再現可能な検証手順と観測結果。
       completion_criteria:
         - 正常系と主要な異常系が検証されている。
         - 待ち時間と再試行の観測値が示されている。
     - id: independent-review
       assignee: reviewer
-      depends_on:
-        - implementation
-        - verification
-      instructions: 要求、設計、差分、検証証拠を独立に反証する。
+      depends_on: []
+      instructions: implementation と verification の報告の後、マネージャーが受け入れる前に割り当てる。要求、設計、差分、検証証拠を独立に反証する。
       expected_output: 重要度付き指摘と、受入可否の判断材料。
       completion_criteria:
         - 重大な見落としと回帰可能性が確認されている。

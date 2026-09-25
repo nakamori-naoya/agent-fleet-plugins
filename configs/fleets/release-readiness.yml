@@ -45,15 +45,15 @@ spec:
         - 宣言したリリース前の検査のすべてに、結果が記録されている。
     - id: review-evidence
       assignee: reviewer-1
-      depends_on:
-        - verify-candidate
-      instructions: 検査の証拠を作業経緯から独立に反証し、残るリリースのリスクを示す。
+      depends_on: []
+      instructions: verify-candidate の報告の後、マネージャーが受け入れる前に割り当てる。検査の証拠を作業経緯から独立に反証し、残るリリースのリスクを示す。
       expected_output: 証拠の欠けとリリースのリスクを、再現手順とともに示したレビュー結果。
       completion_criteria:
         - 主張された検査結果のそれぞれが、確認済みか未検証かに分けられている。
     - id: decide-readiness
       assignee: manager-1
       depends_on:
+        - verify-candidate
         - review-evidence
       instructions: 検査とレビューの証拠を確かめ、リリースできるかを判断する。
       expected_output: 判断と、その根拠の証拠、残るリスク。
