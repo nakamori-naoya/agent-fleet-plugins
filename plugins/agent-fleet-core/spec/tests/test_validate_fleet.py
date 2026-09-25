@@ -376,8 +376,7 @@ class FleetValidatorTest(unittest.TestCase):
         self.assertEqual(
             [
                 "spec.tasks: dependency cycle "
-                "decide-readiness -> review-evidence -> verify-candidate -> "
-                "decide-readiness"
+                "decide-readiness -> verify-candidate -> decide-readiness"
             ],
             cycles,
         )
