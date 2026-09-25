@@ -3,13 +3,13 @@ kind: Fleet
 metadata:
   id: release-readiness
 spec:
-  objective: Determine whether the release candidate is ready to ship.
+  objective: リリース候補を出荷できるかを判断する。
   completion_criteria:
-    - Every declared task has evidence accepted by the manager.
-    - The manager records the final release-readiness decision.
+    - 宣言したすべてのタスクに、マネージャーが受け入れた証拠がある。
+    - マネージャーが、リリースできるかの最終判断を記録している。
   stop_conditions:
-    - Delivery of an irreversible instruction becomes unknown.
-    - A required independent review cannot be completed.
+    - 取り消せない指示が届いたかどうか分からなくなった。
+    - 必要な独立レビューを完了できない。
   members:
     - agent_ref: manager-1
       role_ref: manager@2
@@ -27,36 +27,38 @@ spec:
         model: your-codex-model-id
         effort: medium
         fallback: fail
-    - agent_ref: worker-2
-      role_ref: worker@2
+    - agent_ref: reviewer-1
+      role_ref: reviewer@1
       runtime:
-        product: codex
-        command: codex
-        model: your-codex-model-id
-        effort: medium
+        product: claude
+        command: claude
+        model: your-claude-model-id
+        effort: high
         fallback: fail
   tasks:
     - id: verify-candidate
       assignee: worker-1
       depends_on: []
-      instructions: Run the release checks and record failures with reproduction steps.
-      expected_output: Release check results with reproduction evidence for every failure.
+      instructions: リリース前の検査を実行し、失敗したものを再現手順とともに記録する。
+      expected_output: 検査結果と、失敗ごとの再現の証拠。
       completion_criteria:
-        - All declared release checks have a recorded outcome.
+        - 宣言したリリース前の検査のすべてに、結果が記録されている。
     - id: review-evidence
-      assignee: worker-2
-      depends_on: [verify-candidate]
-      instructions: Review the verification evidence and identify remaining release risks.
-      expected_output: An independent review of evidence gaps and release risks.
+      assignee: reviewer-1
+      depends_on:
+        - verify-candidate
+      instructions: 検査の証拠を作業経緯から独立に反証し、残るリリースのリスクを示す。
+      expected_output: 証拠の欠けとリリースのリスクを、再現手順とともに示したレビュー結果。
       completion_criteria:
-        - Every claimed check result is confirmed or marked unverified.
+        - 主張された検査結果のそれぞれが、確認済みか未検証かに分けられている。
     - id: decide-readiness
       assignee: manager-1
-      depends_on: [review-evidence]
-      instructions: Review the evidence and issue the release-readiness decision.
-      expected_output: A release-readiness decision with its evidence and remaining risks.
+      depends_on:
+        - review-evidence
+      instructions: 検査とレビューの証拠を確かめ、リリースできるかを判断する。
+      expected_output: 判断と、その根拠の証拠、残るリスク。
       completion_criteria:
-        - The decision references the accepted verification and review evidence.
+        - 判断が、受け入れた検査の証拠とレビューの証拠を参照している。
   collaboration:
     manager: manager-1
     reporting:
