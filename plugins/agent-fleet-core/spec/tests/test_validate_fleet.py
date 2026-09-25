@@ -398,7 +398,7 @@ class FleetValidatorTest(unittest.TestCase):
         def use_catalog_owned_names(doc):
             doc["spec"]["members"][0]["role_ref"] = "coordinator@1"
             doc["spec"]["members"][2]["role_ref"] = "consultant@1"
-            doc["spec"]["collaboration"]["advisor"] = "worker-2"
+            doc["spec"]["collaboration"]["advisor"] = doc["spec"]["members"][2]["agent_ref"]
 
         self.assertEqual([], self.errors_for(use_catalog_owned_names))
 
