@@ -9,7 +9,7 @@
       "name": "agent-fleet-core",
       "source": "./plugins/agent-fleet-core",
       "description": "Fleet Spec、logical agent、task、command、eventを管理する",
-      "version": "2.1.0"
+      "version": "3.0.0"
     },
     {
       "name": "agent-fleet-herdr",

@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "plugin": "agent-fleet-core",
+  "version": "3.0.0",
+  "created_at": "2026-09-25T07:40:14.247384+00:00",
+  "notes": "Fleet YAML の spec.view_profile を絶対 path だけ受け付けるようにした（相対 path、~、環境変数による省略は検査が拒む）。control-agent-fleet の入力と状態の読み取り口の記述を具体的な用語にし、release-readiness の例のレビューを reviewer に担わせた。",
+  "breaking": "spec.view_profile に相対 path、~、環境変数を書いた Fleet YAML は検査で拒否される。",
+  "migration": "marketplace を update し plugin を再 install する。Fleet YAML の spec.view_profile を絶対 path に書き換える。",
+  "checks": {
+    "codex": {
+      "status": "manifest-and-contract-tests-passed",
+      "native-client-installation": "not-executed（merge 後に install-plugins.sh で導入）",
+      "evidence": "bash scripts/validate.sh: exit 0 (Validation: passed)"
+    },
+    "claude": {
+      "status": "manifest-and-contract-tests-passed",
+      "native-client-installation": "not-executed（merge 後に install-plugins.sh で導入）",
+      "evidence": "bash scripts/validate.sh: exit 0 (Validation: passed)"
+    },
+    "root-validation": "root scripts/validate.sh agent-fleet-plugins: Root validation: passed"
+  },
+  "files": [
+    ".agents/plugins/marketplace.json",
+    "plugins/agent-fleet-core/.codex-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+    "plugins/agent-fleet-core/.claude-plugin/plugin.json"
+  ]
+}
