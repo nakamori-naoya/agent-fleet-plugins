@@ -8,7 +8,6 @@ __pycache__/
 !/SECURITY.md
 !/.agents/
 !/.claude-plugin/
-!/.harness-plugins/
 !/.github/
 !/configs/
 !/configs/**
