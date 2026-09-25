@@ -34,5 +34,4 @@ __pycache__/
 **/*.pfx
 **/id_rsa
 **/id_ed25519
-!/evals/
 !/releases/
