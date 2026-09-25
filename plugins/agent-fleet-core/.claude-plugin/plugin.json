@@ -10,8 +10,7 @@
   ],
   "metadata": {
     "harness": {
-      "marketplace": "agent-fleet",
-      "contractVersion": 1
+      "marketplace": "agent-fleet"
     }
   }
 }

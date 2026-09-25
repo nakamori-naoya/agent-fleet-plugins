@@ -11,7 +11,6 @@
   "metadata": {
     "harness": {
       "marketplace": "agent-fleet",
-      "contractVersion": 1,
       "internalPlugins": {
         "agent-fleet-session-hooks": "./internal/agent-fleet-session-hooks"
       }
