@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Scenario: 利用者のYAML設定からCore stateとHerdr pane配置計画を再現できる。
+# 配置と manifest は harness-tools の validate-plugin-repository.py が判定する。ここで足すのは hook と capability の対応、設定、単体検査、dry-run の結合である。
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # 保守toolの実装元は兄弟checkoutの harness-tools。無ければ止まる（fixtureで代用しない）。
@@ -13,27 +14,10 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agent-fleet-validation.XXXXXX") || exit 2
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P) || exit 2
 trap 'rm -rf "$TMP_ROOT"' EXIT
 failed=0
-skill_frontmatter_name() {
-  awk 'NR==1 { if ($0 != "---") exit 2; next } $0=="---" { found=1; exit } { print } END { if (!found) exit 2 }' "$1" \
-    | yq -er '.name | select(tag == "!!str" and length > 0)' -
-}
-printf '%s\n' '---' "name: 'fixture-skill' # comment" '---' 'name: body-only' > "$TMP_ROOT/frontmatter-valid.md"
-printf '%s\n' '---' 'description: no name' '---' 'name: body-only' > "$TMP_ROOT/frontmatter-invalid.md"
-[ "$(skill_frontmatter_name "$TMP_ROOT/frontmatter-valid.md")" = "fixture-skill" ] \
-  && ! skill_frontmatter_name "$TMP_ROOT/frontmatter-invalid.md" >/dev/null 2>&1 || failed=1
 python3 "$TOOLS/test-hardening.py" --repository "$ROOT" || failed=1
 python3 "$TOOLS/validate-plugin-repository.py" "$ROOT" || failed=1
 python3 "$TOOLS/validate-plugin-repository.py" --self-test || failed=1
 
-for manifest in "$CORE/.codex-plugin/plugin.json" "$CORE/.claude-plugin/plugin.json"; do
-  jq -e '(.version|test("^[0-9]+[.][0-9]+[.][0-9]+")) and .name=="agent-fleet-core"' "$manifest" >/dev/null || failed=1
-done
-for manifest in "$HERDR/.codex-plugin/plugin.json" "$HERDR/.claude-plugin/plugin.json"; do
-  jq -e '(.version|test("^[0-9]+[.][0-9]+[.][0-9]+")) and .name=="agent-fleet-herdr"' "$manifest" >/dev/null || failed=1
-done
-for manifest in "$HOOK_PLUGIN/.codex-plugin/plugin.json" "$HOOK_PLUGIN/.claude-plugin/plugin.json"; do
-  jq -e '(.version|test("^[0-9]+[.][0-9]+[.][0-9]+")) and .name=="agent-fleet-session-hooks"' "$manifest" >/dev/null || failed=1
-done
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact|fork" and .hooks.SessionStart[0].hooks[0].timeout==12' \
   "$HOOK_PLUGIN/hooks/claude-hooks.json" >/dev/null || failed=1
 jq -e '.hooks.UserPromptSubmit[0].hooks[0].type=="command" and .hooks.UserPromptSubmit[0].hooks[0].timeout==12 and .hooks.SessionStart[0].matcher=="startup|resume|clear|compact" and .hooks.SessionStart[0].hooks[0].timeout==12' \
@@ -46,9 +30,6 @@ jq -e '.hooks.UserPromptSubmit[0].hooks[0].command==.hooks.SessionStart[0].hooks
   "$HOOK_PLUGIN/hooks/codex-hooks.json" >/dev/null || failed=1
 jq -e 'has("hooks")|not' "$HERDR/.claude-plugin/plugin.json" >/dev/null || failed=1
 jq -e '.hooks=="./internal/agent-fleet-session-hooks/hooks/codex-hooks.json" and (.interface.capabilities|index("Hooks"))!=null' "$HERDR/.codex-plugin/plugin.json" >/dev/null || failed=1
-jq -e '.hooks=="./hooks/claude-hooks.json"' "$HOOK_PLUGIN/.claude-plugin/plugin.json" >/dev/null || failed=1
-jq -e '.hooks=="./hooks/codex-hooks.json"' "$HOOK_PLUGIN/.codex-plugin/plugin.json" >/dev/null || failed=1
-test ! -e "$HERDR/view-profiles" || failed=1
 # Codex capabilityと配布物の対応（S-1で共有版へ寄せた際に失った述語を戻す）
 #   基準資料: 各packageのCodex manifest（interface.capabilities、hooks）と package root直下の scripts/
 #   入力: agent-fleet-core、agent-fleet-herdr、内部sidecar agent-fleet-session-hooks の3 package root
@@ -90,11 +71,6 @@ codex_capability_contract "$CAP_NEG/herdr-no-hooks" false 2>/dev/null && failed=
 mkdir -p "$CAP_NEG/core-scripts-cap/.codex-plugin"
 jq '.interface.capabilities+=["Scripts"]' "$CORE/.codex-plugin/plugin.json" > "$CAP_NEG/core-scripts-cap/.codex-plugin/plugin.json"
 codex_capability_contract "$CAP_NEG/core-scripts-cap" false 2>/dev/null && failed=1
-if rg -n 'builtin_profiles|builtin/command-deck|manager_ratio' "$HERDR" >/dev/null; then
-  failed=1
-fi
-jq -e '.name=="agent-fleet" and (.plugins|length==2) and ([.plugins[].name]|sort)==["agent-fleet-core","agent-fleet-herdr"]' \
-  "$ROOT/.agents/plugins/marketplace.json" "$ROOT/.claude-plugin/marketplace.json" >/dev/null || failed=1
 
 for config in "$CORE/config/defaults.yml" "$CORE/spec/config/defaults.yml" "$HERDR/config/defaults.yml" \
   "$HERDR/adapter/schema/view-profile.schema.yml" \
@@ -285,8 +261,6 @@ bash -n "$HERDR/adapter/scripts/fleet-controller" || failed=1
 bash -n "$HERDR/adapter/scripts/fleet-runtime" || failed=1
 test -x "$HERDR/adapter/scripts/fleet-controller" || failed=1
 test -x "$HERDR/adapter/scripts/fleet-runtime" || failed=1
-[ "$(skill_frontmatter_name "$CORE/skills/control-agent-fleet/SKILL.md")" = "control-agent-fleet" ] || failed=1
-[ "$(skill_frontmatter_name "$HERDR/skills/provision-herdr-fleet/SKILL.md")" = "provision-herdr-fleet" ] || failed=1
 
 if [ "$failed" -eq 0 ]; then
   echo 'Validation: passed (unit tests + dry-run integration)'
